@@ -11,6 +11,7 @@ router.use(authMiddleware)
 
 const updateProfileSchema = z.object({
   nombre: z.string().min(2).optional(),
+  correo: z.string().email().optional(),
   ingresoBase: z.number().min(0).optional(),
   frecuenciaIngreso: z.enum(['mensual', 'quincenal']).optional(),
   onboardingDone: z.boolean().optional(),
