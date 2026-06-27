@@ -1,153 +1,131 @@
-# 🧾 Backend Factonet
+# 🌱 Kiri Finance — Backend API
 
-![NestJS](https://img.shields.io/badge/NestJS-E0234E?style=for-the-badge&logo=nestjs&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=for-the-badge&logo=typescript&logoColor=white)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white)
-![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+Backend REST para la app de finanzas personales Kiri Finance.
 
-## 📋 Descripción
+## Stack
 
-Backend Factonet es una API REST desarrollada con **NestJS** y **TypeScript** para la gestión completa de facturación. El sistema está integrado con el ecosistema Cyclonet y se conecta con Backend_Authoriza para la autenticación.
+- **Runtime:** Node.js + TypeScript
+- **Framework:** Express.js
+- **ORM:** Prisma
+- **Base de datos:** PostgreSQL
+- **Auth:** JWT (access + refresh tokens)
+- **Validación:** Zod
+- **Seguridad:** Helmet, CORS, Rate Limiting
 
-## ✨ Características principales
+## Configuración rápida
 
-- 🔐 **Autenticación JWT** integrada con Backend_Authoriza
-- 👥 **Gestión de clientes** completa
-- 📦 **Catálogo de productos** con control de inventario
-- 🧾 **Facturación electrónica** con numeración automática
-- 📊 **Cálculo automático** de impuestos y totales
-- 🗄️ **Base de datos PostgreSQL** con esquema `billing`
-- ☁️ **Integración Cloudinary** para documentos
-- 📖 **Documentación automática** con Swagger
-
-## 🛠 Tecnologías utilizadas
-
-| Tecnología | Descripción |
-|------------|------------|
-| **NestJS** | Framework backend Node.js con TypeScript |
-| **TypeScript** | Lenguaje con tipado fuerte |
-| **PostgreSQL** | Base de datos relacional |
-| **TypeORM** | ORM para TypeScript |
-| **JWT** | Autenticación con tokens |
-| **Docker** | Contenedores para desarrollo |
-| **Cloudinary** | Almacenamiento de archivos |
-
-## 🚀 Instalación y configuración
-
-### Requisitos previos
-- Node.js (v16+)
-- Docker y Docker Compose
-- Backend_Authoriza ejecutándose en puerto 3000
-
-### 1. Instalar dependencias
 ```bash
+# 1. Instalar dependencias
 npm install
+
+# 2. Copiar variables de entorno
+cp .env.example .env
+# Editar .env con tus credenciales de PostgreSQL
+
+# 3. Generar cliente Prisma
+npm run prisma:generate
+
+# 4. Ejecutar migraciones
+npm run prisma:migrate
+
+# 5. (Opcional) Sembrar datos de prueba
+npm run prisma:seed
+
+# 6. Iniciar en modo desarrollo
+npm run dev
 ```
 
-### 2. Configurar variables de entorno
-Editar el archivo `.env` con tus configuraciones:
-```env
-# Database
-DB_HOST=localhost
-DB_PORT=5434
-DB_USERNAME=postgres
-DB_PASSWORD=123456
-DB_NAME=FactonetDB
+## Endpoints API
 
-# Application
-PORT=3002
+### Auth
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | `/api/auth/register` | Crear cuenta |
+| POST | `/api/auth/login` | Iniciar sesión |
+| POST | `/api/auth/refresh` | Renovar token |
+| POST | `/api/auth/logout` | Cerrar sesión |
+| GET | `/api/auth/me` | Perfil del usuario autenticado |
 
-# Auth Service
-AUTH_SERVICE_URL=http://localhost:3000
+### Usuario
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| PATCH | `/api/users/profile` | Actualizar perfil financiero |
+| GET | `/api/users/dashboard-summary` | Datos completos del dashboard |
 
-# Cloudinary
-CLOUDINARY_CLOUD_NAME=your_cloud_name
-CLOUDINARY_API_KEY=your_api_key
-CLOUDINARY_API_SECRET=your_api_secret
-```
+### Deudas
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/debts` | Listar deudas activas |
+| POST | `/api/debts` | Crear deuda |
+| PATCH | `/api/debts/:id` | Actualizar deuda |
+| POST | `/api/debts/:id/pay` | Registrar pago |
+| DELETE | `/api/debts/:id` | Eliminar deuda |
 
-### 3. Iniciar base de datos
-```bash
-docker-compose up -d
-```
+### Gastos Fijos
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/fixed-expenses` | Listar gastos fijos |
+| POST | `/api/fixed-expenses` | Crear gasto fijo |
+| PATCH | `/api/fixed-expenses/:id` | Actualizar |
+| DELETE | `/api/fixed-expenses/:id` | Eliminar |
 
-### 4. Crear esquema de base de datos
-```bash
-docker exec -it factonetdb psql -U postgres -d FactonetDB
-CREATE SCHEMA billing;
-```
+### Ahorro
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/savings` | Historial + total acumulado |
+| POST | `/api/savings` | Registrar ahorro del periodo |
 
-### 5. Ejecutar la aplicación
-```bash
-# Desarrollo
-npm run start:dev
+### Ingresos Extra
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/extra-incomes` | Listar ingresos extra |
+| POST | `/api/extra-incomes` | Crear ingreso extra |
+| PATCH | `/api/extra-incomes/:id` | Actualizar |
+| DELETE | `/api/extra-incomes/:id` | Eliminar |
 
-# Producción
-npm run build
-npm run start:prod
-```
+### Gastos Hormiga
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/impulse-expenses` | Listar gastos hormiga |
+| POST | `/api/impulse-expenses` | Registrar gasto |
+| DELETE | `/api/impulse-expenses/:id` | Eliminar |
 
-## 📚 API Endpoints
+### Fondo de Emergencia
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/emergency-fund` | Saldo + historial |
+| POST | `/api/emergency-fund/transaction` | Aporte o retiro |
 
-### Autenticación
-- `GET /api/auth/profile` - Obtener perfil del usuario
-- `GET /api/auth/validate` - Validar token
+### Gamificación
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/gamification/status` | Racha + insignias |
+| PATCH | `/api/gamification/streak` | Actualizar racha |
+| GET | `/api/gamification/badges` | Listar insignias |
+| POST | `/api/gamification/badges` | Desbloquear insignia |
 
-### Clientes
-- `GET /api/customers` - Listar clientes
-- `POST /api/customers` - Crear cliente
-- `GET /api/customers/:id` - Obtener cliente
-- `PATCH /api/customers/:id` - Actualizar cliente
-- `DELETE /api/customers/:id` - Eliminar cliente
+### IA (placeholders — requieren Google AI API Key)
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | `/api/ai/coach` | Coach financiero IA |
+| POST | `/api/ai/budget-insight` | Análisis de presupuesto |
+| POST | `/api/ai/scan-receipt` | Escáner de recibos |
 
-### Productos
-- `GET /api/products` - Listar productos
-- `POST /api/products` - Crear producto
-- `GET /api/products/:id` - Obtener producto
-- `PATCH /api/products/:id` - Actualizar producto
-- `DELETE /api/products/:id` - Eliminar producto
+### Health
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| GET | `/api/health` | Estado del servidor |
 
-### Facturas
-- `GET /api/invoices` - Listar facturas
-- `POST /api/invoices` - Crear factura
-- `GET /api/invoices/:id` - Obtener factura
-- `PATCH /api/invoices/:id` - Actualizar factura
-- `DELETE /api/invoices/:id` - Eliminar factura
+## Autenticación
 
-## 🗄️ Estructura de la base de datos
-
-### Esquema: `billing`
-
-**Tablas principales:**
-- `customers` - Información de clientes
-- `products` - Catálogo de productos
-- `invoices` - Facturas emitidas
-- `invoice_items` - Detalles de facturas
-
-## 🔗 Integración con Frontend
-
-El backend está configurado para conectarse con Frontend_Factonet en:
-- **Desarrollo:** `http://localhost:4202`
-- **CORS habilitado** para desarrollo
-
-## 📝 Scripts disponibles
-
-```bash
-npm run start:dev    # Desarrollo con hot reload
-npm run build        # Compilar aplicación
-npm run start:prod   # Producción
-npm run lint         # Verificar código
-npm run test         # Pruebas unitarias
-```
-
-## 🏗️ Arquitectura del sistema
+Todas las rutas (excepto `/auth/register`, `/auth/login`, `/auth/refresh` y `/health`) requieren el header:
 
 ```
-Frontend_Factonet (Angular) → Backend_Factonet (NestJS) → Backend_Authoriza (Auth)
-                                      ↓
-                              PostgreSQL (FactonetDB)
+Authorization: Bearer <access_token>
 ```
 
-## 📄 Licencia
+## Usuario de prueba
 
-Privada - Derechos reservados Cyclonet
+Después de ejecutar el seed:
+- **Correo:** demo@kiri.app
+- **Contraseña:** demo123

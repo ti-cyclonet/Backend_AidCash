@@ -1,0 +1,255 @@
+import { Router, Request, Response } from 'express'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
+import { z } from 'zod'
+import { prisma } from '../config/database.js'
+import { env } from '../config/env.js'
+import { validate } from '../middleware/validate.js'
+import { authMiddleware, AuthPayload } from '../middleware/auth.js'
+import crypto from 'crypto'
+
+const router = Router()
+
+// ─── Schemas de validación ────────────────────────────────────────────────────
+
+const registerSchema = z.object({
+  nombre: z.string().min(2, 'El nombre debe tener al menos 2 caracteres'),
+  correo: z.string().email('Correo electrónico inválido'),
+  password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres'),
+})
+
+const loginSchema = z.object({
+  correo: z.string().email('Correo electrónico inválido'),
+  password: z.string().min(1, 'La contraseña es requerida'),
+})
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function generateAccessToken(payload: AuthPayload): string {
+  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN } as jwt.SignOptions)
+}
+
+function generateRefreshToken(): string {
+  return crypto.randomBytes(40).toString('hex')
+}
+
+function getRefreshExpiry(): Date {
+  const days = parseInt(env.JWT_REFRESH_EXPIRES_IN) || 30
+  const date = new Date()
+  date.setDate(date.getDate() + days)
+  return date
+}
+
+// ─── POST /auth/register ──────────────────────────────────────────────────────
+
+router.post('/register', validate(registerSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { nombre, correo, password } = req.body
+
+    // Verificar si el correo ya existe
+    const existing = await prisma.user.findUnique({ where: { correo } })
+    if (existing) {
+      res.status(409).json({ error: 'Este correo ya está registrado.' })
+      return
+    }
+
+    // Hashear contraseña
+    const passwordHash = await bcrypt.hash(password, 12)
+
+    // Crear usuario con valores default
+    const user = await prisma.user.create({
+      data: {
+        nombre,
+        correo,
+        passwordHash,
+        frecuenciaIngreso: 'mensual',
+        ingresoBase: 0,
+        onboardingDone: false,
+        metaAhorroGlobal: 5000,
+        saldoAhorroTotal: 0,
+        fondoEmergenciaActual: 0,
+      },
+    })
+
+    // Generar tokens
+    const tokenPayload: AuthPayload = { userId: user.id, correo: user.correo }
+    const accessToken = generateAccessToken(tokenPayload)
+    const refreshToken = generateRefreshToken()
+
+    // Guardar refresh token en BD
+    await prisma.refreshToken.create({
+      data: {
+        userId: user.id,
+        token: refreshToken,
+        expiresAt: getRefreshExpiry(),
+      },
+    })
+
+    res.status(201).json({
+      user: {
+        id: user.id,
+        nombre: user.nombre,
+        correo: user.correo,
+        onboardingDone: user.onboardingDone,
+      },
+      accessToken,
+      refreshToken,
+    })
+  } catch (error) {
+    console.error('[Register]', error)
+    res.status(500).json({ error: 'Error al crear la cuenta' })
+  }
+})
+
+// ─── POST /auth/login ─────────────────────────────────────────────────────────
+
+router.post('/login', validate(loginSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { correo, password } = req.body
+
+    const user = await prisma.user.findUnique({ where: { correo } })
+    if (!user) {
+      res.status(401).json({ error: 'Correo o contraseña incorrectos.' })
+      return
+    }
+
+    const isValid = await bcrypt.compare(password, user.passwordHash)
+    if (!isValid) {
+      res.status(401).json({ error: 'Correo o contraseña incorrectos.' })
+      return
+    }
+
+    // Generar tokens
+    const tokenPayload: AuthPayload = { userId: user.id, correo: user.correo }
+    const accessToken = generateAccessToken(tokenPayload)
+    const refreshToken = generateRefreshToken()
+
+    // Guardar refresh token
+    await prisma.refreshToken.create({
+      data: {
+        userId: user.id,
+        token: refreshToken,
+        expiresAt: getRefreshExpiry(),
+      },
+    })
+
+    res.json({
+      user: {
+        id: user.id,
+        nombre: user.nombre,
+        correo: user.correo,
+        onboardingDone: user.onboardingDone,
+      },
+      accessToken,
+      refreshToken,
+    })
+  } catch (error) {
+    console.error('[Login]', error)
+    res.status(500).json({ error: 'Error al iniciar sesión' })
+  }
+})
+
+// ─── POST /auth/refresh ───────────────────────────────────────────────────────
+
+router.post('/refresh', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { refreshToken } = req.body
+
+    if (!refreshToken) {
+      res.status(400).json({ error: 'Refresh token requerido' })
+      return
+    }
+
+    const stored = await prisma.refreshToken.findUnique({
+      where: { token: refreshToken },
+      include: { user: true },
+    })
+
+    if (!stored || stored.expiresAt < new Date()) {
+      if (stored) {
+        await prisma.refreshToken.delete({ where: { id: stored.id } })
+      }
+      res.status(401).json({ error: 'Refresh token inválido o expirado' })
+      return
+    }
+
+    // Rotar el refresh token
+    await prisma.refreshToken.delete({ where: { id: stored.id } })
+
+    const tokenPayload: AuthPayload = { userId: stored.user.id, correo: stored.user.correo }
+    const newAccessToken = generateAccessToken(tokenPayload)
+    const newRefreshToken = generateRefreshToken()
+
+    await prisma.refreshToken.create({
+      data: {
+        userId: stored.user.id,
+        token: newRefreshToken,
+        expiresAt: getRefreshExpiry(),
+      },
+    })
+
+    res.json({
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
+    })
+  } catch (error) {
+    console.error('[Refresh]', error)
+    res.status(500).json({ error: 'Error al refrescar el token' })
+  }
+})
+
+// ─── POST /auth/logout ────────────────────────────────────────────────────────
+
+router.post('/logout', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { refreshToken } = req.body
+
+    if (refreshToken) {
+      await prisma.refreshToken.deleteMany({
+        where: { token: refreshToken },
+      })
+    }
+
+    res.json({ message: 'Sesión cerrada correctamente' })
+  } catch (error) {
+    console.error('[Logout]', error)
+    res.status(500).json({ error: 'Error al cerrar sesión' })
+  }
+})
+
+// ─── GET /auth/me ─────────────────────────────────────────────────────────────
+
+router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: req.user!.userId },
+      select: {
+        id: true,
+        nombre: true,
+        correo: true,
+        ingresoBase: true,
+        frecuenciaIngreso: true,
+        onboardingDone: true,
+        metaAhorroGlobal: true,
+        saldoAhorroTotal: true,
+        fondoEmergenciaActual: true,
+        streakActual: true,
+        streakMejor: true,
+        streakUltimoCheck: true,
+        createdAt: true,
+      },
+    })
+
+    if (!user) {
+      res.status(404).json({ error: 'Usuario no encontrado' })
+      return
+    }
+
+    res.json({ user })
+  } catch (error) {
+    console.error('[Me]', error)
+    res.status(500).json({ error: 'Error al obtener perfil' })
+  }
+})
+
+export default router
