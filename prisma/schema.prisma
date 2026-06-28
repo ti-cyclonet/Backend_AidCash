@@ -79,9 +79,14 @@ model Debt {
   nombre            String
   montoTotal        Decimal @map("monto_total") @db.Decimal(12, 2)
   cuotaPeriodo      Decimal @map("cuota_periodo") @db.Decimal(12, 2)
+  tasaInteres       Decimal? @map("tasa_interes") @db.Decimal(5, 2)
   fechaVencimiento  String  @map("fecha_vencimiento")
   pagadoEstePeriodo Boolean @default(false) @map("pagado_este_periodo")
-  estado            String  @default("activa") // activa | saldada
+  estado            String  @default("activa") // activa | saldada | vencida
+  prioridad         String  @default("media") // alta | media | baja
+  acreedor          String? @map("acreedor")
+  cuotasRestantes   Int?    @map("cuotas_restantes")
+  fechaEstimadaPago String? @map("fecha_estimada_pago")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
@@ -97,7 +102,11 @@ model FixedExpense {
   userId            String  @map("user_id")
   nombre            String
   monto             Decimal @db.Decimal(12, 2)
+  categoria         String  @default("otro") // vivienda | servicios | internet | transporte | educacion | salud | suscripciones | otro
   fechaCorte        String  @map("fecha_corte")
+  frecuencia        String  @default("mensual") // mensual | quincenal | semanal | anual
+  metodoPago        String? @map("metodo_pago")
+  renovacionAuto    Boolean @default(false) @map("renovacion_auto")
   pagadoEstePeriodo Boolean @default(false) @map("pagado_este_periodo")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")

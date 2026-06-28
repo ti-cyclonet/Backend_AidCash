@@ -14,6 +14,11 @@ const createDebtSchema = z.object({
   montoTotal: z.number().min(0),
   cuotaPeriodo: z.number().min(0),
   fechaVencimiento: z.string().min(1),
+  tasaInteres: z.number().min(0).optional(),
+  prioridad: z.enum(['alta', 'media', 'baja']).optional(),
+  acreedor: z.string().optional(),
+  cuotasRestantes: z.number().int().min(0).optional(),
+  fechaEstimadaPago: z.string().optional(),
 })
 
 const updateDebtSchema = z.object({
@@ -21,8 +26,13 @@ const updateDebtSchema = z.object({
   montoTotal: z.number().min(0).optional(),
   cuotaPeriodo: z.number().min(0).optional(),
   fechaVencimiento: z.string().optional(),
+  tasaInteres: z.number().min(0).nullable().optional(),
+  prioridad: z.enum(['alta', 'media', 'baja']).optional(),
+  acreedor: z.string().nullable().optional(),
+  cuotasRestantes: z.number().int().min(0).nullable().optional(),
+  fechaEstimadaPago: z.string().nullable().optional(),
   pagadoEstePeriodo: z.boolean().optional(),
-  estado: z.enum(['activa', 'saldada']).optional(),
+  estado: z.enum(['activa', 'saldada', 'vencida']).optional(),
 }).strict()
 
 // ─── GET /debts ───────────────────────────────────────────────────────────────
@@ -49,7 +59,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createDebtSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, montoTotal, cuotaPeriodo, fechaVencimiento } = req.body
+    const { nombre, montoTotal, cuotaPeriodo, fechaVencimiento, tasaInteres, prioridad, acreedor, cuotasRestantes, fechaEstimadaPago } = req.body
 
     const debt = await prisma.debt.create({
       data: {
@@ -58,6 +68,11 @@ router.post('/', validate(createDebtSchema), async (req: Request, res: Response)
         montoTotal,
         cuotaPeriodo,
         fechaVencimiento,
+        tasaInteres: tasaInteres ?? null,
+        prioridad: prioridad ?? 'media',
+        acreedor: acreedor ?? null,
+        cuotasRestantes: cuotasRestantes ?? null,
+        fechaEstimadaPago: fechaEstimadaPago ?? null,
         pagadoEstePeriodo: false,
         estado: 'activa',
       },

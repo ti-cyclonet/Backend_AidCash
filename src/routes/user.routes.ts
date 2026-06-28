@@ -116,39 +116,66 @@ router.post('/wallet/income', validate(walletIncomeSchema), async (req: Request,
     if (!user) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
 
     // Obtener obligaciones actuales para calcular porcentajes del EMBUDO
-    // (basados en sueldo fijo, no en el monto registrado)
+    // Filtrar por periodo: si es quincenal, solo cuenta las del periodo actual
     const [debts, fixedExpenses] = await Promise.all([
-      prisma.debt.findMany({ where: { userId, estado: 'activa' }, select: { cuotaPeriodo: true } }),
-      prisma.fixedExpense.findMany({ where: { userId }, select: { monto: true } }),
+      prisma.debt.findMany({ where: { userId, estado: 'activa' }, select: { cuotaPeriodo: true, fechaVencimiento: true } }),
+      prisma.fixedExpense.findMany({ where: { userId }, select: { monto: true, fechaCorte: true } }),
     ])
 
-    const totalObligations = debts.reduce((s, d) => s + Number(d.cuotaPeriodo), 0) +
-                             fixedExpenses.reduce((s, f) => s + Number(f.monto), 0)
-
-    // Calcular porcentajes del embudo usando el INGRESO FIJO (la ruta)
-    const ingresoBase = Number(user.ingresoBase) || monto
     const frecuencia = user.frecuenciaIngreso || 'mensual'
-    // Si es quincenal, el ingreso por periodo es la mitad
+    const ingresoBase = Number(user.ingresoBase) || monto
+
+    // Filtrar obligaciones por periodo
+    const currentDay = new Date().getDate()
+    const isFirstHalf = currentDay <= 15
+
+    function getDayFromDate(dateStr: string): number {
+      if (!dateStr) return 1
+      if (dateStr.includes('-')) {
+        const parts = dateStr.split('-')
+        return parseInt(parts[parts.length - 1], 10) || 1
+      }
+      return parseInt(dateStr, 10) || 1
+    }
+
+    let periodDebts = debts
+    let periodFixed = fixedExpenses
+
+    if (frecuencia === 'quincenal') {
+      // Solo contar obligaciones cuya fecha cae en la quincena actual
+      periodDebts = debts.filter(d => {
+        const day = getDayFromDate(d.fechaVencimiento)
+        return isFirstHalf ? day <= 15 : day >= 16
+      })
+      periodFixed = fixedExpenses.filter(f => {
+        const day = getDayFromDate(f.fechaCorte)
+        return isFirstHalf ? day <= 15 : day >= 16
+      })
+    }
+
+    const totalObligations = periodDebts.reduce((s, d) => s + Number(d.cuotaPeriodo), 0) +
+                             periodFixed.reduce((s, f) => s + Number(f.monto), 0)
+
+    // Ingreso del periodo: si quincenal = mitad del base, si mensual = completo
     const ingresoPeriodo = frecuencia === 'quincenal' ? ingresoBase / 2 : ingresoBase
     const obligationsPct = ingresoPeriodo > 0 ? Math.min((totalObligations / ingresoPeriodo) * 100, 100) : 0
     const remainingPct = Math.max(0, 100 - obligationsPct)
 
-    console.log('[WalletIncome] Debug:', { ingresoBase, frecuencia, ingresoPeriodo, totalObligations, obligationsPct, remainingPct, monto })
+    console.log('[WalletIncome] Debug:', { ingresoBase, frecuencia, ingresoPeriodo, totalObligations, obligationsPct, remainingPct, monto, isFirstHalf })
 
-    // Si obligaciones >= 100% del ingreso, forzar una distribución mínima
-    // para que el usuario siempre vea algo en las 4 tarjetas
+    // Distribución según el porcentaje real de obligaciones
+    // Si obligaciones >= 100%: todo va a obligaciones, lo demás en 0 (realista)
     let finalObligPct: number
     let savingsPct: number
     let dailyFreePct: number
     let debtCapPct: number
 
     if (obligationsPct >= 100) {
-      // Estado crítico: obligaciones superan ingreso
-      // Forzar distribución mínima: 65% oblig, 10% ahorro, 15% libre, 10% endeudamiento
-      finalObligPct = 65
-      savingsPct = 10
-      dailyFreePct = 15
-      debtCapPct = 10
+      // Estado crítico: todo el ingreso va a obligaciones
+      finalObligPct = 100
+      savingsPct = 0
+      dailyFreePct = 0
+      debtCapPct = 0
     } else if (remainingPct < 15) {
       // Muy ajustado: dar mínimos
       finalObligPct = obligationsPct
