@@ -52,6 +52,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       debts,
       fixedExpenses,
       user,
+      incomeRecordsAll,
     ] = await Promise.all([
       // Gastos hormiga — filtrados por createdAt
       prisma.impulseExpense.findMany({
@@ -88,6 +89,12 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         where: { id: userId },
         select: { ingresoBase: true, frecuenciaIngreso: true, cashBalance: true },
       }),
+
+      // Total de ingresos reales registrados (toda la vida)
+      prisma.incomeRecord.aggregate({
+        where: { userId },
+        _sum: { monto: true },
+      }),
     ])
 
     // ── Totales para gráficos ─────────────────────────────────────────────────
@@ -101,6 +108,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     const ingresoBase = Number(user?.ingresoBase ?? 0)
     const totalIngreso = ingresoBase + totalExtra
     const totalEgreso  = totalDebts + totalFixed + totalImpulse + totalSaved
+
+    // Totales históricos (toda la vida)
+    const totalIngresosHistorico = Number(incomeRecordsAll._sum.monto ?? 0)
+    const totalEgresosHistorico = totalDebts + totalFixed + totalImpulse
 
     // ── Distribución por categoría (para pie chart) ───────────────────────────
     const categoryDistribution = [
@@ -138,6 +149,8 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         totalIngreso,
         totalEgreso,
         ingresoBase,
+        totalIngresosHistorico,
+        totalEgresosHistorico,
         totalExtra,
         totalDebts,
         totalFixed,

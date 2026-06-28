@@ -27,6 +27,11 @@ model User {
   streakMejor           Int      @default(0) @map("streak_mejor")
   streakUltimoCheck     DateTime? @map("streak_ultimo_check") @db.Date
   cashBalance           Decimal  @default(0) @map("cash_balance") @db.Decimal(12, 2)
+  // Wallet — saldo real distribuido en 4 bolsillos
+  walletAhorro          Decimal  @default(0) @map("wallet_ahorro") @db.Decimal(12, 2)
+  walletObligaciones    Decimal  @default(0) @map("wallet_obligaciones") @db.Decimal(12, 2)
+  walletLibre           Decimal  @default(0) @map("wallet_libre") @db.Decimal(12, 2)
+  walletEndeudamiento   Decimal  @default(0) @map("wallet_endeudamiento") @db.Decimal(12, 2)
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
@@ -39,6 +44,7 @@ model User {
   emergencyFundHistory  EmergencyFundHistory[]
   badges                UserBadge[]
   refreshTokens         RefreshToken[]
+  incomeRecords         IncomeRecord[]
 
   // Relaciones Phase 3 — Social
   sentConnections       Connection[]       @relation("ConnectionRequester")
@@ -178,6 +184,25 @@ model UserBadge {
 
   @@unique([userId, badgeId])
   @@map("user_badges")
+}
+
+// ─── Registro de Ingresos Reales (Flujo de Caja) ──────────────────────────────
+
+model IncomeRecord {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  monto     Decimal  @db.Decimal(12, 2)
+  tipo      String   // salario | extra
+  // Distribución aplicada al registrar
+  aAhorro         Decimal  @default(0) @map("a_ahorro") @db.Decimal(12, 2)
+  aObligaciones   Decimal  @default(0) @map("a_obligaciones") @db.Decimal(12, 2)
+  aLibre          Decimal  @default(0) @map("a_libre") @db.Decimal(12, 2)
+  aEndeudamiento  Decimal  @default(0) @map("a_endeudamiento") @db.Decimal(12, 2)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("income_records")
 }
 
 // ─── Phase 3: Social ──────────────────────────────────────────────────────────
