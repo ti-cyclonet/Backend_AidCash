@@ -13,12 +13,20 @@ const createSchema = z.object({
   nombre: z.string().min(1, 'El nombre es requerido'),
   monto: z.number().min(0),
   fechaCorte: z.string().min(1),
+  categoria: z.enum(['vivienda', 'servicios', 'internet', 'transporte', 'educacion', 'salud', 'suscripciones', 'otro']).optional(),
+  frecuencia: z.enum(['mensual', 'quincenal', 'semanal', 'anual']).optional(),
+  metodoPago: z.string().optional(),
+  renovacionAuto: z.boolean().optional(),
 })
 
 const updateSchema = z.object({
   nombre: z.string().min(1).optional(),
   monto: z.number().min(0).optional(),
   fechaCorte: z.string().optional(),
+  categoria: z.enum(['vivienda', 'servicios', 'internet', 'transporte', 'educacion', 'salud', 'suscripciones', 'otro']).optional(),
+  frecuencia: z.enum(['mensual', 'quincenal', 'semanal', 'anual']).optional(),
+  metodoPago: z.string().nullable().optional(),
+  renovacionAuto: z.boolean().optional(),
   pagadoEstePeriodo: z.boolean().optional(),
 }).strict()
 
@@ -45,10 +53,17 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, monto, fechaCorte } = req.body
+    const { nombre, monto, fechaCorte, categoria, frecuencia, metodoPago, renovacionAuto } = req.body
 
     const expense = await prisma.fixedExpense.create({
-      data: { userId, nombre, monto, fechaCorte, pagadoEstePeriodo: false },
+      data: {
+        userId, nombre, monto, fechaCorte,
+        categoria: categoria ?? 'otro',
+        frecuencia: frecuencia ?? 'mensual',
+        metodoPago: metodoPago ?? null,
+        renovacionAuto: renovacionAuto ?? false,
+        pagadoEstePeriodo: false,
+      },
     })
 
     res.status(201).json({ fixedExpense: expense })
