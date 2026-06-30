@@ -1,11 +1,20 @@
 import { Router, Request, Response } from 'express'
 import { z } from 'zod'
+import rateLimit from 'express-rate-limit'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 
 const router = Router()
 router.use(authMiddleware)
+
+// Rate limit para endpoints de wallet (máx 30 requests por minuto por usuario)
+const walletLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: (req: Request) => req.user?.userId ?? req.ip ?? 'unknown',
+  message: { error: 'Demasiadas operaciones de billetera. Espera un momento.' },
+})
 
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
@@ -102,107 +111,103 @@ router.patch('/balance', validate(balanceSchema), async (req: Request, res: Resp
 // ─── POST /users/wallet/income ─────────────────────────────────────────────────
 // Registra un ingreso real y lo distribuye automáticamente en los 4 bolsillos
 // según los porcentajes de la distribución inteligente.
+// La distribución usa el PRESUPUESTO TOTAL ACUMULADO (cashBalance + monto nuevo)
+// como base, NO el ingreso mensual. Así la billetera tiene su propia distribución
+// separada de Proyecciones.
 
-router.post('/wallet/income', validate(walletIncomeSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { monto, tipo } = req.body as { monto: number; tipo: 'salario' | 'extra' }
 
-    // Obtener datos del usuario para calcular distribución
+    // Obtener datos del usuario: cashBalance actual para calcular nuevo presupuesto total
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { ingresoBase: true, frecuenciaIngreso: true },
+      select: { cashBalance: true },
     })
     if (!user) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
 
-    // Obtener obligaciones actuales para calcular porcentajes del EMBUDO
-    // Filtrar por periodo: si es quincenal, solo cuenta las del periodo actual
+    // Obtener TODAS las obligaciones activas (totales mensuales)
     const [debts, fixedExpenses] = await Promise.all([
-      prisma.debt.findMany({ where: { userId, estado: 'activa' }, select: { cuotaPeriodo: true, fechaVencimiento: true } }),
-      prisma.fixedExpense.findMany({ where: { userId }, select: { monto: true, fechaCorte: true } }),
+      prisma.debt.findMany({ where: { userId, estado: 'activa' }, select: { cuotaPeriodo: true } }),
+      prisma.fixedExpense.findMany({ where: { userId }, select: { monto: true } }),
     ])
 
-    const frecuencia = user.frecuenciaIngreso || 'mensual'
-    const ingresoBase = Number(user.ingresoBase) || monto
+    // ═══ PRESUPUESTO TOTAL = cashBalance actual + nuevo ingreso ═══
+    const currentCashBalance = Number(user.cashBalance) || 0
+    const newBudgetTotal = currentCashBalance + monto
 
-    // Filtrar obligaciones por periodo
-    const currentDay = new Date().getDate()
-    const isFirstHalf = currentDay <= 15
+    const totalObligationsMonthly = debts.reduce((s, d) => s + Number(d.cuotaPeriodo), 0) +
+                                    fixedExpenses.reduce((s, f) => s + Number(f.monto), 0)
 
-    function getDayFromDate(dateStr: string): number {
-      if (!dateStr) return 1
-      if (dateStr.includes('-')) {
-        const parts = dateStr.split('-')
-        return parseInt(parts[parts.length - 1], 10) || 1
-      }
-      return parseInt(dateStr, 10) || 1
-    }
+    // Base para la distribución: el presupuesto total acumulado en la billetera
+    const baseIncome = newBudgetTotal
 
-    let periodDebts = debts
-    let periodFixed = fixedExpenses
+    // ═══ DISTRIBUCIÓN INTELIGENTE — El Embudo (basada en presupuesto total) ═══
+    const obligationsPct = (totalObligationsMonthly / baseIncome) * 100
+    const isOverloaded = totalObligationsMonthly >= baseIncome
 
-    if (frecuencia === 'quincenal') {
-      // Solo contar obligaciones cuya fecha cae en la quincena actual
-      periodDebts = debts.filter(d => {
-        const day = getDayFromDate(d.fechaVencimiento)
-        return isFirstHalf ? day <= 15 : day >= 16
-      })
-      periodFixed = fixedExpenses.filter(f => {
-        const day = getDayFromDate(f.fechaCorte)
-        return isFirstHalf ? day <= 15 : day >= 16
-      })
-    }
+    let aObligaciones: number
+    let aAhorro: number
+    let aLibre: number
+    let aEndeudamiento: number
 
-    const totalObligations = periodDebts.reduce((s, d) => s + Number(d.cuotaPeriodo), 0) +
-                             periodFixed.reduce((s, f) => s + Number(f.monto), 0)
-
-    // Ingreso del periodo: si quincenal = mitad del base, si mensual = completo
-    const ingresoPeriodo = frecuencia === 'quincenal' ? ingresoBase / 2 : ingresoBase
-    const obligationsPct = ingresoPeriodo > 0 ? Math.min((totalObligations / ingresoPeriodo) * 100, 100) : 0
-    const remainingPct = Math.max(0, 100 - obligationsPct)
-
-    console.log('[WalletIncome] Debug:', { ingresoBase, frecuencia, ingresoPeriodo, totalObligations, obligationsPct, remainingPct, monto, isFirstHalf })
-
-    // Distribución según el porcentaje real de obligaciones
-    // Si obligaciones >= 100%: todo va a obligaciones, lo demás en 0 (realista)
-    let finalObligPct: number
-    let savingsPct: number
-    let dailyFreePct: number
-    let debtCapPct: number
-
-    if (obligationsPct >= 100) {
-      // Estado crítico: todo el ingreso va a obligaciones
-      finalObligPct = 100
-      savingsPct = 0
-      dailyFreePct = 0
-      debtCapPct = 0
-    } else if (remainingPct < 15) {
-      // Muy ajustado: dar mínimos
-      finalObligPct = obligationsPct
-      savingsPct = 5
-      dailyFreePct = Math.max(5, remainingPct - 5)
-      debtCapPct = 0
+    if (isOverloaded) {
+      // Estado CRÍTICO: obligaciones superan o igualan el presupuesto total → todo va a obligaciones
+      aObligaciones = monto
+      aAhorro = 0
+      aLibre = 0
+      aEndeudamiento = 0
     } else {
-      finalObligPct = obligationsPct
-      if (remainingPct >= 40) savingsPct = 20
-      else if (remainingPct >= 25) savingsPct = 15
-      else if (remainingPct >= 15) savingsPct = 10
+      const remanente = baseIncome - totalObligationsMonthly
+      const remanentePct = (remanente / baseIncome) * 100
+
+      // Ahorro: escala según presión del presupuesto
+      let savingsPct: number
+      if (remanentePct >= 40) savingsPct = 20
+      else if (remanentePct >= 25) savingsPct = 15
+      else if (remanentePct >= 15) savingsPct = 10
       else savingsPct = 5
 
-      const freeInvPct = Math.max(0, remainingPct - savingsPct)
-      const minFreePct = 15
-      dailyFreePct = Math.min(freeInvPct, minFreePct)
-      debtCapPct = Math.max(0, freeInvPct - dailyFreePct)
+      // El ahorro NO puede superar el remanente real
+      const targetSavingsAmount = (savingsPct / 100) * baseIncome
+      const savingsAmount = Math.min(targetSavingsAmount, remanente)
+
+      // Lo que queda tras ahorro
+      const afterSavings = remanente - savingsAmount
+
+      // Gasto libre: tope 15% del presupuesto total, pero limitado por lo disponible
+      const maxDailyFreeAmount = (15 / 100) * baseIncome
+      let dailyFreeAmount: number
+      let debtCapacityAmount: number
+
+      if (afterSavings <= maxDailyFreeAmount) {
+        dailyFreeAmount = Math.max(0, afterSavings)
+        debtCapacityAmount = 0
+      } else {
+        dailyFreeAmount = maxDailyFreeAmount
+        debtCapacityAmount = afterSavings - maxDailyFreeAmount
+      }
+
+      // Convertir montos del embudo a proporciones del monto REAL registrado
+      const totalDistrib = totalObligationsMonthly + savingsAmount + dailyFreeAmount + debtCapacityAmount
+      if (totalDistrib > 0) {
+        aObligaciones = Math.round((totalObligationsMonthly / totalDistrib) * monto * 100) / 100
+        aAhorro = Math.round((savingsAmount / totalDistrib) * monto * 100) / 100
+        aLibre = Math.round((dailyFreeAmount / totalDistrib) * monto * 100) / 100
+        aEndeudamiento = Math.round((monto - aObligaciones - aAhorro - aLibre) * 100) / 100
+      } else {
+        aObligaciones = monto
+        aAhorro = 0
+        aLibre = 0
+        aEndeudamiento = 0
+      }
     }
 
-    // Normalizar porcentajes a 100% y distribuir el monto real
-    const totalPct = finalObligPct + savingsPct + dailyFreePct + debtCapPct
-    const aObligaciones = Math.round((finalObligPct / totalPct) * monto * 100) / 100
-    const aAhorro = Math.round((savingsPct / totalPct) * monto * 100) / 100
-    const aLibre = Math.round((dailyFreePct / totalPct) * monto * 100) / 100
-    const aEndeudamiento = Math.round((monto - aObligaciones - aAhorro - aLibre) * 100) / 100
+    // Asegurar que no haya negativos por redondeo
+    aEndeudamiento = Math.max(0, aEndeudamiento)
 
-    console.log('[WalletIncome] Distribución:', { finalObligPct, savingsPct, dailyFreePct, debtCapPct, aObligaciones, aAhorro, aLibre, aEndeudamiento })
+    console.log('[WalletIncome] Distribución:', { baseIncome: newBudgetTotal, obligationsPct: Math.round(obligationsPct), isOverloaded, aObligaciones, aAhorro, aLibre, aEndeudamiento, monto })
 
     // Transacción: crear registro + actualizar wallet + cashBalance
     const [record, updated] = await prisma.$transaction([
@@ -247,7 +252,7 @@ router.post('/wallet/income', validate(walletIncomeSchema), async (req: Request,
 // ─── POST /users/wallet/deduct ────────────────────────────────────────────────
 // Deduce un monto de un bolsillo específico (obligaciones o libre)
 
-router.post('/wallet/deduct', validate(walletDeductSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/wallet/deduct', walletLimiter, validate(walletDeductSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { monto, bolsillo } = req.body as { monto: number; bolsillo: 'obligaciones' | 'libre' | 'ahorro' }
@@ -256,11 +261,25 @@ router.post('/wallet/deduct', validate(walletDeductSchema), async (req: Request,
                 : bolsillo === 'ahorro' ? 'walletAhorro'
                 : 'walletLibre'
 
+    // Verificar que hay suficiente saldo antes de deducir
+    const current = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { cashBalance: true, walletObligaciones: true, walletLibre: true, walletAhorro: true },
+    })
+    if (!current) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+
+    const currentPocket = Number(current[field])
+    const currentCash = Number(current.cashBalance)
+
+    // No permitir deducir más de lo disponible en el bolsillo
+    const deductAmount = Math.min(monto, Math.max(0, currentPocket))
+    const deductCash = Math.min(monto, Math.max(0, currentCash))
+
     const user = await prisma.user.update({
       where: { id: userId },
       data: {
-        cashBalance: { decrement: monto },
-        [field]: { decrement: monto },
+        cashBalance: { decrement: deductCash },
+        [field]: { decrement: deductAmount },
       },
       select: {
         cashBalance: true,
@@ -273,11 +292,11 @@ router.post('/wallet/deduct', validate(walletDeductSchema), async (req: Request,
 
     res.json({
       wallet: {
-        cashBalance: Number(user.cashBalance),
-        ahorro: Number(user.walletAhorro),
-        obligaciones: Number(user.walletObligaciones),
-        libre: Number(user.walletLibre),
-        endeudamiento: Number(user.walletEndeudamiento),
+        cashBalance: Math.max(0, Number(user.cashBalance)),
+        ahorro: Math.max(0, Number(user.walletAhorro)),
+        obligaciones: Math.max(0, Number(user.walletObligaciones)),
+        libre: Math.max(0, Number(user.walletLibre)),
+        endeudamiento: Math.max(0, Number(user.walletEndeudamiento)),
       },
     })
   } catch (error) {
