@@ -2,6 +2,8 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
+RUN apk add --no-cache openssl
+
 COPY package*.json ./
 RUN npm ci
 
@@ -14,6 +16,8 @@ RUN npm run build
 
 # Production stage
 FROM node:20-alpine
+
+RUN apk add --no-cache openssl
 
 WORKDIR /app
 
