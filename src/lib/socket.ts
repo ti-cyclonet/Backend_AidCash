@@ -99,3 +99,11 @@ export function emitToUser(userId: string, event: string, data: unknown): void {
     // Socket no inicializado en pruebas o SSR — silenciar
   }
 }
+
+/** Cierra limpiamente todas las conexiones Socket.io */
+export function closeSocket(): void {
+  if (io) {
+    io.close()
+    io = null
+  }
+}

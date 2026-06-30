@@ -42,7 +42,11 @@ function getDateRange(timeframe: Timeframe): { from: Date; to: Date } {
 router.get('/balance', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const timeframe = (req.query.timeframe as Timeframe) || 'month'
+    const rawTimeframe = req.query.timeframe as string
+    const validTimeframes: Timeframe[] = ['week', 'month', 'year', 'all']
+    const timeframe: Timeframe = validTimeframes.includes(rawTimeframe as Timeframe)
+      ? (rawTimeframe as Timeframe)
+      : 'month'
     const { from, to } = getDateRange(timeframe)
 
     const [
@@ -97,21 +101,36 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       }),
     ])
 
-    // ── Totales para gráficos ─────────────────────────────────────────────────
+    // ── Totales para el balance ─────────────────────────────────────────────────
 
     const totalImpulse = impulseExpenses.reduce((s, e) => s + Number(e.monto), 0)
     const totalSaved   = savingsHistory.filter(e => e.tipo === 'ahorro').reduce((s, e) => s + Number(e.monto), 0)
     const totalExtra   = extraIncomes.reduce((s, e) => s + Number(e.monto), 0)
+    // Deudas y fijos pagados EN ESTE PERIODO (marcados como pagado)
     const totalDebts   = debts.filter(d => d.pagadoEstePeriodo).reduce((s, d) => s + Number(d.cuotaPeriodo), 0)
     const totalFixed   = fixedExpenses.filter(f => f.pagadoEstePeriodo).reduce((s, f) => s + Number(f.monto), 0)
 
+    // Ingreso REAL del periodo = lo que el usuario ha registrado en income_records dentro del rango
+    // Si no hay registros en el periodo, usamos ingresoBase como referencia
     const ingresoBase = Number(user?.ingresoBase ?? 0)
-    const totalIngreso = ingresoBase + totalExtra
-    const totalEgreso  = totalDebts + totalFixed + totalImpulse + totalSaved
+
+    // Consultar ingresos reales registrados DENTRO del periodo
+    const incomeRecordsPeriod = await prisma.incomeRecord.aggregate({
+      where: { userId, createdAt: { gte: from, lte: to } },
+      _sum: { monto: true },
+    })
+    const ingresosRealPeriodo = Number(incomeRecordsPeriod._sum.monto ?? 0)
+
+    // totalIngreso: si hay registros reales en el periodo, usar esos. Si no, usar base + extra.
+    const totalIngreso = ingresosRealPeriodo > 0 ? ingresosRealPeriodo + totalExtra : ingresoBase + totalExtra
+    // totalEgreso: solo lo que realmente se ha gastado (pagado + hormiga). Ahorro NO es egreso.
+    const totalEgreso  = totalDebts + totalFixed + totalImpulse
 
     // Totales históricos (toda la vida)
     const totalIngresosHistorico = Number(incomeRecordsAll._sum.monto ?? 0)
-    const totalEgresosHistorico = totalDebts + totalFixed + totalImpulse
+    // Egresos históricos: necesitamos sumar TODOS los pagados históricamente + todos los impulse
+    const allImpulseEver = await prisma.impulseExpense.aggregate({ where: { userId }, _sum: { monto: true } })
+    const totalEgresosHistorico = totalDebts + totalFixed + Number(allImpulseEver._sum.monto ?? 0)
 
     // ── Distribución por categoría (para pie chart) ───────────────────────────
     const categoryDistribution = [

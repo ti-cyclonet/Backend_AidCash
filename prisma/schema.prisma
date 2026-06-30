@@ -74,19 +74,19 @@ model RefreshToken {
 // ─── Deudas ───────────────────────────────────────────────────────────────────
 
 model Debt {
-  id                String  @id @default(uuid())
-  userId            String  @map("user_id")
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
   nombre            String
-  montoTotal        Decimal @map("monto_total") @db.Decimal(12, 2)
-  cuotaPeriodo      Decimal @map("cuota_periodo") @db.Decimal(12, 2)
+  montoTotal        Decimal  @map("monto_total") @db.Decimal(12, 2)
+  saldoRestante     Decimal  @map("saldo_restante") @db.Decimal(12, 2)
+  cuotaPeriodo      Decimal  @map("cuota_periodo") @db.Decimal(12, 2)
   tasaInteres       Decimal? @map("tasa_interes") @db.Decimal(5, 2)
-  fechaVencimiento  String  @map("fecha_vencimiento")
-  pagadoEstePeriodo Boolean @default(false) @map("pagado_este_periodo")
-  estado            String  @default("activa") // activa | saldada | vencida
-  prioridad         String  @default("media") // alta | media | baja
-  acreedor          String? @map("acreedor")
-  cuotasRestantes   Int?    @map("cuotas_restantes")
-  fechaEstimadaPago String? @map("fecha_estimada_pago")
+  acreedor          String   @default("")
+  frecuenciaPago    String   @default("mensual") @map("frecuencia_pago") // mensual | quincenal
+  diasPago          String   @default("1") @map("dias_pago") // JSON array: "15" o "15,30"
+  pagadoEstePeriodo Boolean  @default(false) @map("pagado_este_periodo")
+  estado            String   @default("activa") // activa | saldada | vencida
+  prioridad         String   @default("media") // alta | media | baja
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 

@@ -102,4 +102,22 @@ async function bootstrap() {
 
 bootstrap().catch(console.error)
 
+// ─── Graceful Shutdown ────────────────────────────────────────────────────────
+
+import { closeSocket } from './lib/socket.js'
+
+function gracefulShutdown(signal: string) {
+  console.log(`\n[${signal}] Cerrando servidor...`)
+  closeSocket()
+  httpServer.close(() => {
+    console.log('✅ Servidor cerrado limpiamente')
+    process.exit(0)
+  })
+  // Forzar cierre si tarda más de 5s
+  setTimeout(() => process.exit(1), 5000)
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'))
+process.on('SIGINT', () => gracefulShutdown('SIGINT'))
+
 export default app
