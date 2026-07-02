@@ -1,0 +1,304 @@
+// Kiri Finance - Schema de Base de Datos
+// PostgreSQL con Prisma ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Usuario ──────────────────────────────────────────────────────────────────
+
+model User {
+  id                    String   @id @default(uuid())
+  nombre                String
+  correo                String   @unique
+  passwordHash          String   @map("password_hash")
+  ingresoBase           Decimal  @default(0) @map("ingreso_base") @db.Decimal(12, 2)
+  frecuenciaIngreso     String   @default("mensual") @map("frecuencia_ingreso")
+  onboardingDone        Boolean  @default(false) @map("onboarding_done")
+  metaAhorroGlobal      Decimal  @default(5000) @map("meta_ahorro_global") @db.Decimal(12, 2)
+  saldoAhorroTotal      Decimal  @default(0) @map("saldo_ahorro_total") @db.Decimal(12, 2)
+  fondoEmergenciaActual Decimal  @default(0) @map("fondo_emergencia_actual") @db.Decimal(12, 2)
+  streakActual          Int      @default(0) @map("streak_actual")
+  streakMejor           Int      @default(0) @map("streak_mejor")
+  streakUltimoCheck     DateTime? @map("streak_ultimo_check") @db.Date
+  cashBalance           Decimal  @default(0) @map("cash_balance") @db.Decimal(12, 2)
+  // Wallet — saldo real distribuido en 4 bolsillos
+  walletAhorro          Decimal  @default(0) @map("wallet_ahorro") @db.Decimal(12, 2)
+  walletObligaciones    Decimal  @default(0) @map("wallet_obligaciones") @db.Decimal(12, 2)
+  walletLibre           Decimal  @default(0) @map("wallet_libre") @db.Decimal(12, 2)
+  walletEndeudamiento   Decimal  @default(0) @map("wallet_endeudamiento") @db.Decimal(12, 2)
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  // Relaciones existentes
+  debts                 Debt[]
+  fixedExpenses         FixedExpense[]
+  savingsHistory        SavingsHistory[]
+  extraIncomes          ExtraIncome[]
+  impulseExpenses       ImpulseExpense[]
+  emergencyFundHistory  EmergencyFundHistory[]
+  badges                UserBadge[]
+  refreshTokens         RefreshToken[]
+  incomeRecords         IncomeRecord[]
+
+  // Relaciones Phase 3 — Social
+  sentConnections       Connection[]       @relation("ConnectionRequester")
+  receivedConnections   Connection[]       @relation("ConnectionAddressee")
+  sharedPocketsA        SharedPocket[]     @relation("SharedPocketUserA")
+  sharedPocketsB        SharedPocket[]     @relation("SharedPocketUserB")
+  loansGiven            Loan[]             @relation("LoanLender")
+  loansReceived         Loan[]             @relation("LoanBorrower")
+
+  @@map("users")
+}
+
+// ─── Tokens de refresco ───────────────────────────────────────────────────────
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  token     String   @unique
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
+}
+
+// ─── Deudas ───────────────────────────────────────────────────────────────────
+
+model Debt {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  nombre            String
+  montoTotal        Decimal  @map("monto_total") @db.Decimal(12, 2)
+  saldoRestante     Decimal  @map("saldo_restante") @db.Decimal(12, 2)
+  cuotaPeriodo      Decimal  @map("cuota_periodo") @db.Decimal(12, 2)
+  tasaInteres       Decimal? @map("tasa_interes") @db.Decimal(5, 2)
+  acreedor          String   @default("")
+  frecuenciaPago    String   @default("mensual") @map("frecuencia_pago") // mensual | quincenal
+  diasPago          String   @default("1") @map("dias_pago") // JSON array: "15" o "15,30"
+  pagadoEstePeriodo Boolean  @default(false) @map("pagado_este_periodo")
+  estado            String   @default("activa") // activa | saldada | vencida
+  prioridad         String   @default("media") // alta | media | baja
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("debts")
+}
+
+// ─── Gastos Fijos ─────────────────────────────────────────────────────────────
+
+model FixedExpense {
+  id                String  @id @default(uuid())
+  userId            String  @map("user_id")
+  nombre            String
+  monto             Decimal @db.Decimal(12, 2)
+  categoria         String  @default("otro") // vivienda | servicios | internet | transporte | educacion | salud | suscripciones | otro
+  fechaCorte        String  @map("fecha_corte")
+  frecuencia        String  @default("mensual") // mensual | quincenal | semanal | anual
+  metodoPago        String? @map("metodo_pago")
+  renovacionAuto    Boolean @default(false) @map("renovacion_auto")
+  pagadoEstePeriodo Boolean @default(false) @map("pagado_este_periodo")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("fixed_expenses")
+}
+
+// ─── Historial de Ahorro ──────────────────────────────────────────────────────
+
+model SavingsHistory {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  periodo   String
+  monto     Decimal  @db.Decimal(12, 2)
+  tipo      String   // ahorro | sin_ahorro
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("savings_history")
+}
+
+// ─── Ingresos Extra ───────────────────────────────────────────────────────────
+
+model ExtraIncome {
+  id              String  @id @default(uuid())
+  userId          String  @map("user_id")
+  nombre          String
+  monto           Decimal @db.Decimal(12, 2)
+  temporalidad    String  // una_vez | definido | indefinido
+  mesesRestantes  Int?    @map("meses_restantes")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("extra_incomes")
+}
+
+// ─── Gastos Hormiga ───────────────────────────────────────────────────────────
+
+model ImpulseExpense {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  nombre    String
+  monto     Decimal  @db.Decimal(12, 2)
+  categoria String   @default("otro") // cafe | comida | transporte | antojo | salida | otro
+  periodo   String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, periodo])
+  @@map("impulse_expenses")
+}
+
+// ─── Fondo de Emergencia - Historial ──────────────────────────────────────────
+
+model EmergencyFundHistory {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  periodo   String
+  monto     Decimal  @db.Decimal(12, 2)
+  tipo      String   // aporte | retiro
+  nota      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("emergency_fund_history")
+}
+
+// ─── Insignias del Usuario ────────────────────────────────────────────────────
+
+model UserBadge {
+  id         String   @id @default(uuid())
+  userId     String   @map("user_id")
+  badgeId    String   @map("badge_id")
+  unlockedAt DateTime @default(now()) @map("unlocked_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, badgeId])
+  @@map("user_badges")
+}
+
+// ─── Registro de Ingresos Reales (Flujo de Caja) ──────────────────────────────
+
+model IncomeRecord {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  monto     Decimal  @db.Decimal(12, 2)
+  tipo      String   // salario | extra
+  // Distribución aplicada al registrar
+  aAhorro         Decimal  @default(0) @map("a_ahorro") @db.Decimal(12, 2)
+  aObligaciones   Decimal  @default(0) @map("a_obligaciones") @db.Decimal(12, 2)
+  aLibre          Decimal  @default(0) @map("a_libre") @db.Decimal(12, 2)
+  aEndeudamiento  Decimal  @default(0) @map("a_endeudamiento") @db.Decimal(12, 2)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("income_records")
+}
+
+// ─── Phase 3: Social ──────────────────────────────────────────────────────────
+
+// Conexión / invitación entre usuarios
+model Connection {
+  id          String   @id @default(uuid())
+  requesterId String   @map("requester_id")
+  addresseeId String   @map("addressee_id")
+  // PENDING | ACCEPTED | REJECTED
+  status      String   @default("PENDING")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  requester User @relation("ConnectionRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  addressee User @relation("ConnectionAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+
+  @@unique([requesterId, addresseeId])
+  @@map("connections")
+}
+
+// Bolsillo de ahorro compartido
+model SharedPocket {
+  id          String   @id @default(uuid())
+  nombre      String
+  userAId     String   @map("user_a_id")
+  userBId     String   @map("user_b_id")
+  balance     Decimal  @default(0) @db.Decimal(12, 2)
+  meta        Decimal  @default(0) @db.Decimal(12, 2)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  userA     User               @relation("SharedPocketUserA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User               @relation("SharedPocketUserB", fields: [userBId], references: [id], onDelete: Cascade)
+  deposits  SharedDeposit[]
+
+  @@map("shared_pockets")
+}
+
+// Depósitos individuales al bolsillo compartido
+model SharedDeposit {
+  id             String   @id @default(uuid())
+  sharedPocketId String   @map("shared_pocket_id")
+  userId         String   @map("user_id")
+  monto          Decimal  @db.Decimal(12, 2)
+  nota           String?
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  sharedPocket SharedPocket @relation(fields: [sharedPocketId], references: [id], onDelete: Cascade)
+
+  @@map("shared_deposits")
+}
+
+// Préstamo P2P entre usuarios conectados
+model Loan {
+  id              String   @id @default(uuid())
+  lenderId        String   @map("lender_id")
+  borrowerId      String   @map("borrower_id")
+  amount          Decimal  @db.Decimal(12, 2)
+  remainingAmount Decimal  @map("remaining_amount") @db.Decimal(12, 2)
+  descripcion     String?
+  dueDate         String?  @map("due_date")
+  // PENDING_APPROVAL | ACTIVE | REJECTED | PAID
+  status          String   @default("PENDING_APPROVAL")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  lender   User          @relation("LoanLender",   fields: [lenderId],   references: [id], onDelete: Cascade)
+  borrower User          @relation("LoanBorrower",  fields: [borrowerId], references: [id], onDelete: Cascade)
+  payments LoanPayment[]
+
+  @@map("loans")
+}
+
+// Abono/pago parcial de un préstamo
+model LoanPayment {
+  id        String   @id @default(uuid())
+  loanId    String   @map("loan_id")
+  userId    String   @map("user_id")   // quien realiza el abono (borrower)
+  monto     Decimal  @db.Decimal(12, 2)
+  nota      String?
+  // PENDING_CONFIRMATION | CONFIRMED | REJECTED
+  status    String   @default("PENDING_CONFIRMATION")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  loan Loan @relation(fields: [loanId], references: [id], onDelete: Cascade)
+
+  @@map("loan_payments")
+}

@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: kiri_postgres
+    environment:
+      POSTGRES_USER: kiri
+      POSTGRES_PASSWORD: kiri_secret_2024
+      POSTGRES_DB: kiri_finance
+    ports:
+      - "5432:5432"
+    volumes:
+      - kiri_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  kiri_pgdata:
