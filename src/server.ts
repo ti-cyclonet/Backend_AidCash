@@ -30,6 +30,9 @@ const httpServer = http.createServer(app)
 
 // ─── Middleware global ────────────────────────────────────────────────────────
 
+// Trust first proxy (Nginx reverse proxy on EC2)
+app.set('trust proxy', 1)
+
 app.use(helmet())
 app.use(cors({
   origin: env.FRONTEND_URL,
