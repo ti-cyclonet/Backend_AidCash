@@ -187,12 +187,55 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       impulseExpenses:  impulseExpenses.map(e => ({ ...e, monto: Number(e.monto) })),
       savingsHistory:   savingsHistory.map(e => ({ ...e, monto: Number(e.monto) })),
       extraIncomes:     extraIncomes.map(e => ({ ...e, monto: Number(e.monto) })),
-      debts:            debts.map(d => ({ ...d, montoTotal: Number(d.montoTotal), cuotaPeriodo: Number(d.cuotaPeriodo) })),
+      debts:            debts.map(d => ({ ...d, montoTotal: Number(d.montoTotal), cuotaPeriodo: Number(d.cuotaPeriodo), montoPagadoEstePeriodo: d.montoPagadoEstePeriodo ? Number(d.montoPagadoEstePeriodo) : null })),
       fixedExpenses:    fixedExpenses.map(f => ({ ...f, monto: Number(f.monto) })),
+
+      // Ingresos registrados (sueldo + extras)
+      incomeRecords: await prisma.incomeRecord.findMany({
+        where: { userId, createdAt: { gte: from, lte: to } },
+        orderBy: { createdAt: 'desc' },
+      }).then(records => records.map(r => ({ ...r, monto: Number(r.monto) }))),
     })
   } catch (error) {
     console.error('[BalanceReport]', error)
     res.status(500).json({ error: 'Error al obtener el balance' })
+  }
+})
+
+// ─── DELETE /reports/income-records/:id ────────────────────────────────────────
+// Elimina un registro de ingreso del historial
+
+router.delete('/income-records/:id', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+    const existing = await prisma.incomeRecord.findFirst({ where: { id, userId } })
+    if (!existing) { res.status(404).json({ error: 'Registro no encontrado' }); return }
+    await prisma.incomeRecord.delete({ where: { id } })
+    res.json({ message: 'Registro eliminado' })
+  } catch (error) {
+    console.error('[DeleteIncomeRecord]', error)
+    res.status(500).json({ error: 'Error al eliminar registro' })
+  }
+})
+
+// ─── POST /reports/reset-history ──────────────────────────────────────────────
+// Borra todo el historial detallado (ingresos, ahorro, impulse) SIN tocar el wallet/cashBalance
+
+router.post('/reset-history', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+
+    await prisma.$transaction([
+      prisma.incomeRecord.deleteMany({ where: { userId } }),
+      prisma.savingsHistory.deleteMany({ where: { userId } }),
+      prisma.impulseExpense.deleteMany({ where: { userId } }),
+    ])
+
+    res.json({ message: 'Historial reiniciado correctamente' })
+  } catch (error) {
+    console.error('[ResetHistory]', error)
+    res.status(500).json({ error: 'Error al reiniciar historial' })
   }
 })
 

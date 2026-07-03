@@ -98,6 +98,61 @@ router.patch('/:id', validate(updateSchema), async (req: Request, res: Response)
   }
 })
 
+// ─── POST /fixed-expenses/:id/undo-pay ────────────────────────────────────────
+// Revierte el pago de un gasto fijo. Devuelve el monto al cashBalance.
+// Usa $transaction para garantizar consistencia atómica.
+
+router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+
+    const existing = await prisma.fixedExpense.findFirst({ where: { id, userId, pagadoEstePeriodo: true } })
+    if (!existing) {
+      res.status(404).json({ error: 'Gasto fijo pagado no encontrado' })
+      return
+    }
+
+    const montoDevolver = Number(existing.monto)
+
+    // Transacción atómica: revertir gasto fijo + devolver cashBalance
+    const [expense, user] = await prisma.$transaction([
+      prisma.fixedExpense.update({
+        where: { id },
+        data: { pagadoEstePeriodo: false },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          cashBalance: { increment: montoDevolver },
+        },
+        select: {
+          cashBalance: true,
+          walletAhorro: true,
+          walletObligaciones: true,
+          walletLibre: true,
+          walletEndeudamiento: true,
+        },
+      }),
+    ])
+
+    res.json({
+      fixedExpense: expense,
+      montoDevuelto: montoDevolver,
+      wallet: {
+        cashBalance: Number(user.cashBalance),
+        ahorro: Number(user.walletAhorro),
+        obligaciones: Number(user.walletObligaciones),
+        libre: Number(user.walletLibre),
+        endeudamiento: Number(user.walletEndeudamiento),
+      },
+    })
+  } catch (error) {
+    console.error('[UndoPayFixed]', error)
+    res.status(500).json({ error: 'Error al deshacer pago de gasto fijo' })
+  }
+})
+
 // ─── DELETE /fixed-expenses/:id ───────────────────────────────────────────────
 
 router.delete('/:id', async (req: Request, res: Response): Promise<void> => {

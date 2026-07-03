@@ -74,4 +74,20 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
   }
 })
 
+// ─── DELETE /savings/:id ──────────────────────────────────────────────────────
+
+router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+    const existing = await prisma.savingsHistory.findFirst({ where: { id, userId } })
+    if (!existing) { res.status(404).json({ error: 'Registro no encontrado' }); return }
+    await prisma.savingsHistory.delete({ where: { id } })
+    res.json({ message: 'Registro eliminado' })
+  } catch (error) {
+    console.error('[DeleteSaving]', error)
+    res.status(500).json({ error: 'Error al eliminar registro' })
+  }
+})
+
 export default router

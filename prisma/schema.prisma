@@ -85,8 +85,10 @@ model Debt {
   frecuenciaPago    String   @default("mensual") @map("frecuencia_pago") // mensual | quincenal
   diasPago          String   @default("1") @map("dias_pago") // JSON array: "15" o "15,30"
   pagadoEstePeriodo Boolean  @default(false) @map("pagado_este_periodo")
+  montoPagadoEstePeriodo Decimal? @map("monto_pagado_este_periodo") @db.Decimal(12, 2)
   estado            String   @default("activa") // activa | saldada | vencida
   prioridad         String   @default("media") // alta | media | baja
+  vencidoDesde      DateTime? @map("vencido_desde")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
