@@ -118,17 +118,26 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
     const nuevoSaldo = Math.max(0, currentSaldo - montoPago)
     const nuevoEstado = nuevoSaldo <= 0 ? 'saldada' : 'activa'
 
+    // Guardar el monto REAL pagado para poder revertirlo y mostrarlo correctamente
     const debt = await prisma.debt.update({
       where: { id },
       data: {
         saldoRestante: nuevoSaldo,
         pagadoEstePeriodo: true,
+        montoPagadoEstePeriodo: montoPago,
         estado: nuevoEstado,
       },
     })
 
     res.json({
-      debt: { ...debt, montoTotal: Number(debt.montoTotal), saldoRestante: Number(debt.saldoRestante), cuotaPeriodo: Number(debt.cuotaPeriodo), tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null },
+      debt: {
+        ...debt,
+        montoTotal: Number(debt.montoTotal),
+        saldoRestante: Number(debt.saldoRestante),
+        cuotaPeriodo: Number(debt.cuotaPeriodo),
+        montoPagadoEstePeriodo: debt.montoPagadoEstePeriodo ? Number(debt.montoPagadoEstePeriodo) : null,
+        tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
+      },
       pagado: montoPago,
       saldoAnterior: currentSaldo,
       saldoNuevo: nuevoSaldo,
@@ -137,6 +146,77 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
   } catch (error) {
     console.error('[PayDebt]', error)
     res.status(500).json({ error: 'Error al registrar pago' })
+  }
+})
+
+// ─── POST /debts/:id/undo-pay ─────────────────────────────────────────────────
+// Revierte un pago de cuota. Devuelve el monto al saldoRestante y al cashBalance.
+// Usa $transaction para garantizar consistencia atómica.
+
+router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+
+    const existing = await prisma.debt.findFirst({ where: { id, userId, pagadoEstePeriodo: true } })
+    if (!existing) {
+      res.status(404).json({ error: 'Deuda pagada no encontrada' })
+      return
+    }
+
+    // Usar el monto REAL que se pagó (guardado en montoPagadoEstePeriodo)
+    // Si no existe el campo, fallback a cuotaPeriodo
+    const montoDevolver = existing.montoPagadoEstePeriodo
+      ? Number(existing.montoPagadoEstePeriodo)
+      : Number(existing.cuotaPeriodo)
+
+    // Transacción atómica: revertir deuda + devolver cashBalance
+    const [debt, user] = await prisma.$transaction([
+      prisma.debt.update({
+        where: { id },
+        data: {
+          saldoRestante: { increment: montoDevolver },
+          pagadoEstePeriodo: false,
+          montoPagadoEstePeriodo: null, // Limpiar el registro del pago
+          estado: 'activa',
+        },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          cashBalance: { increment: montoDevolver },
+        },
+        select: {
+          cashBalance: true,
+          walletAhorro: true,
+          walletObligaciones: true,
+          walletLibre: true,
+          walletEndeudamiento: true,
+        },
+      }),
+    ])
+
+    res.json({
+      debt: {
+        ...debt,
+        montoTotal: Number(debt.montoTotal),
+        saldoRestante: Number(debt.saldoRestante),
+        cuotaPeriodo: Number(debt.cuotaPeriodo),
+        montoPagadoEstePeriodo: null,
+        tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
+      },
+      montoDevuelto: montoDevolver,
+      wallet: {
+        cashBalance: Number(user.cashBalance),
+        ahorro: Number(user.walletAhorro),
+        obligaciones: Number(user.walletObligaciones),
+        libre: Number(user.walletLibre),
+        endeudamiento: Number(user.walletEndeudamiento),
+      },
+    })
+  } catch (error) {
+    console.error('[UndoPayDebt]', error)
+    res.status(500).json({ error: 'Error al deshacer pago de deuda' })
   }
 })
 
