@@ -417,4 +417,31 @@ router.get('/dashboard-summary', async (req: Request, res: Response): Promise<vo
   }
 })
 
+// ─── POST /users/push-subscription ────────────────────────────────────────────
+// Guarda la suscripción push del navegador del usuario
+
+router.post('/push-subscription', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { subscription } = req.body as { subscription: { endpoint: string; keys: { p256dh: string; auth: string } } }
+
+    if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+      res.status(400).json({ error: 'Suscripción inválida' })
+      return
+    }
+
+    // Upsert: si ya existe el endpoint, actualizar
+    await prisma.pushSubscription.upsert({
+      where: { endpoint: subscription.endpoint },
+      update: { userId, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth },
+      create: { userId, endpoint: subscription.endpoint, p256dh: subscription.keys.p256dh, auth: subscription.keys.auth },
+    })
+
+    res.json({ message: 'Suscripción guardada' })
+  } catch (error) {
+    console.error('[PushSubscription]', error)
+    res.status(500).json({ error: 'Error al guardar suscripción' })
+  }
+})
+
 export default router

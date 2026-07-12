@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
+import { pushLoanPayment } from '../lib/push.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -195,7 +196,8 @@ router.post('/reject', validate(respondLoanSchema), async (req: Request, res: Re
 })
 
 // ─── POST /loans/payment ──────────────────────────────────────────────────────
-// Borrower registra un abono → queda en PENDING_CONFIRMATION
+// Borrower registra un abono
+// Si la conexión es de tipo PARTNER, se auto-confirma (sin paso de pending)
 
 router.post('/payment', validate(paymentSchema), async (req: Request, res: Response): Promise<void> => {
   try {
@@ -216,26 +218,77 @@ router.post('/payment', validate(paymentSchema), async (req: Request, res: Respo
       return
     }
 
+    // Verificar si son PARTNER — auto-confirmar si lo son
+    const partnerConnection = await prisma.connection.findFirst({
+      where: {
+        status: 'ACCEPTED',
+        role: 'PARTNER',
+        OR: [
+          { requesterId: borrowerId, addresseeId: loan.lenderId },
+          { requesterId: loan.lenderId, addresseeId: borrowerId },
+        ],
+      },
+    })
+
+    const isPartner = !!partnerConnection
+    const paymentStatus = isPartner ? 'CONFIRMED' : 'PENDING_CONFIRMATION'
+
     const borrower = await prisma.user.findUnique({
       where: { id: borrowerId },
       select: { nombre: true },
     })
 
-    const payment = await prisma.loanPayment.create({
-      data: { loanId, userId: borrowerId, monto, nota, status: 'PENDING_CONFIRMATION' },
-    })
+    if (isPartner) {
+      // Auto-confirmar: crear pago + descontar del remaining en una transacción
+      const newRemaining = Number(loan.remainingAmount) - monto
+      const newLoanStatus = newRemaining <= 0 ? 'PAID' : 'ACTIVE'
 
-    // Notificar al prestamista
-    emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_PAYMENT, {
-      paymentId: payment.id,
-      loanId,
-      monto,
-      nota,
-      borrower: { id: borrowerId, nombre: borrower?.nombre },
-      remainingAmount: Number(loan.remainingAmount),
-    })
+      const [payment, updatedLoan] = await prisma.$transaction([
+        prisma.loanPayment.create({
+          data: { loanId, userId: borrowerId, monto, nota, status: 'CONFIRMED' },
+        }),
+        prisma.loan.update({
+          where: { id: loanId },
+          data: { remainingAmount: Math.max(0, newRemaining), status: newLoanStatus },
+        }),
+      ])
 
-    res.status(201).json({ payment: { ...payment, monto: Number(payment.monto) } })
+      // Notificar al prestamista (ya confirmado)
+      emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_PAYMENT_CONFIRMED, {
+        paymentId: payment.id,
+        loanId,
+        monto,
+        remainingAmount: Number(updatedLoan.remainingAmount),
+        loanStatus: newLoanStatus,
+        autoConfirmed: true,
+        borrower: { id: borrowerId, nombre: borrower?.nombre },
+      })
+
+      res.status(201).json({
+        payment: { ...payment, monto: Number(payment.monto) },
+        autoConfirmed: true,
+        loan: { ...updatedLoan, amount: Number(updatedLoan.amount), remainingAmount: Number(updatedLoan.remainingAmount) },
+      })
+    } else {
+      // Flujo normal: queda en PENDING_CONFIRMATION
+      const payment = await prisma.loanPayment.create({
+        data: { loanId, userId: borrowerId, monto, nota, status: 'PENDING_CONFIRMATION' },
+      })
+
+      emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_PAYMENT, {
+        paymentId: payment.id,
+        loanId,
+        monto,
+        nota,
+        borrower: { id: borrowerId, nombre: borrower?.nombre },
+        remainingAmount: Number(loan.remainingAmount),
+      })
+
+      // Push notification al prestamista
+      pushLoanPayment(loan.lenderId, borrower?.nombre ?? 'Alguien', monto)
+
+      res.status(201).json({ payment: { ...payment, monto: Number(payment.monto) }, autoConfirmed: false })
+    }
   } catch (error) {
     console.error('[LoanPayment]', error)
     res.status(500).json({ error: 'Error al registrar abono' })
