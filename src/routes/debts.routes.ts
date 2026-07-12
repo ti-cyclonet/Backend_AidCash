@@ -70,22 +70,26 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createDebtSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, montoTotal, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad } = req.body
+    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad } = req.body
 
     const debt = await prisma.debt.create({
       data: {
         userId,
         nombre,
         montoTotal,
-        saldoRestante: montoTotal, // Al crear, saldo = total
+        // Si el usuario ingresó un saldo actual diferente (ya venía pagando), usarlo
+        saldoRestante: saldoRestante ?? montoTotal,
+        montoInicial: montoTotal,
         cuotaPeriodo,
         acreedor: acreedor || '',
         frecuenciaPago: frecuenciaPago || 'mensual',
         diasPago: diasPago || '1',
         tasaInteres: tasaInteres ?? null,
+        tasaInteresAplicada: tasaInteres ?? null,
         prioridad: prioridad || 'media',
         pagadoEstePeriodo: false,
         estado: 'activa',
+        fechaInicio: new Date(),
       },
     })
 
@@ -99,8 +103,10 @@ router.post('/', validate(createDebtSchema), async (req: Request, res: Response)
 })
 
 // ─── POST /debts/:id/pay ──────────────────────────────────────────────────────
-// Registra un pago de cuota. Resta del saldoRestante.
-// Si el saldo llega a 0, marca la deuda como saldada.
+// Registra un pago de cuota con cálculo de amortización.
+// Si la deuda tiene tasa de interés, divide el pago en interés + abono a capital.
+// Solo el abono a capital reduce el saldoRestante.
+// Registra el historial en debt_payments.
 
 router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Response): Promise<void> => {
   try {
@@ -115,19 +121,48 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
 
     const montoPago = req.body.monto ?? Number(existing.cuotaPeriodo)
     const currentSaldo = Number(existing.saldoRestante)
-    const nuevoSaldo = Math.max(0, currentSaldo - montoPago)
+
+    // Obtener la tasa de interés aplicada (prioridad: tasaInteresAplicada > tasaInteres)
+    const tasaMensual = existing.tasaInteresAplicada
+      ? Number(existing.tasaInteresAplicada)
+      : existing.tasaInteres
+        ? Number(existing.tasaInteres)
+        : null
+
+    // Calcular amortización
+    const { calcularAmortizacion } = await import('../lib/amortization.js')
+    const amort = calcularAmortizacion(currentSaldo, tasaMensual, montoPago)
+
+    const nuevoSaldo = amort.saldoPosterior
     const nuevoEstado = nuevoSaldo <= 0 ? 'saldada' : 'activa'
 
-    // Guardar el monto REAL pagado para poder revertirlo y mostrarlo correctamente
-    const debt = await prisma.debt.update({
-      where: { id },
-      data: {
-        saldoRestante: nuevoSaldo,
-        pagadoEstePeriodo: true,
-        montoPagadoEstePeriodo: montoPago,
-        estado: nuevoEstado,
-      },
-    })
+    // Periodo actual (para historial)
+    const now = new Date()
+    const periodo = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+
+    // Transacción: actualizar deuda + registrar historial de pago
+    const [debt, payment] = await prisma.$transaction([
+      prisma.debt.update({
+        where: { id },
+        data: {
+          saldoRestante: nuevoSaldo,
+          pagadoEstePeriodo: true,
+          montoPagadoEstePeriodo: montoPago,
+          estado: nuevoEstado,
+        },
+      }),
+      prisma.debtPayment.create({
+        data: {
+          debtId: id,
+          montoPagado: montoPago,
+          abonoCapital: amort.abonoCapital,
+          pagoInteres: amort.pagoInteres,
+          saldoAnterior: amort.saldoAnterior,
+          saldoPosterior: amort.saldoPosterior,
+          periodo,
+        },
+      }),
+    ])
 
     res.json({
       debt: {
@@ -137,6 +172,11 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
         cuotaPeriodo: Number(debt.cuotaPeriodo),
         montoPagadoEstePeriodo: debt.montoPagadoEstePeriodo ? Number(debt.montoPagadoEstePeriodo) : null,
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
+      },
+      amortizacion: {
+        montoPagado: amort.montoPagado,
+        pagoInteres: amort.pagoInteres,
+        abonoCapital: amort.abonoCapital,
       },
       pagado: montoPago,
       saldoAnterior: currentSaldo,

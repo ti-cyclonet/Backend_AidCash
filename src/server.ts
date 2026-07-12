@@ -26,6 +26,7 @@ import sharedPocketsRoutes from './routes/shared-pockets.routes.js'
 import loansRoutes from './routes/loans.routes.js'
 import homeBudgetRoutes from './routes/home-budget.routes.js'
 import expenseSplitRoutes from './routes/expense-split.routes.js'
+import banksRoutes from './routes/banks.routes.js'
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -76,6 +77,7 @@ app.use('/api/shared-pockets', sharedPocketsRoutes)
 app.use('/api/loans', loansRoutes)
 app.use('/api/home-budget', homeBudgetRoutes)
 app.use('/api/expenses/split', expenseSplitRoutes)
+app.use('/api/banks', banksRoutes)
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 

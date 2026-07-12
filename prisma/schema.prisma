@@ -79,9 +79,11 @@ model Debt {
   userId            String   @map("user_id")
   nombre            String
   montoTotal        Decimal  @map("monto_total") @db.Decimal(12, 2)
+  montoInicial      Decimal? @map("monto_inicial") @db.Decimal(12, 2)
   saldoRestante     Decimal  @map("saldo_restante") @db.Decimal(12, 2)
   cuotaPeriodo      Decimal  @map("cuota_periodo") @db.Decimal(12, 2)
   tasaInteres       Decimal? @map("tasa_interes") @db.Decimal(5, 2)
+  tasaInteresAplicada Decimal? @map("tasa_interes_aplicada") @db.Decimal(7, 4)
   acreedor          String   @default("")
   frecuenciaPago    String   @default("mensual") @map("frecuencia_pago") // mensual | quincenal
   diasPago          String   @default("1") @map("dias_pago") // JSON array: "15" o "15,30"
@@ -90,15 +92,53 @@ model Debt {
   estado            String   @default("activa") // activa | saldada | vencida
   prioridad         String   @default("media") // alta | media | baja
   vencidoDesde      DateTime? @map("vencido_desde")
+  fechaInicio       DateTime? @map("fecha_inicio") @db.Date
+  // Relación con entidad bancaria
+  bankEntityId      String?  @map("bank_entity_id")
   // Deuda conjunta: segundo responsable (pareja/familia)
   coOwnerId         String?  @map("co_owner_id")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
-  user    User  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  coOwner User? @relation("DebtCoOwner", fields: [coOwnerId], references: [id], onDelete: SetNull)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  coOwner    User?       @relation("DebtCoOwner", fields: [coOwnerId], references: [id], onDelete: SetNull)
+  bankEntity BankEntity? @relation(fields: [bankEntityId], references: [id], onDelete: SetNull)
+  payments   DebtPayment[]
 
   @@map("debts")
+}
+
+// ─── Historial de pagos de deuda (amortización) ───────────────────────────────
+
+model DebtPayment {
+  id             String   @id @default(uuid())
+  debtId         String   @map("debt_id")
+  montoPagado    Decimal  @map("monto_pagado") @db.Decimal(12, 2)
+  abonoCapital   Decimal  @map("abono_capital") @db.Decimal(12, 2)
+  pagoInteres    Decimal  @map("pago_interes") @db.Decimal(12, 2)
+  saldoAnterior  Decimal  @map("saldo_anterior") @db.Decimal(12, 2)
+  saldoPosterior Decimal  @map("saldo_posterior") @db.Decimal(12, 2)
+  periodo        String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  debt Debt @relation(fields: [debtId], references: [id], onDelete: Cascade)
+
+  @@map("debt_payments")
+}
+
+// ─── Entidades Bancarias (colaborativa) ───────────────────────────────────────
+
+model BankEntity {
+  id                  String   @id @default(uuid())
+  nombre              String   @unique
+  tasaInteresPromedio Decimal  @map("tasa_interes_promedio") @db.Decimal(7, 4)
+  esVerificado        Boolean  @default(false) @map("es_verificado")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  debts Debt[]
+
+  @@map("bank_entities")
 }
 
 // ─── Gastos Fijos ─────────────────────────────────────────────────────────────
