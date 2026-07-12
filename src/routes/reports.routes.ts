@@ -57,6 +57,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       fixedExpenses,
       user,
       incomeRecordsAll,
+      debtPayments,
     ] = await Promise.all([
       // Gastos hormiga — filtrados por createdAt
       prisma.impulseExpense.findMany({
@@ -99,6 +100,16 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         where: { userId },
         _sum: { monto: true },
       }),
+
+      // Historial de pagos de deuda con amortización (periodo actual)
+      prisma.debtPayment.findMany({
+        where: {
+          debt: { userId },
+          createdAt: { gte: from, lte: to },
+        },
+        include: { debt: { select: { nombre: true, acreedor: true } } },
+        orderBy: { createdAt: 'desc' },
+      }),
     ])
 
     // ── Totales para el balance ─────────────────────────────────────────────────
@@ -109,6 +120,20 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // Deudas y fijos pagados EN ESTE PERIODO (marcados como pagado)
     const totalDebts   = debts.filter(d => d.pagadoEstePeriodo).reduce((s, d) => s + Number(d.cuotaPeriodo), 0)
     const totalFixed   = fixedExpenses.filter(f => f.pagadoEstePeriodo).reduce((s, f) => s + Number(f.monto), 0)
+
+    // ── Amortización: intereses pagados vs capital abonado ────────────────────
+    const totalInteresPagado = debtPayments.reduce((s, p) => s + Number(p.pagoInteres), 0)
+    const totalCapitalAbonado = debtPayments.reduce((s, p) => s + Number(p.abonoCapital), 0)
+    const totalPagosDeuda = debtPayments.reduce((s, p) => s + Number(p.montoPagado), 0)
+
+    // Intereses ahorrados: si el usuario paga más de la cuota mínima, ahorra intereses futuros
+    // Cálculo simplificado: por cada peso extra abonado al capital, se evita pagar interés sobre ese peso
+    const allDebtPaymentsEver = await prisma.debtPayment.aggregate({
+      where: { debt: { userId } },
+      _sum: { pagoInteres: true, abonoCapital: true, montoPagado: true },
+    })
+    const totalInteresHistorico = Number(allDebtPaymentsEver._sum.pagoInteres ?? 0)
+    const totalCapitalHistorico = Number(allDebtPaymentsEver._sum.abonoCapital ?? 0)
 
     // Ingreso REAL del periodo = lo que el usuario ha registrado en income_records dentro del rango
     // Si no hay registros en el periodo, usamos ingresoBase como referencia
@@ -177,6 +202,12 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         totalSaved,
         cashBalance: Number(user?.cashBalance ?? 0),
         frecuenciaIngreso: user?.frecuenciaIngreso ?? 'mensual',
+        // Amortización
+        totalInteresPagado,
+        totalCapitalAbonado,
+        totalPagosDeuda,
+        totalInteresHistorico,
+        totalCapitalHistorico,
       },
 
       // Para charts
@@ -189,6 +220,20 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       extraIncomes:     extraIncomes.map(e => ({ ...e, monto: Number(e.monto) })),
       debts:            debts.map(d => ({ ...d, montoTotal: Number(d.montoTotal), cuotaPeriodo: Number(d.cuotaPeriodo), montoPagadoEstePeriodo: d.montoPagadoEstePeriodo ? Number(d.montoPagadoEstePeriodo) : null })),
       fixedExpenses:    fixedExpenses.map(f => ({ ...f, monto: Number(f.monto) })),
+
+      // Historial de amortización
+      debtPayments: debtPayments.map(p => ({
+        id: p.id,
+        debtName: p.debt.nombre,
+        acreedor: p.debt.acreedor,
+        montoPagado: Number(p.montoPagado),
+        abonoCapital: Number(p.abonoCapital),
+        pagoInteres: Number(p.pagoInteres),
+        saldoAnterior: Number(p.saldoAnterior),
+        saldoPosterior: Number(p.saldoPosterior),
+        periodo: p.periodo,
+        createdAt: p.createdAt,
+      })),
 
       // Ingresos registrados (sueldo + extras)
       incomeRecords: await prisma.incomeRecord.findMany({

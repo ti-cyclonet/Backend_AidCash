@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
+import { pushSocialInvite } from '../lib/push.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -12,6 +13,7 @@ router.use(authMiddleware)
 
 const inviteSchema = z.object({
   correo: z.string().email('Correo inválido'),
+  role: z.enum(['FRIEND', 'FAMILY', 'PARTNER']).optional().default('FRIEND'),
 })
 
 const respondSchema = z.object({
@@ -62,7 +64,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/invite', validate(inviteSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const requesterId = req.user!.userId
-    const { correo } = req.body as { correo: string }
+    const { correo, role = 'FRIEND' } = req.body as { correo: string; role?: 'FRIEND' | 'FAMILY' | 'PARTNER' }
 
     // No invitarse a sí mismo
     const requester = await prisma.user.findUnique({
@@ -81,6 +83,21 @@ router.post('/invite', validate(inviteSchema), async (req: Request, res: Respons
     if (!addressee) {
       res.status(404).json({ error: 'No existe ningún usuario con ese correo' })
       return
+    }
+
+    // Restricción PARTNER: solo una conexión activa con este rol por usuario
+    if (role === 'PARTNER') {
+      const existingPartner = await prisma.connection.findFirst({
+        where: {
+          status: 'ACCEPTED',
+          role: 'PARTNER',
+          OR: [{ requesterId }, { addresseeId: requesterId }],
+        },
+      })
+      if (existingPartner) {
+        res.status(409).json({ error: 'Ya tienes una conexión de pareja activa. Solo puedes tener una.' })
+        return
+      }
     }
 
     // Verificar que no exista ya una conexión entre ellos
@@ -102,14 +119,18 @@ router.post('/invite', validate(inviteSchema), async (req: Request, res: Respons
     }
 
     const connection = await prisma.connection.create({
-      data: { requesterId, addresseeId: addressee.id, status: 'PENDING' },
+      data: { requesterId, addresseeId: addressee.id, status: 'PENDING', role },
     })
 
     // Notificar en tiempo real al destinatario
     emitToUser(addressee.id, SOCKET_EVENTS.NEW_INVITE, {
       connectionId: connection.id,
       from: { id: requesterId, nombre: requester?.nombre, correo: requester?.correo },
+      role,
     })
+
+    // Push notification (llega incluso con la app cerrada)
+    pushSocialInvite(addressee.id, requester?.nombre ?? 'Alguien')
 
     res.status(201).json({ connection, addressee })
   } catch (error) {

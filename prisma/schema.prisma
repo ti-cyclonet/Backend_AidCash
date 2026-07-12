@@ -45,14 +45,15 @@ model User {
   badges                UserBadge[]
   refreshTokens         RefreshToken[]
   incomeRecords         IncomeRecord[]
+  pushSubscriptions     PushSubscription[]
 
   // Relaciones Phase 3 — Social
   sentConnections       Connection[]       @relation("ConnectionRequester")
   receivedConnections   Connection[]       @relation("ConnectionAddressee")
-  sharedPocketsA        SharedPocket[]     @relation("SharedPocketUserA")
-  sharedPocketsB        SharedPocket[]     @relation("SharedPocketUserB")
+  sharedPocketMembers   SharedPocketMember[]
   loansGiven            Loan[]             @relation("LoanLender")
   loansReceived         Loan[]             @relation("LoanBorrower")
+  coOwnedDebts          Debt[]             @relation("DebtCoOwner")
 
   @@map("users")
 }
@@ -78,9 +79,11 @@ model Debt {
   userId            String   @map("user_id")
   nombre            String
   montoTotal        Decimal  @map("monto_total") @db.Decimal(12, 2)
+  montoInicial      Decimal? @map("monto_inicial") @db.Decimal(12, 2)
   saldoRestante     Decimal  @map("saldo_restante") @db.Decimal(12, 2)
   cuotaPeriodo      Decimal  @map("cuota_periodo") @db.Decimal(12, 2)
   tasaInteres       Decimal? @map("tasa_interes") @db.Decimal(5, 2)
+  tasaInteresAplicada Decimal? @map("tasa_interes_aplicada") @db.Decimal(7, 4)
   acreedor          String   @default("")
   frecuenciaPago    String   @default("mensual") @map("frecuencia_pago") // mensual | quincenal
   diasPago          String   @default("1") @map("dias_pago") // JSON array: "15" o "15,30"
@@ -89,12 +92,53 @@ model Debt {
   estado            String   @default("activa") // activa | saldada | vencida
   prioridad         String   @default("media") // alta | media | baja
   vencidoDesde      DateTime? @map("vencido_desde")
+  fechaInicio       DateTime? @map("fecha_inicio") @db.Date
+  // Relación con entidad bancaria
+  bankEntityId      String?  @map("bank_entity_id")
+  // Deuda conjunta: segundo responsable (pareja/familia)
+  coOwnerId         String?  @map("co_owner_id")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  coOwner    User?       @relation("DebtCoOwner", fields: [coOwnerId], references: [id], onDelete: SetNull)
+  bankEntity BankEntity? @relation(fields: [bankEntityId], references: [id], onDelete: SetNull)
+  payments   DebtPayment[]
 
   @@map("debts")
+}
+
+// ─── Historial de pagos de deuda (amortización) ───────────────────────────────
+
+model DebtPayment {
+  id             String   @id @default(uuid())
+  debtId         String   @map("debt_id")
+  montoPagado    Decimal  @map("monto_pagado") @db.Decimal(12, 2)
+  abonoCapital   Decimal  @map("abono_capital") @db.Decimal(12, 2)
+  pagoInteres    Decimal  @map("pago_interes") @db.Decimal(12, 2)
+  saldoAnterior  Decimal  @map("saldo_anterior") @db.Decimal(12, 2)
+  saldoPosterior Decimal  @map("saldo_posterior") @db.Decimal(12, 2)
+  periodo        String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  debt Debt @relation(fields: [debtId], references: [id], onDelete: Cascade)
+
+  @@map("debt_payments")
+}
+
+// ─── Entidades Bancarias (colaborativa) ───────────────────────────────────────
+
+model BankEntity {
+  id                  String   @id @default(uuid())
+  nombre              String   @unique
+  tasaInteresPromedio Decimal  @map("tasa_interes_promedio") @db.Decimal(7, 4)
+  esVerificado        Boolean  @default(false) @map("es_verificado")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  debts Debt[]
+
+  @@map("bank_entities")
 }
 
 // ─── Gastos Fijos ─────────────────────────────────────────────────────────────
@@ -216,17 +260,40 @@ model IncomeRecord {
   @@map("income_records")
 }
 
+// ─── Push Subscriptions (Web Push) ────────────────────────────────────────────
+
+model PushSubscription {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("push_subscriptions")
+}
+
 // ─── Phase 3: Social ──────────────────────────────────────────────────────────
+
+// Rol de la conexión social
+enum ConnectionRole {
+  FRIEND
+  FAMILY
+  PARTNER
+}
 
 // Conexión / invitación entre usuarios
 model Connection {
-  id          String   @id @default(uuid())
-  requesterId String   @map("requester_id")
-  addresseeId String   @map("addressee_id")
+  id          String         @id @default(uuid())
+  requesterId String         @map("requester_id")
+  addresseeId String         @map("addressee_id")
   // PENDING | ACCEPTED | REJECTED
-  status      String   @default("PENDING")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
+  status      String         @default("PENDING")
+  role        ConnectionRole @default(FRIEND)
+  createdAt   DateTime       @default(now()) @map("created_at")
+  updatedAt   DateTime       @updatedAt @map("updated_at")
 
   requester User @relation("ConnectionRequester", fields: [requesterId], references: [id], onDelete: Cascade)
   addressee User @relation("ConnectionAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
@@ -235,22 +302,34 @@ model Connection {
   @@map("connections")
 }
 
-// Bolsillo de ahorro compartido
+// Bolsillo de ahorro compartido (multiusuario — soporta pareja, familia, amigos)
 model SharedPocket {
   id          String   @id @default(uuid())
   nombre      String
-  userAId     String   @map("user_a_id")
-  userBId     String   @map("user_b_id")
   balance     Decimal  @default(0) @db.Decimal(12, 2)
   meta        Decimal  @default(0) @db.Decimal(12, 2)
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
-  userA     User               @relation("SharedPocketUserA", fields: [userAId], references: [id], onDelete: Cascade)
-  userB     User               @relation("SharedPocketUserB", fields: [userBId], references: [id], onDelete: Cascade)
+  members   SharedPocketMember[]
   deposits  SharedDeposit[]
 
   @@map("shared_pockets")
+}
+
+// Miembros de un bolsillo compartido (tabla relacional N:M)
+model SharedPocketMember {
+  id             String   @id @default(uuid())
+  sharedPocketId String   @map("shared_pocket_id")
+  userId         String   @map("user_id")
+  role           String   @default("member") // owner | member
+  joinedAt       DateTime @default(now()) @map("joined_at")
+
+  sharedPocket SharedPocket @relation(fields: [sharedPocketId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([sharedPocketId, userId])
+  @@map("shared_pocket_members")
 }
 
 // Depósitos individuales al bolsillo compartido
@@ -278,6 +357,8 @@ model Loan {
   dueDate         String?  @map("due_date")
   // PENDING_APPROVAL | ACTIVE | REJECTED | PAID
   status          String   @default("PENDING_APPROVAL")
+  // Referencia al gasto hormiga que originó el split (opcional)
+  sourceExpenseId String?  @map("source_expense_id")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
