@@ -49,10 +49,21 @@ async function requireConnection(userAId: string, userBId: string): Promise<bool
 
 // ─── GET /loans ───────────────────────────────────────────────────────────────
 // Devuelve préstamos donde el usuario es prestamista o prestatario
+// Auto-elimina préstamos pagados con más de 3 días (limpieza lazy)
 
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
+
+    // Auto-cleanup: eliminar préstamos pagados hace más de 3 días
+    const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000)
+    await prisma.loan.deleteMany({
+      where: {
+        status: 'PAID',
+        updatedAt: { lt: threeDaysAgo },
+        OR: [{ lenderId: userId }, { borrowerId: userId }],
+      },
+    })
 
     const loans = await prisma.loan.findMany({
       where: { OR: [{ lenderId: userId }, { borrowerId: userId }] },
@@ -192,6 +203,31 @@ router.post('/reject', validate(respondLoanSchema), async (req: Request, res: Re
   } catch (error) {
     console.error('[RejectLoan]', error)
     res.status(500).json({ error: 'Error al rechazar préstamo' })
+  }
+})
+
+// ─── POST /loans/cancel — Borrower cancela su propia solicitud pendiente ──────
+
+router.post('/cancel', validate(respondLoanSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const borrowerId = req.user!.userId
+    const { loanId } = req.body as { loanId: string }
+
+    const loan = await prisma.loan.findFirst({
+      where: { id: loanId, borrowerId, status: 'PENDING_APPROVAL' },
+    })
+    if (!loan) {
+      res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' })
+      return
+    }
+
+    // Eliminar directamente (ya no tiene sentido mantenerla)
+    await prisma.loan.delete({ where: { id: loanId } })
+
+    res.json({ message: 'Solicitud cancelada' })
+  } catch (error) {
+    console.error('[CancelLoan]', error)
+    res.status(500).json({ error: 'Error al cancelar solicitud' })
   }
 })
 

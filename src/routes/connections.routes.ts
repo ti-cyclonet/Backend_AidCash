@@ -233,4 +233,134 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
+// ─── GET /connections/:id/shared — Vista unificada por conexión ───────────────
+// Devuelve los bolsillos compartidos y préstamos entre el usuario y un peer
+
+router.get('/:id/shared', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const connId = req.params.id as string
+
+    // Verificar que la conexión existe y obtener el peer
+    const conn = await prisma.connection.findFirst({
+      where: { id: connId, status: 'ACCEPTED', OR: [{ requesterId: userId }, { addresseeId: userId }] },
+      include: {
+        requester: { select: { id: true, nombre: true, correo: true } },
+        addressee: { select: { id: true, nombre: true, correo: true } },
+      },
+    })
+    if (!conn) {
+      res.status(404).json({ error: 'Conexión no encontrada' })
+      return
+    }
+
+    const peerId = conn.requesterId === userId ? conn.addresseeId : conn.requesterId
+    const peer = conn.requesterId === userId ? conn.addressee : conn.requester
+
+    // Bolsillos compartidos entre ambos
+    const pockets = await prisma.sharedPocket.findMany({
+      where: {
+        AND: [
+          { members: { some: { userId } } },
+          { members: { some: { userId: peerId } } },
+        ],
+      },
+      include: {
+        members: { include: { user: { select: { id: true, nombre: true } } } },
+        deposits: { orderBy: { createdAt: 'desc' }, take: 5 },
+      },
+    })
+
+    // Préstamos entre ambos
+    const loans = await prisma.loan.findMany({
+      where: {
+        OR: [
+          { lenderId: userId, borrowerId: peerId },
+          { lenderId: peerId, borrowerId: userId },
+        ],
+      },
+      include: {
+        payments: { orderBy: { createdAt: 'desc' }, take: 5 },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    res.json({
+      connection: { id: conn.id, role: conn.role, createdAt: conn.createdAt },
+      peer,
+      pockets: pockets.map(p => ({
+        id: p.id,
+        nombre: p.nombre,
+        balance: Number(p.balance),
+        meta: Number(p.meta),
+        members: p.members.map(m => ({ id: m.user.id, nombre: m.user.nombre, role: m.role })),
+        recentDeposits: p.deposits.map(d => ({ ...d, monto: Number(d.monto) })),
+      })),
+      loans: loans.map(l => ({
+        id: l.id,
+        amount: Number(l.amount),
+        remainingAmount: Number(l.remainingAmount),
+        status: l.status,
+        descripcion: l.descripcion,
+        lenderId: l.lenderId,
+        borrowerId: l.borrowerId,
+        createdAt: l.createdAt,
+        recentPayments: l.payments.map(p => ({ ...p, monto: Number(p.monto) })),
+      })),
+    })
+  } catch (error) {
+    console.error('[GetConnectionShared]', error)
+    res.status(500).json({ error: 'Error al obtener datos compartidos' })
+  }
+})
+
+// ─── PATCH /connections/:id/role ──────────────────────────────────────────────
+// Cambiar el rol de una conexión existente
+
+const updateRoleSchema = z.object({
+  role: z.enum(['FRIEND', 'FAMILY', 'PARTNER']),
+})
+
+router.patch('/:id/role', validate(updateRoleSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+    const { role } = req.body as { role: 'FRIEND' | 'FAMILY' | 'PARTNER' }
+
+    const conn = await prisma.connection.findFirst({
+      where: { id, status: 'ACCEPTED', OR: [{ requesterId: userId }, { addresseeId: userId }] },
+    })
+    if (!conn) {
+      res.status(404).json({ error: 'Conexión no encontrada' })
+      return
+    }
+
+    // Restricción PARTNER: solo una activa por usuario
+    if (role === 'PARTNER') {
+      const existingPartner = await prisma.connection.findFirst({
+        where: {
+          id: { not: id },
+          status: 'ACCEPTED',
+          role: 'PARTNER',
+          OR: [{ requesterId: userId }, { addresseeId: userId }],
+        },
+      })
+      if (existingPartner) {
+        res.status(409).json({ error: 'Ya tienes una conexión de pareja activa.' })
+        return
+      }
+    }
+
+    const updated = await prisma.connection.update({
+      where: { id },
+      data: { role },
+    })
+
+    res.json({ connection: updated })
+  } catch (error) {
+    console.error('[UpdateConnectionRole]', error)
+    res.status(500).json({ error: 'Error al actualizar rol' })
+  }
+})
+
 export default router
