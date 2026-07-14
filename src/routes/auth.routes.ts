@@ -245,7 +245,14 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
       return
     }
 
-    res.json({ user })
+    // diasPago se obtiene con una query separada para evitar errores de Prisma Client no regenerado
+    let diasPago: number[] = []
+    try {
+      const raw = await prisma.$queryRaw<{dias_pago: number[]}[]>`SELECT dias_pago FROM users WHERE id = ${req.user!.userId}`
+      if (raw[0]?.dias_pago) diasPago = raw[0].dias_pago
+    } catch { /* columna puede no existir aún */ }
+
+    res.json({ user: { ...user, diasPago } })
   } catch (error) {
     console.error('[Me]', error)
     res.status(500).json({ error: 'Error al obtener perfil' })

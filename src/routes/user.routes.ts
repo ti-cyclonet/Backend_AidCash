@@ -4,6 +4,7 @@ import rateLimit from 'express-rate-limit'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { sendPushToUser } from '../lib/push.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -23,6 +24,7 @@ const updateProfileSchema = z.object({
   correo: z.string().email().optional(),
   ingresoBase: z.number().min(0).optional(),
   frecuenciaIngreso: z.enum(['mensual', 'quincenal']).optional(),
+  diasPago: z.array(z.number().min(1).max(31)).max(2).optional(),
   onboardingDone: z.boolean().optional(),
   metaAhorroGlobal: z.number().min(0).optional(),
   fondoEmergenciaActual: z.number().min(0).optional(),
@@ -243,6 +245,14 @@ router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async
         endeudamiento: Number(updated.walletEndeudamiento),
       },
     })
+
+    // Push notification de confirmación (no bloquea la respuesta)
+    sendPushToUser(userId, {
+      title: tipo === 'salario' ? '💰 Sueldo registrado' : '💸 Ingreso extra registrado',
+      body: `Se distribuyeron $${monto.toLocaleString('es-CO')} en tu billetera inteligente.`,
+      tag: 'income-registered',
+      url: '/gestion',
+    }).catch(() => {})
   } catch (error) {
     console.error('[WalletIncome]', error)
     res.status(500).json({ error: 'Error al registrar ingreso' })

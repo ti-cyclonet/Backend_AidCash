@@ -8,6 +8,7 @@ import { env } from './config/env.js'
 import { connectDatabase } from './config/database.js'
 import { errorHandler } from './middleware/error-handler.js'
 import { initSocket } from './lib/socket.js'
+import { initPaymentNotificationsCron } from './cron/payment-notifications.js'
 
 // Routes
 import authRoutes from './routes/auth.routes.js'
@@ -94,6 +95,9 @@ async function bootstrap() {
 
   // Inicializar Socket.io sobre el servidor HTTP
   initSocket(httpServer)
+
+  // Inicializar cron jobs
+  initPaymentNotificationsCron()
 
   httpServer.listen(env.PORT, () => {
     console.log(`

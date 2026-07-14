@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { sendPushToUser } from '../lib/push.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -183,6 +184,17 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
       saldoNuevo: nuevoSaldo,
       liquidada: nuevoEstado === 'saldada',
     })
+
+    // Push notification de pago realizado
+    const debtName = existing.nombre
+    sendPushToUser(userId, {
+      title: nuevoEstado === 'saldada' ? '🎉 ¡Deuda liquidada!' : '✅ Pago registrado',
+      body: nuevoEstado === 'saldada'
+        ? `¡Felicidades! Terminaste de pagar "${debtName}".`
+        : `Pagaste $${montoPago.toLocaleString('es-CO')} de "${debtName}". Saldo restante: $${nuevoSaldo.toLocaleString('es-CO')}`,
+      tag: 'debt-payment',
+      url: '/obligaciones',
+    }).catch(() => {})
   } catch (error) {
     console.error('[PayDebt]', error)
     res.status(500).json({ error: 'Error al registrar pago' })

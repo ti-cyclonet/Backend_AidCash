@@ -154,7 +154,10 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
   }
 })
 
-// ─── POST /shared-pockets/:id/deposit — Aporte o retiro (requiere aprobación) ─
+// ─── POST /shared-pockets/:id/deposit — Aporte o retiro ──────────────────────
+// - Aportes: descuentan del cashBalance del usuario inmediatamente
+// - Retiros: requieren aprobación del owner, al aprobar se suma al cashBalance del solicitante
+// - Notifica a todos los miembros del movimiento
 
 router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: Response): Promise<void> => {
   try {
@@ -171,60 +174,82 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
       return
     }
 
-    // Verificar saldo suficiente para retiros
+    if (tipo === 'aporte') {
+      // Verificar que el usuario tiene saldo suficiente en su wallet
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { cashBalance: true } })
+      if (!user || Number(user.cashBalance) < monto) {
+        res.status(400).json({
+          error: 'Saldo insuficiente',
+          disponible: Number(user?.cashBalance ?? 0),
+          requerido: monto,
+        })
+        return
+      }
+
+      // Descontar del wallet del usuario inmediatamente
+      await prisma.user.update({
+        where: { id: userId },
+        data: { cashBalance: { decrement: monto }, walletAhorro: { decrement: Math.min(monto, Number(user.cashBalance)) } },
+      })
+
+      // Sumar al balance del bolsillo compartido
+      await prisma.sharedPocket.update({
+        where: { id: pocketId },
+        data: { balance: { increment: monto } },
+      })
+    }
+
     if (tipo === 'retiro') {
+      // Verificar que hay saldo en el bolsillo
       const pocket = await prisma.sharedPocket.findUnique({ where: { id: pocketId } })
       if (!pocket || Number(pocket.balance) < monto) {
         res.status(400).json({ error: 'Saldo insuficiente en el ahorro compartido' })
         return
       }
+      // El retiro NO se aplica inmediatamente — requiere aprobación del owner
     }
 
-    // Crear depósito con estado PENDING_CONFIRMATION (requiere aprobación de otro miembro)
+    // Crear registro del movimiento
     const deposit = await prisma.sharedDeposit.create({
       data: {
         sharedPocketId: pocketId,
         userId,
         monto: tipo === 'retiro' ? -monto : monto,
-        nota: nota ? `[${tipo === 'retiro' ? 'RETIRO' : 'APORTE'}] ${nota}` : `[${tipo === 'retiro' ? 'RETIRO' : 'APORTE'}]`,
+        nota: nota ? `[${tipo === 'retiro' ? 'RETIRO_PENDIENTE' : 'APORTE'}] ${nota}` : `[${tipo === 'retiro' ? 'RETIRO_PENDIENTE' : 'APORTE'}]`,
       },
     })
 
-    // Obtener otros miembros para notificar
-    const otherMembers = await prisma.sharedPocketMember.findMany({
+    // Notificar a TODOS los otros miembros
+    const allMembers = await prisma.sharedPocketMember.findMany({
       where: { sharedPocketId: pocketId, userId: { not: userId } },
-      select: { userId: true },
+      include: { user: { select: { id: true } } },
     })
-
     const depositor = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
+    const pocketInfo = await prisma.sharedPocket.findUnique({ where: { id: pocketId }, select: { nombre: true } })
 
-    // Notificar a todos los otros miembros
-    for (const m of otherMembers) {
-      emitToUser(m.userId, SOCKET_EVENTS.SHARED_DEPOSIT, {
+    for (const m of allMembers) {
+      emitToUser(m.user.id, SOCKET_EVENTS.SHARED_DEPOSIT, {
         type: tipo,
         pocketId,
+        pocketName: pocketInfo?.nombre,
         depositId: deposit.id,
         monto,
         nota,
         by: { id: userId, nombre: depositor?.nombre },
-        requiresApproval: true,
+        requiresApproval: tipo === 'retiro',
       })
     }
 
-    // Si el bolsillo solo tiene 1 miembro extra, auto-aplicar (confianza)
-    // Si hay múltiples, queda pendiente hasta que alguien confirme
-    const totalMembers = otherMembers.length + 1
-    if (totalMembers <= 1) {
-      // Solo 1 persona — aplicar directamente
-      await prisma.sharedPocket.update({
-        where: { id: pocketId },
-        data: { balance: { increment: tipo === 'retiro' ? -monto : monto } },
-      })
+    // Push notification a todos
+    const { pushSavingsDeposit } = await import('../lib/push.js')
+    for (const m of allMembers) {
+      await pushSavingsDeposit(m.user.id, pocketInfo?.nombre ?? 'ahorro', depositor?.nombre ?? 'Alguien')
     }
 
     res.status(201).json({
       deposit: { ...deposit, monto: Number(deposit.monto) },
-      requiresApproval: totalMembers > 1,
+      applied: tipo === 'aporte', // Aportes se aplican inmediatamente
+      requiresApproval: tipo === 'retiro', // Retiros esperan aprobación del owner
     })
   } catch (error) {
     console.error('[SharedDeposit]', error)
@@ -232,19 +257,19 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
   }
 })
 
-// ─── POST /shared-pockets/:id/deposit/:depositId/approve — Confirmar movimiento ─
+// ─── POST /shared-pockets/:id/deposit/:depositId/approve — Solo el OWNER aprueba ─
 
 router.post('/:id/deposit/:depositId/approve', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { id: pocketId, depositId } = req.params
 
-    // Verificar que el usuario es miembro
+    // Verificar que el usuario es el OWNER del bolsillo
     const membership = await prisma.sharedPocketMember.findFirst({
-      where: { sharedPocketId: pocketId, userId },
+      where: { sharedPocketId: pocketId, userId, role: 'owner' },
     })
     if (!membership) {
-      res.status(403).json({ error: 'No eres miembro de este ahorro' })
+      res.status(403).json({ error: 'Solo el creador del ahorro puede aprobar movimientos' })
       return
     }
 
@@ -257,28 +282,54 @@ router.post('/:id/deposit/:depositId/approve', async (req: Request, res: Respons
       return
     }
 
-    // No puede aprobar su propio movimiento
+    // No puede aprobar su propio movimiento (a menos que sea un retiro solicitado por otro)
     if (deposit.userId === userId) {
       res.status(400).json({ error: 'No puedes aprobar tu propio movimiento' })
       return
     }
 
-    // Aplicar el monto al balance
-    const updated = await prisma.sharedPocket.update({
-      where: { id: pocketId },
-      data: { balance: { increment: Number(deposit.monto) } },
-    })
+    const montoNum = Number(deposit.monto)
+    const isRetiro = montoNum < 0
+    const montoAbsoluto = Math.abs(montoNum)
 
-    // Notificar al que hizo el depósito
+    if (isRetiro) {
+      // Retiro aprobado: descontar del bolsillo y SUMAR al cashBalance del solicitante
+      await prisma.$transaction([
+        prisma.sharedPocket.update({
+          where: { id: pocketId },
+          data: { balance: { decrement: montoAbsoluto } },
+        }),
+        prisma.user.update({
+          where: { id: deposit.userId },
+          data: { cashBalance: { increment: montoAbsoluto } },
+        }),
+        prisma.sharedDeposit.update({
+          where: { id: depositId },
+          data: { nota: deposit.nota?.replace('RETIRO_PENDIENTE', 'RETIRO_APROBADO') ?? '[RETIRO_APROBADO]' },
+        }),
+      ])
+    } else {
+      // Aporte ya fue aplicado al crear — solo marcar como aprobado
+      await prisma.sharedDeposit.update({
+        where: { id: depositId },
+        data: { nota: deposit.nota?.replace('APORTE', 'APORTE_APROBADO') ?? '[APORTE_APROBADO]' },
+      })
+    }
+
+    const updated = await prisma.sharedPocket.findUnique({ where: { id: pocketId } })
+
+    // Notificar al solicitante
     emitToUser(deposit.userId, SOCKET_EVENTS.SHARED_DEPOSIT, {
       type: 'approved',
       pocketId,
       depositId,
-      newBalance: Number(updated.balance),
+      monto: montoAbsoluto,
+      isRetiro,
+      newBalance: Number(updated?.balance ?? 0),
       approvedBy: userId,
     })
 
-    res.json({ newBalance: Number(updated.balance), message: 'Movimiento aprobado' })
+    res.json({ newBalance: Number(updated?.balance ?? 0), message: isRetiro ? 'Retiro aprobado. Se sumó al saldo del solicitante.' : 'Movimiento aprobado' })
   } catch (error) {
     console.error('[ApproveDeposit]', error)
     res.status(500).json({ error: 'Error al aprobar movimiento' })

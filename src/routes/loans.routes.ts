@@ -160,14 +160,35 @@ router.post('/approve', validate(respondLoanSchema), async (req: Request, res: R
       return
     }
 
-    const updated = await prisma.loan.update({
-      where: { id: loanId },
-      data: { status: 'ACTIVE' },
-    })
+    // Verificar que el lender tiene saldo suficiente para prestar
+    const lender = await prisma.user.findUnique({ where: { id: lenderId }, select: { cashBalance: true } })
+    const lenderBalance = Number(lender?.cashBalance ?? 0)
+    const loanAmount = Number(loan.amount)
+
+    if (lenderBalance < loanAmount) {
+      res.status(400).json({
+        error: 'No tienes saldo suficiente para aprobar este préstamo',
+        disponible: lenderBalance,
+        requerido: loanAmount,
+      })
+      return
+    }
+
+    // Descontar del wallet del lender y activar el préstamo
+    const [updated] = await prisma.$transaction([
+      prisma.loan.update({
+        where: { id: loanId },
+        data: { status: 'ACTIVE' },
+      }),
+      prisma.user.update({
+        where: { id: lenderId },
+        data: { cashBalance: { decrement: loanAmount } },
+      }),
+    ])
 
     emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_APPROVED, {
       loanId,
-      amount: Number(loan.amount),
+      amount: loanAmount,
     })
 
     res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) } })

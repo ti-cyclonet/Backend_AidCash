@@ -19,6 +19,7 @@ model User {
   passwordHash          String   @map("password_hash")
   ingresoBase           Decimal  @default(0) @map("ingreso_base") @db.Decimal(12, 2)
   frecuenciaIngreso     String   @default("mensual") @map("frecuencia_ingreso")
+  diasPago              Int[]    @default([]) @map("dias_pago")
   onboardingDone        Boolean  @default(false) @map("onboarding_done")
   metaAhorroGlobal      Decimal  @default(5000) @map("meta_ahorro_global") @db.Decimal(12, 2)
   saldoAhorroTotal      Decimal  @default(0) @map("saldo_ahorro_total") @db.Decimal(12, 2)
@@ -180,14 +181,15 @@ model SavingsHistory {
 // ─── Ingresos Extra ───────────────────────────────────────────────────────────
 
 model ExtraIncome {
-  id              String  @id @default(uuid())
-  userId          String  @map("user_id")
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
   nombre          String
-  monto           Decimal @db.Decimal(12, 2)
-  temporalidad    String  // una_vez | definido | indefinido
-  mesesRestantes  Int?    @map("meses_restantes")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  monto           Decimal   @db.Decimal(12, 2)
+  temporalidad    String    // una_vez | definido | indefinido
+  mesesRestantes  Int?      @map("meses_restantes")
+  fechaRecepcion  DateTime? @map("fecha_recepcion") @db.Date
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
