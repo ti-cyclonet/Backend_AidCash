@@ -33,6 +33,7 @@ const updateDebtSchema = z.object({
   prioridad: z.enum(['alta', 'media', 'baja']).optional(),
   pagadoEstePeriodo: z.boolean().optional(),
   estado: z.enum(['activa', 'saldada', 'vencida']).optional(),
+  pagoAutomatico: z.boolean().optional(),
 }).strict()
 
 const payDebtSchema = z.object({

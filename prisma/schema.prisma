@@ -107,6 +107,7 @@ model Debt {
   fechaInicio       DateTime?  @map("fecha_inicio") @db.Date
   bankEntityId      String?    @map("bank_entity_id")
   coOwnerId         String?    @map("co_owner_id")
+  pagoAutomatico    Boolean    @default(false) @map("pago_automatico")
   createdAt         DateTime   @default(now()) @map("created_at")
   updatedAt         DateTime   @updatedAt @map("updated_at")
 
@@ -168,6 +169,7 @@ model FixedExpense {
   montoPagadoEstePeriodo Decimal? @map("monto_pagado_este_periodo") @db.Decimal(12, 2)
   // Vinculación a tarjeta de crédito (al pagar, suma al saldo de la tarjeta)
   tarjetaVinculadaId String? @map("tarjeta_vinculada_id")
+  pagoAutomatico    Boolean @default(false) @map("pago_automatico")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
@@ -371,8 +373,12 @@ model Loan {
   remainingAmount Decimal  @map("remaining_amount") @db.Decimal(12, 2)
   descripcion     String?
   dueDate         String?  @map("due_date")
-  // PENDING_APPROVAL | ACTIVE | REJECTED | PAID
+  // PENDING_APPROVAL | PENDING_BORROWER_CONFIRMATION | ACTIVE | REJECTED | PAID
   status          String   @default("PENDING_APPROVAL")
+  // Tasa de interés aplicada por el prestamista (0, 5, 10, etc.)
+  tasaInteres     Decimal? @map("tasa_interes") @db.Decimal(5, 2)
+  // Monto original sin intereses (para referencia)
+  montoOriginal   Decimal? @map("monto_original") @db.Decimal(12, 2)
   // Referencia al gasto hormiga que originó el split (opcional)
   sourceExpenseId String?  @map("source_expense_id")
   createdAt       DateTime @default(now()) @map("created_at")

@@ -148,14 +148,16 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
 
     // totalIngreso: si hay registros reales en el periodo, usar esos. Si no, usar base + extra.
     const totalIngreso = ingresosRealPeriodo > 0 ? ingresosRealPeriodo + totalExtra : ingresoBase + totalExtra
-    // totalEgreso: solo lo que realmente se ha gastado (pagado + hormiga). Ahorro NO es egreso.
-    const totalEgreso  = totalDebts + totalFixed + totalImpulse
+    // totalEgreso: lo que realmente se ha pagado/gastado en el periodo
+    const totalFixedPaid = fixedExpenses.filter(f => f.pagadoEstePeriodo).reduce((s, f) => s + Number(f.montoPagadoEstePeriodo ?? f.monto), 0)
+    const totalEgreso  = totalPagosDeuda + totalFixedPaid + totalImpulse
 
     // Totales históricos (toda la vida)
     const totalIngresosHistorico = Number(incomeRecordsAll._sum.monto ?? 0)
-    // Egresos históricos: necesitamos sumar TODOS los pagados históricamente + todos los impulse
+    // Egresos históricos: suma de todos los pagos de deuda + impulse + gastos fijos pagados
     const allImpulseEver = await prisma.impulseExpense.aggregate({ where: { userId }, _sum: { monto: true } })
-    const totalEgresosHistorico = totalDebts + totalFixed + Number(allImpulseEver._sum.monto ?? 0)
+    const allDebtPaymentsTotal = Number(allDebtPaymentsEver._sum.montoPagado ?? 0)
+    const totalEgresosHistorico = allDebtPaymentsTotal + totalFixedPaid + Number(allImpulseEver._sum.monto ?? 0)
 
     // ── Distribución por categoría (para pie chart) ───────────────────────────
     const categoryDistribution = [
@@ -165,23 +167,53 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       { name: 'Ahorro',          value: totalSaved,   color: '#B9FBC0' },
     ].filter(c => c.value > 0)
 
-    // ── Serie mensual de ingresos vs egresos (para bar chart) ─────────────────
-    // Agrupa los gastos hormiga por mes para la barra comparativa
-    const monthlyMap: Record<string, { ingresos: number; egresos: number }> = {}
-
-    const addToMonth = (date: Date, type: 'ingresos' | 'egresos', amount: number) => {
-      const key = date.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })
-      if (!monthlyMap[key]) monthlyMap[key] = { ingresos: 0, egresos: 0 }
-      monthlyMap[key][type] += amount
+    // ── Serie temporal de ingresos vs egresos (para chart) ─────────────────
+    // Granularidad dinámica según timeframe
+    const getKey = (date: Date): string => {
+      switch (timeframe) {
+        case 'week':
+          // Por día: "lun 14", "mar 15"...
+          return date.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric' })
+        case 'month':
+          // Por día: "1 jul", "2 jul"...
+          return date.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })
+        case 'year':
+          // Por mes: "ene 2026", "feb 2026"...
+          return date.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })
+        case 'all':
+        default:
+          return date.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })
+      }
     }
 
+    const timeMap: Record<string, { ingresos: number; egresos: number; ts: number }> = {}
+
+    const addToMonth = (date: Date, type: 'ingresos' | 'egresos', amount: number) => {
+      const key = getKey(date)
+      if (!timeMap[key]) timeMap[key] = { ingresos: 0, egresos: 0, ts: date.getTime() }
+      timeMap[key][type] += amount
+    }
+
+    // Egresos
     impulseExpenses.forEach(e => addToMonth(new Date(e.createdAt), 'egresos', Number(e.monto)))
-    savingsHistory.forEach(e => addToMonth(new Date(e.createdAt), 'egresos', Number(e.monto)))
+    debtPayments.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
+    // Gastos fijos pagados en el periodo
+    fixedExpenses.filter(f => f.pagadoEstePeriodo && f.montoPagadoEstePeriodo).forEach(f => {
+      addToMonth(new Date(f.updatedAt), 'egresos', Number(f.montoPagadoEstePeriodo))
+    })
+
+    // Ingresos reales registrados
+    const incomeRecordsPeriodList = await prisma.incomeRecord.findMany({
+      where: { userId, createdAt: { gte: from, lte: to } },
+      orderBy: { createdAt: 'desc' },
+    })
+    incomeRecordsPeriodList.forEach(r => addToMonth(new Date(r.createdAt), 'ingresos', Number(r.monto)))
     extraIncomes.forEach(e => addToMonth(new Date(e.createdAt), 'ingresos', Number(e.monto)))
 
-    const monthlySeries = Object.entries(monthlyMap)
-      .map(([month, vals]) => ({ month, ...vals }))
-      .sort((a, b) => new Date('1 ' + a.month).getTime() - new Date('1 ' + b.month).getTime())
+    const monthlySeries = Object.entries(timeMap)
+      .map(([month, vals]) => ({ month, ingresos: vals.ingresos, egresos: vals.egresos, ts: vals.ts }))
+      .sort((a, b) => a.ts - b.ts)
+      .map(({ month, ingresos, egresos }) => ({ month, ingresos, egresos }))
 
     res.json({
       timeframe,
@@ -198,6 +230,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         totalExtra,
         totalDebts,
         totalFixed,
+        totalFixedPaid,
         totalImpulse,
         totalSaved,
         cashBalance: Number(user?.cashBalance ?? 0),
@@ -236,10 +269,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       })),
 
       // Ingresos registrados (sueldo + extras)
-      incomeRecords: await prisma.incomeRecord.findMany({
-        where: { userId, createdAt: { gte: from, lte: to } },
-        orderBy: { createdAt: 'desc' },
-      }).then(records => records.map(r => ({ ...r, monto: Number(r.monto) }))),
+      incomeRecords: incomeRecordsPeriodList.map(r => ({ ...r, monto: Number(r.monto) })),
     })
   } catch (error) {
     console.error('[BalanceReport]', error)

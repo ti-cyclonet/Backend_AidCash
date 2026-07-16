@@ -146,10 +146,21 @@ router.post('/request', validate(requestLoanSchema), async (req: Request, res: R
 // ─── POST /loans/approve ──────────────────────────────────────────────────────
 // Lender aprueba la solicitud
 
-router.post('/approve', validate(respondLoanSchema), async (req: Request, res: Response): Promise<void> => {
+// ─── POST /loans/approve — Lender aprueba CON interés (negociación) ────────────
+// El lender selecciona una tasa de interés (0%, 5%, 10%, etc.)
+// Se calcula el nuevo remainingAmount = amount + (amount * tasa / 100)
+// El préstamo pasa a PENDING_BORROWER_CONFIRMATION
+// Se emite evento socket al borrower con la contraoferta
+
+const approveWithInterestSchema = z.object({
+  loanId: z.string().min(1),
+  tasaInteres: z.number().min(0).max(100).optional(),
+})
+
+router.post('/approve', validate(approveWithInterestSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const lenderId = req.user!.userId
-    const { loanId } = req.body as { loanId: string }
+    const { loanId, tasaInteres = 0 } = req.body as { loanId: string; tasaInteres?: number }
 
     const loan = await prisma.loan.findFirst({
       where: { id: loanId, lenderId, status: 'PENDING_APPROVAL' },
@@ -160,41 +171,137 @@ router.post('/approve', validate(respondLoanSchema), async (req: Request, res: R
       return
     }
 
-    // Verificar que el lender tiene saldo suficiente para prestar
-    const lender = await prisma.user.findUnique({ where: { id: lenderId }, select: { cashBalance: true } })
+    const lender = await prisma.user.findUnique({ where: { id: lenderId }, select: { cashBalance: true, nombre: true } })
     const lenderBalance = Number(lender?.cashBalance ?? 0)
-    const loanAmount = Number(loan.amount)
+    const montoOriginal = Number(loan.amount)
 
-    if (lenderBalance < loanAmount) {
-      res.status(400).json({
-        error: 'No tienes saldo suficiente para aprobar este préstamo',
-        disponible: lenderBalance,
-        requerido: loanAmount,
-      })
+    if (lenderBalance < montoOriginal) {
+      res.status(400).json({ error: 'No tienes saldo suficiente', disponible: lenderBalance, requerido: montoOriginal })
       return
     }
 
-    // Descontar del wallet del lender y activar el préstamo
-    const [updated] = await prisma.$transaction([
-      prisma.loan.update({
+    // Calcular monto con interés
+    const interes = Math.round(montoOriginal * (tasaInteres / 100))
+    const montoConInteres = montoOriginal + interes
+
+    if (tasaInteres > 0) {
+      // ═══ CON INTERÉS: Pasa a estado intermedio para que el borrower confirme ═══
+      const updated = await prisma.loan.update({
         where: { id: loanId },
-        data: { status: 'ACTIVE' },
-      }),
-      prisma.user.update({
-        where: { id: lenderId },
-        data: { cashBalance: { decrement: loanAmount } },
-      }),
-    ])
+        data: {
+          status: 'PENDING_BORROWER_CONFIRMATION',
+          remainingAmount: montoConInteres,
+          amount: montoConInteres,
+        },
+      })
 
-    emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_APPROVED, {
-      loanId,
-      amount: loanAmount,
-    })
+      // Guardar campos de interés con raw query
+      try {
+        await prisma.$executeRaw`UPDATE loans SET tasa_interes = ${tasaInteres}, monto_original = ${montoOriginal} WHERE id = ${loanId}`
+      } catch { /* silent */ }
 
-    res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) } })
+      // Notificar al borrower con la contraoferta
+      emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_APPROVED, {
+        loanId,
+        amount: montoConInteres,
+        montoOriginal,
+        tasaInteres,
+        interes,
+        requiresConfirmation: true,
+        lenderName: lender?.nombre,
+      })
+
+      res.json({
+        loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) },
+        requiresConfirmation: true,
+        tasaInteres,
+        interes,
+        montoConInteres,
+      })
+    } else {
+      // ═══ SIN INTERÉS: Aprobación directa (flujo original) ═══
+      const [updated] = await prisma.$transaction([
+        prisma.loan.update({
+          where: { id: loanId },
+          data: { status: 'ACTIVE' },
+        }),
+        prisma.user.update({
+          where: { id: lenderId },
+          data: { cashBalance: { decrement: montoOriginal } },
+        }),
+      ])
+
+      // Guardar campos de interés con raw query (workaround si prisma client no está regenerado)
+      try {
+        await prisma.$executeRaw`UPDATE loans SET tasa_interes = 0, monto_original = ${montoOriginal} WHERE id = ${loanId}`
+      } catch { /* silent — columnas pueden no existir */ }
+
+      emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_APPROVED, {
+        loanId, amount: montoOriginal, tasaInteres: 0, requiresConfirmation: false,
+      })
+
+      res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, requiresConfirmation: false })
+    }
   } catch (error) {
     console.error('[ApproveLoan]', error)
     res.status(500).json({ error: 'Error al aprobar préstamo' })
+  }
+})
+
+// ─── POST /loans/borrower-confirm — Borrower acepta la contraoferta con interés ─
+
+const borrowerConfirmSchema = z.object({
+  loanId: z.string().min(1),
+  accept: z.boolean(),
+})
+
+router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const borrowerId = req.user!.userId
+    const { loanId, accept } = req.body as { loanId: string; accept: boolean }
+
+    const loan = await prisma.loan.findFirst({
+      where: { id: loanId, borrowerId, status: 'PENDING_BORROWER_CONFIRMATION' },
+    })
+    if (!loan) {
+      res.status(404).json({ error: 'Préstamo no encontrado o ya procesado' })
+      return
+    }
+
+    if (accept) {
+      // Borrower acepta → Activar préstamo y descontar del lender
+      const [updated] = await prisma.$transaction([
+        prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE' } }),
+        prisma.user.update({
+          where: { id: loan.lenderId },
+          data: { cashBalance: { decrement: Number(loan.montoOriginal ?? loan.amount) } },
+        }),
+      ])
+
+      emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_APPROVED, {
+        loanId, borrowerAccepted: true, amount: Number(updated.amount),
+      })
+
+      res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, accepted: true })
+    } else {
+      // Borrower rechaza → Volver a PENDING_APPROVAL (sin interés)
+      const updated = await prisma.loan.update({
+        where: { id: loanId },
+        data: {
+          status: 'REJECTED',
+          tasaInteres: null,
+          amount: loan.montoOriginal ?? loan.amount,
+          remainingAmount: loan.montoOriginal ?? loan.amount,
+        },
+      })
+
+      emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_REJECTED, { loanId, borrowerRejected: true })
+
+      res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, accepted: false })
+    }
+  } catch (error) {
+    console.error('[BorrowerConfirm]', error)
+    res.status(500).json({ error: 'Error al confirmar préstamo' })
   }
 })
 
