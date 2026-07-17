@@ -14,6 +14,7 @@ const createSchema = z.object({
   monto: z.number().min(0),
   temporalidad: z.enum(['una_vez', 'definido', 'indefinido']),
   mesesRestantes: z.number().int().min(1).nullable().optional(),
+  fechaRecepcion: z.string().optional(),
 })
 
 const updateSchema = z.object({
@@ -46,10 +47,14 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, monto, temporalidad, mesesRestantes } = req.body
+    const { nombre, monto, temporalidad, mesesRestantes, fechaRecepcion } = req.body
 
     const income = await prisma.extraIncome.create({
-      data: { userId, nombre, monto, temporalidad, mesesRestantes: mesesRestantes ?? null },
+      data: {
+        userId, nombre, monto, temporalidad,
+        mesesRestantes: mesesRestantes ?? null,
+        fechaRecepcion: fechaRecepcion ? new Date(fechaRecepcion) : null,
+      },
     })
 
     res.status(201).json({ extraIncome: income })
