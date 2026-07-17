@@ -28,6 +28,9 @@ const updateSchema = z.object({
   metodoPago: z.string().nullable().optional(),
   renovacionAuto: z.boolean().optional(),
   pagadoEstePeriodo: z.boolean().optional(),
+  montoPagadoEstePeriodo: z.number().min(0).nullable().optional(),
+  tarjetaVinculadaId: z.string().nullable().optional(),
+  pagoAutomatico: z.boolean().optional(),
 }).strict()
 
 // ─── GET /fixed-expenses ──────────────────────────────────────────────────────
@@ -123,10 +126,13 @@ router.patch('/:id/pay', validate(payFixedSchema), async (req: Request, res: Res
       return
     }
 
-    const montoPago = req.body.monto ?? Number(existing.monto)
+    const montoTotal = Number(existing.monto)
+    // Si es quincenal, el monto por periodo es la mitad del total
+    const montoPorPeriodo = existing.frecuencia === "quincenal" ? Math.round(montoTotal / 2) : montoTotal
+    const montoPago = req.body.monto ?? montoPorPeriodo
     const prevPaid = Number(existing.montoPagadoEstePeriodo ?? 0)
     const totalPaid = prevPaid + montoPago
-    const isFullyPaid = totalPaid >= Number(existing.monto)
+    const isFullyPaid = totalPaid >= montoTotal
 
     if (existing.tarjetaVinculadaId && existing.tarjetaVinculada) {
       // ═══ PAGO CON TARJETA DE CRÉDITO ═══
@@ -193,41 +199,69 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    // Devolver lo que se haya pagado (parcial o completo)
     const montoDevolver = montoPagado > 0 ? montoPagado : Number(existing.monto)
 
-    // Transacción atómica: revertir gasto fijo + devolver cashBalance
-    const [expense, user] = await prisma.$transaction([
-      prisma.fixedExpense.update({
-        where: { id },
-        data: { pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
-      }),
-      prisma.user.update({
-        where: { id: userId },
-        data: {
-          cashBalance: { increment: montoDevolver },
-        },
-        select: {
-          cashBalance: true,
-          walletAhorro: true,
-          walletObligaciones: true,
-          walletLibre: true,
-          walletEndeudamiento: true,
-        },
-      }),
-    ])
+    if (existing.tarjetaVinculadaId) {
+      // ═══ FUE PAGADO CON TARJETA → Restar del saldo de la tarjeta ═══
+      const [expense] = await prisma.$transaction([
+        prisma.fixedExpense.update({
+          where: { id },
+          data: { pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
+        }),
+        prisma.debt.update({
+          where: { id: existing.tarjetaVinculadaId },
+          data: {
+            saldoRestante: { decrement: montoDevolver },
+            saldoPrincipal: { decrement: montoDevolver },
+          },
+        }),
+      ])
 
-    res.json({
-      fixedExpense: expense,
-      montoDevuelto: montoDevolver,
-      wallet: {
-        cashBalance: Number(user.cashBalance),
-        ahorro: Number(user.walletAhorro),
-        obligaciones: Number(user.walletObligaciones),
-        libre: Number(user.walletLibre),
-        endeudamiento: Number(user.walletEndeudamiento),
-      },
-    })
+      // Obtener wallet actual (no cambió porque la TC pagó)
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
+      })
+
+      res.json({
+        fixedExpense: expense,
+        montoDevuelto: montoDevolver,
+        revertidoDeTarjeta: true,
+        wallet: {
+          cashBalance: Number(user?.cashBalance ?? 0),
+          ahorro: Number(user?.walletAhorro ?? 0),
+          obligaciones: Number(user?.walletObligaciones ?? 0),
+          libre: Number(user?.walletLibre ?? 0),
+          endeudamiento: Number(user?.walletEndeudamiento ?? 0),
+        },
+      })
+    } else {
+      // ═══ PAGO NORMAL → Devolver al cashBalance ═══
+      const [expense, user] = await prisma.$transaction([
+        prisma.fixedExpense.update({
+          where: { id },
+          data: { pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
+        }),
+        prisma.user.update({
+          where: { id: userId },
+          data: { cashBalance: { increment: montoDevolver } },
+          select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
+        }),
+      ])
+
+      res.json({
+        fixedExpense: expense,
+        montoDevuelto: montoDevolver,
+        revertidoDeTarjeta: false,
+        wallet: {
+          cashBalance: Number(user.cashBalance),
+          ahorro: Number(user.walletAhorro),
+          obligaciones: Number(user.walletObligaciones),
+          libre: Number(user.walletLibre),
+          endeudamiento: Number(user.walletEndeudamiento),
+        },
+      })
+    }
   } catch (error) {
     console.error('[UndoPayFixed]', error)
     res.status(500).json({ error: 'Error al deshacer pago de gasto fijo' })

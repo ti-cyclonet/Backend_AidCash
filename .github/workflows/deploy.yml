@@ -24,6 +24,9 @@ jobs:
             docker-compose -f docker-compose.prod.yml build kiri-api
             docker-compose -f docker-compose.prod.yml up -d kiri-api
 
+            echo "🗃️ Running database migrations..."
+            docker exec cyclonet-kiri-api npx prisma migrate deploy
+
             echo "✅ Verifying..."
             sleep 3
             docker logs cyclonet-kiri-api --tail 5
