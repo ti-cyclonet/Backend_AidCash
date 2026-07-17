@@ -321,4 +321,124 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
+// ─── POST /debts/pay-with-card — Pagar obligación con tarjeta de crédito en cuotas ─
+// Recibe: tarjetaId, monto, cuotas, sourceType (debt|fixed), sourceId
+// Lógica:
+//   1. Marca la obligación original como pagada
+//   2. Suma el monto total al saldoRestante de la tarjeta
+//   3. Suma (monto / cuotas) a la cuotaPeriodo de la tarjeta
+
+const payWithCardSchema = z.object({
+  tarjetaId: z.string().uuid(),
+  monto: z.number().min(0.01),
+  cuotas: z.number().int().min(1).max(48),
+  sourceType: z.enum(['debt', 'fixed']),
+  sourceId: z.string().uuid(),
+})
+
+router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { tarjetaId, monto, cuotas, sourceType, sourceId } = req.body
+
+    // Verificar que la tarjeta existe y pertenece al usuario
+    const tarjeta = await prisma.debt.findFirst({
+      where: { id: tarjetaId, userId, estado: 'activa' },
+    })
+    if (!tarjeta) {
+      res.status(404).json({ error: 'Tarjeta de crédito no encontrada' })
+      return
+    }
+
+    // Calcular incremento de cuota = monto / cuotas
+    const incrementoCuota = Math.round((monto / cuotas) * 100) / 100
+
+    if (sourceType === 'debt') {
+      // Verificar que la deuda existe
+      const deuda = await prisma.debt.findFirst({ where: { id: sourceId, userId, estado: 'activa' } })
+      if (!deuda) {
+        res.status(404).json({ error: 'Deuda no encontrada' })
+        return
+      }
+
+      const montoPago = monto
+      const currentSaldo = Number(deuda.saldoRestante)
+      const nuevoSaldo = Math.max(0, currentSaldo - montoPago)
+      const nuevoEstado = nuevoSaldo <= 0 ? 'saldada' : 'activa'
+
+      await prisma.$transaction([
+        // Marcar la deuda original como pagada
+        prisma.debt.update({
+          where: { id: sourceId },
+          data: {
+            saldoRestante: nuevoSaldo,
+            pagadoEstePeriodo: true,
+            montoPagadoEstePeriodo: montoPago,
+            estado: nuevoEstado,
+          },
+        }),
+        // Incrementar saldo y cuota de la tarjeta
+        prisma.debt.update({
+          where: { id: tarjetaId },
+          data: {
+            saldoRestante: { increment: monto },
+            saldoPrincipal: { increment: monto },
+            cuotaPeriodo: { increment: incrementoCuota },
+          },
+        }),
+      ])
+    } else {
+      // sourceType === 'fixed'
+      const gasto = await prisma.fixedExpense.findFirst({ where: { id: sourceId, userId } })
+      if (!gasto) {
+        res.status(404).json({ error: 'Gasto fijo no encontrado' })
+        return
+      }
+
+      const montoTotal = Number(gasto.monto)
+      const montoPorPeriodo = gasto.frecuencia === 'quincenal' ? Math.round(montoTotal / 2) : montoTotal
+      const montoPago = monto || montoPorPeriodo
+      const prevPaid = Number(gasto.montoPagadoEstePeriodo ?? 0)
+      const totalPaid = prevPaid + montoPago
+      const isFullyPaid = totalPaid >= montoTotal
+
+      await prisma.$transaction([
+        // Marcar gasto fijo como pagado
+        prisma.fixedExpense.update({
+          where: { id: sourceId },
+          data: { pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid },
+        }),
+        // Incrementar saldo y cuota de la tarjeta
+        prisma.debt.update({
+          where: { id: tarjetaId },
+          data: {
+            saldoRestante: { increment: monto },
+            saldoPrincipal: { increment: monto },
+            cuotaPeriodo: { increment: incrementoCuota },
+          },
+        }),
+      ])
+    }
+
+    // Obtener estado actualizado de la tarjeta
+    const tarjetaActualizada = await prisma.debt.findUnique({ where: { id: tarjetaId } })
+
+    res.json({
+      success: true,
+      tarjeta: tarjetaActualizada ? {
+        id: tarjetaActualizada.id,
+        nombre: tarjetaActualizada.nombre,
+        saldoRestante: Number(tarjetaActualizada.saldoRestante),
+        cuotaPeriodo: Number(tarjetaActualizada.cuotaPeriodo),
+      } : null,
+      cuotasAgregadas: cuotas,
+      incrementoCuota,
+      montoTotalAgregado: monto,
+    })
+  } catch (error) {
+    console.error('[PayWithCard]', error)
+    res.status(500).json({ error: 'Error al pagar con tarjeta' })
+  }
+})
+
 export default router

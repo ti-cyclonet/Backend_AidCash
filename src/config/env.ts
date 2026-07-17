@@ -6,8 +6,14 @@ if (process.env.NODE_ENV === 'production') {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'dev_secret_change_me') {
     throw new Error('❌ JWT_SECRET no está configurado para producción. Define una clave segura en las variables de entorno.')
   }
+  if (!process.env.JWT_REFRESH_SECRET || process.env.JWT_REFRESH_SECRET === 'dev_refresh_secret_change_me') {
+    throw new Error('❌ JWT_REFRESH_SECRET no está configurado para producción. Define una clave segura en las variables de entorno.')
+  }
   if (!process.env.DATABASE_URL) {
     throw new Error('❌ DATABASE_URL no está configurado para producción.')
+  }
+  if (!process.env.FRONTEND_URL) {
+    throw new Error('❌ FRONTEND_URL no está configurado para producción.')
   }
 }
 

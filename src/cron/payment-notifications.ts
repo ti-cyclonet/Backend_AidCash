@@ -89,6 +89,35 @@ export function initPaymentNotificationsCron() {
       }
 
       console.log(`[Cron] Notificaciones enviadas: ${notified} usuarios`)
+
+      // ── Notificar ingresos extra próximos ──────────────────────────────────
+      const extraIncomes = await prisma.extraIncome.findMany({
+        where: {
+          fechaRecepcion: { not: null },
+          temporalidad: { not: 'una_vez' },
+        },
+        select: { id: true, userId: true, nombre: true, monto: true, fechaRecepcion: true },
+      })
+
+      for (const extra of extraIncomes) {
+        if (!extra.fechaRecepcion) continue
+        const extraDay = extra.fechaRecepcion.getDate()
+        const daysLeft = daysUntilPayday(today, extraDay, daysInMonth)
+
+        let extraMsg: string | null = null
+        if (daysLeft === 2) {
+          extraMsg = `📅 En 2 días recibes "${extra.nombre}" ($${Number(extra.monto).toLocaleString()}). ¡Planifica qué harás con ese ingreso!`
+        } else if (daysLeft === 1) {
+          extraMsg = `💰 Mañana recibes "${extra.nombre}" ($${Number(extra.monto).toLocaleString()}). ¿Ya sabes cómo distribuirlo?`
+        } else if (daysLeft === 0) {
+          extraMsg = `🎉 ¡Hoy recibes "${extra.nombre}" ($${Number(extra.monto).toLocaleString()})! Regístralo en Kiri.`
+        }
+
+        if (extraMsg) {
+          emitToUser(extra.userId, SOCKET_EVENT, { message: extraMsg, type: 'extra_income', action: 'info' })
+          await pushKiriTip(extra.userId, extraMsg)
+        }
+      }
     } catch (error) {
       console.error('[Cron] Error en notificaciones de pago:', error)
     }
