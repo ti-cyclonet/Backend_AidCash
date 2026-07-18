@@ -38,13 +38,23 @@ export const SOCKET_EVENTS = {
 // ─── Inicialización ────────────────────────────────────────────────────────────
 
 export function initSocket(httpServer: HttpServer): SocketServer {
+  const allowedOrigins = env.FRONTEND_URL.split(',').map(o => o.trim()).filter(Boolean)
+
   io = new SocketServer(httpServer, {
     cors: {
-      origin: env.FRONTEND_URL,
+      origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        if (!origin) return callback(null, true)
+        if (allowedOrigins.includes(origin)) return callback(null, true)
+        callback(new Error('CORS_REJECTED'))
+      },
       methods: ['GET', 'POST'],
       credentials: true,
     },
-    transports: ['websocket', 'polling'],
+    transports: ['polling', 'websocket'],
+    allowUpgrades: true,
+    path: '/socket.io/',
+    pingTimeout: 60000,
+    pingInterval: 25000,
   })
 
   // ── Middleware JWT: autentica cada conexión ────────────────────────────────

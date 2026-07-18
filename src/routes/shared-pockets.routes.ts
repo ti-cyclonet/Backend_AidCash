@@ -262,7 +262,8 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
 router.post('/:id/deposit/:depositId/approve', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { id: pocketId, depositId } = req.params
+    const pocketId = req.params.id as string
+    const depositId = req.params.depositId as string
 
     // Verificar que el usuario es el OWNER del bolsillo
     const membership = await prisma.sharedPocketMember.findFirst({
@@ -341,7 +342,8 @@ router.post('/:id/deposit/:depositId/approve', async (req: Request, res: Respons
 router.post('/:id/deposit/:depositId/reject', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { id: pocketId, depositId } = req.params
+    const pocketId = req.params.id as string
+    const depositId = req.params.depositId as string
 
     const membership = await prisma.sharedPocketMember.findFirst({
       where: { sharedPocketId: pocketId, userId },

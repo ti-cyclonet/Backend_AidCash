@@ -38,8 +38,16 @@ const httpServer = http.createServer(app)
 app.set('trust proxy', 1)
 
 app.use(helmet())
+
+// CORS: soporta múltiples orígenes separados por coma en FRONTEND_URL
+const allowedOrigins = env.FRONTEND_URL.split(',').map(o => o.trim()).filter(Boolean)
 app.use(cors({
-  origin: env.FRONTEND_URL,
+  origin: (origin, callback) => {
+    // Permitir requests sin origin (mobile apps, curl, server-to-server)
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) return callback(null, true)
+    callback(new Error(`Origin ${origin} not allowed by CORS`))
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
