@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { checkLimit } from '../middleware/limit-enforcement.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -53,7 +54,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /fixed-expenses ─────────────────────────────────────────────────────
 
-router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/', validate(createSchema), checkLimit('nGastosFijos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { nombre, monto, fechaCorte, categoria, frecuencia, metodoPago, renovacionAuto } = req.body

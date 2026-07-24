@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
+import { checkLimit } from '../middleware/limit-enforcement.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -96,7 +97,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /shared-pockets — Crear bolsillo compartido ─────────────────────────
 
-router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/', validate(createSchema), checkLimit('nBolsillosCompartidos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { partnerIds, nombre, meta = 0 } = req.body as { partnerIds: string[]; nombre: string; meta?: number }
