@@ -29,6 +29,7 @@ import homeBudgetRoutes from './routes/home-budget.routes.js'
 import expenseSplitRoutes from './routes/expense-split.routes.js'
 import banksRoutes from './routes/banks.routes.js'
 import usageStatusRoutes from './routes/usage-status.routes.js'
+import planRoutes from './routes/plan.routes.js'
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -89,6 +90,7 @@ app.use('/api/home-budget', homeBudgetRoutes)
 app.use('/api/expenses/split', expenseSplitRoutes)
 app.use('/api/banks', banksRoutes)
 app.use('/api/usage-status', usageStatusRoutes)
+app.use('/api/plan', planRoutes)
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 

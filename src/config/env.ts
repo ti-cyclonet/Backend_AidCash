@@ -27,6 +27,7 @@ export const env = {
   JWT_REFRESH_EXPIRES_IN: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:9002',
   GOOGLE_GENAI_API_KEY: process.env.GOOGLE_GENAI_API_KEY || '',
+  DISABLE_CORS: process.env.DISABLE_CORS === 'true',
 
   // ─── Cyclonet / Authoriza Integration ────────────────────────────────────────
   AUTHORIZA_JWT_SECRET: process.env.AUTHORIZA_JWT_SECRET || 'wSddeEwq2e',
