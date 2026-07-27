@@ -50,6 +50,64 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
+// ─── GET /impulse-expenses/top-consumos ───────────────────────────────────────
+// Agrupa gastos por nombre, suma montos, ordena desc. Soporta filtro por categoría.
+// IMPORTANTE: Esta ruta DEBE estar antes de /:id para que Express no la confunda.
+
+router.get('/top-consumos', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const categoria = req.query.categoria as string | undefined
+    const limit = parseInt(req.query.limit as string) || 10
+    const periodo = req.query.periodo as string | undefined
+
+    // Filtro base
+    const where: Record<string, unknown> = { userId }
+    if (categoria) where.categoria = categoria
+    if (periodo) where.periodo = periodo
+    else {
+      // Default: periodo actual
+      where.periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
+    }
+
+    // Agrupar por nombre y sumar montos
+    const grouped = await prisma.impulseExpense.groupBy({
+      by: ['nombre'],
+      where,
+      _sum: { monto: true },
+      _count: { nombre: true },
+      orderBy: { _sum: { monto: 'desc' } },
+      take: limit,
+    })
+
+    // Total general del periodo (para calcular porcentajes)
+    const totalResult = await prisma.impulseExpense.aggregate({
+      where,
+      _sum: { monto: true },
+    })
+    const totalGastado = Number(totalResult._sum.monto ?? 0)
+
+    const items = grouped.map(g => {
+      const totalItem = Number(g._sum.monto ?? 0)
+      return {
+        nombre: g.nombre,
+        totalGastado: totalItem,
+        cantidad: g._count.nombre,
+        porcentaje: totalGastado > 0 ? Math.round((totalItem / totalGastado) * 1000) / 10 : 0,
+      }
+    })
+
+    res.json({
+      items,
+      totalGastado,
+      periodo: (periodo || where.periodo) as string,
+    })
+  } catch (error) {
+    console.error('[TopConsumos]', error)
+    res.status(500).json({ error: 'Error al obtener top consumos' })
+  }
+})
+
 // ─── POST /impulse-expenses ───────────────────────────────────────────────────
 
 router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {

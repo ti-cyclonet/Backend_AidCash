@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { pushLoanPayment } from '../lib/push.js'
+import { checkLimit } from '../middleware/limit-enforcement.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -92,7 +93,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 // ─── POST /loans/request ──────────────────────────────────────────────────────
 // Borrower solicita préstamo a Lender
 
-router.post('/request', validate(requestLoanSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/request', validate(requestLoanSchema), checkLimit('nPrestamos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const borrowerId = req.user!.userId
     const { lenderId, amount, descripcion, dueDate } = req.body as {

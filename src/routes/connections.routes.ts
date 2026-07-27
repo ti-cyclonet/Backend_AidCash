@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { pushSocialInvite } from '../lib/push.js'
+import { checkLimit } from '../middleware/limit-enforcement.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -61,7 +62,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /connections/invite ─────────────────────────────────────────────────
 
-router.post('/invite', validate(inviteSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/invite', validate(inviteSchema), checkLimit('nConexiones'), async (req: Request, res: Response): Promise<void> => {
   try {
     const requesterId = req.user!.userId
     const { correo, role = 'FRIEND' } = req.body as { correo: string; role?: 'FRIEND' | 'FAMILY' | 'PARTNER' }

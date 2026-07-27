@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { sendPushToUser } from '../lib/push.js'
+import { checkLimit, attachUsageWarning } from '../middleware/limit-enforcement.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -69,7 +70,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /debts ──────────────────────────────────────────────────────────────
 
-router.post('/', validate(createDebtSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad } = req.body

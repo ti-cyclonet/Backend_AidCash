@@ -28,6 +28,8 @@ import loansRoutes from './routes/loans.routes.js'
 import homeBudgetRoutes from './routes/home-budget.routes.js'
 import expenseSplitRoutes from './routes/expense-split.routes.js'
 import banksRoutes from './routes/banks.routes.js'
+import usageStatusRoutes from './routes/usage-status.routes.js'
+import planRoutes from './routes/plan.routes.js'
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -38,11 +40,19 @@ const httpServer = http.createServer(app)
 app.set('trust proxy', 1)
 
 app.use(helmet())
+
+// CORS: soporta múltiples orígenes separados por coma en FRONTEND_URL
+const allowedOrigins = env.FRONTEND_URL.split(',').map(o => o.trim()).filter(Boolean)
 app.use(cors({
-  origin: env.FRONTEND_URL,
+  origin: (origin, callback) => {
+    // Permitir requests sin origin (mobile apps, curl, server-to-server)
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.includes(origin)) return callback(null, true)
+    callback(new Error(`Origin ${origin} not allowed by CORS`))
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
 }))
 app.use(cookieParser())
 app.use(express.json({ limit: '10mb' }))
@@ -79,6 +89,8 @@ app.use('/api/loans', loansRoutes)
 app.use('/api/home-budget', homeBudgetRoutes)
 app.use('/api/expenses/split', expenseSplitRoutes)
 app.use('/api/banks', banksRoutes)
+app.use('/api/usage-status', usageStatusRoutes)
+app.use('/api/plan', planRoutes)
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 
