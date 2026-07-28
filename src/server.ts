@@ -8,6 +8,7 @@ import { env } from './config/env.js'
 import { connectDatabase } from './config/database.js'
 import { errorHandler } from './middleware/error-handler.js'
 import { initSocket } from './lib/socket.js'
+import { initPaymentNotificationsCron } from './cron/payment-notifications.js'
 
 // Routes
 import authRoutes from './routes/auth.routes.js'
@@ -24,11 +25,17 @@ import reportsRoutes from './routes/reports.routes.js'
 import connectionsRoutes from './routes/connections.routes.js'
 import sharedPocketsRoutes from './routes/shared-pockets.routes.js'
 import loansRoutes from './routes/loans.routes.js'
+import homeBudgetRoutes from './routes/home-budget.routes.js'
+import expenseSplitRoutes from './routes/expense-split.routes.js'
+import banksRoutes from './routes/banks.routes.js'
 
 const app = express()
 const httpServer = http.createServer(app)
 
 // ─── Middleware global ────────────────────────────────────────────────────────
+
+// Trust first proxy (Nginx reverse proxy on EC2)
+app.set('trust proxy', 1)
 
 app.use(helmet())
 app.use(cors({
@@ -69,6 +76,9 @@ app.use('/api/reports', reportsRoutes)
 app.use('/api/connections', connectionsRoutes)
 app.use('/api/shared-pockets', sharedPocketsRoutes)
 app.use('/api/loans', loansRoutes)
+app.use('/api/home-budget', homeBudgetRoutes)
+app.use('/api/expenses/split', expenseSplitRoutes)
+app.use('/api/banks', banksRoutes)
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 
@@ -85,6 +95,9 @@ async function bootstrap() {
 
   // Inicializar Socket.io sobre el servidor HTTP
   initSocket(httpServer)
+
+  // Inicializar cron jobs
+  initPaymentNotificationsCron()
 
   httpServer.listen(env.PORT, () => {
     console.log(`

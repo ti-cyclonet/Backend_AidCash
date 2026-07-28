@@ -229,6 +229,7 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
         correo: true,
         ingresoBase: true,
         frecuenciaIngreso: true,
+        diasPago: true,
         onboardingDone: true,
         metaAhorroGlobal: true,
         saldoAhorroTotal: true,
@@ -249,6 +250,52 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
   } catch (error) {
     console.error('[Me]', error)
     res.status(500).json({ error: 'Error al obtener perfil' })
+  }
+})
+
+// ─── POST /auth/forgot-password ───────────────────────────────────────────────
+// Envía un correo con un token para restablecer la contraseña.
+// Por ahora genera el token y lo guarda. La integración con un servicio de email
+// (SendGrid, Resend, etc.) se puede añadir después.
+
+const forgotPasswordSchema = z.object({
+  correo: z.string().email('Correo electrónico inválido'),
+})
+
+router.post('/forgot-password', validate(forgotPasswordSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { correo } = req.body as { correo: string }
+
+    const user = await prisma.user.findUnique({ where: { correo } })
+    if (!user) {
+      // No revelar si el usuario existe o no (seguridad)
+      res.json({ message: 'Si el correo está registrado, recibirás un enlace para restablecer tu contraseña.' })
+      return
+    }
+
+    // Generar token de reset (válido por 1 hora)
+    const resetToken = crypto.randomBytes(32).toString('hex')
+    const resetExpiry = new Date(Date.now() + 60 * 60 * 1000) // 1 hora
+
+    // Guardar token hasheado en un refresh token temporal (reutilizamos la tabla)
+    const hashedToken = await bcrypt.hash(resetToken, 10)
+    await prisma.refreshToken.create({
+      data: {
+        userId: user.id,
+        token: hashedToken,
+        expiresAt: resetExpiry,
+      },
+    })
+
+    // TODO: Integrar con servicio de email (SendGrid, Resend, Nodemailer)
+    // Por ahora, logueamos el link de reset para desarrollo
+    const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}&email=${correo}`
+    console.log(`[ForgotPassword] Reset link for ${correo}: ${resetLink}`)
+
+    res.json({ message: 'Si el correo está registrado, recibirás un enlace para restablecer tu contraseña.' })
+  } catch (error) {
+    console.error('[ForgotPassword]', error)
+    res.status(500).json({ error: 'Error al procesar la solicitud' })
   }
 })
 

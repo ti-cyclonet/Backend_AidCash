@@ -98,6 +98,142 @@ router.patch('/:id', validate(updateSchema), async (req: Request, res: Response)
   }
 })
 
+// ─── PATCH /fixed-expenses/:id/pay — Pagar con lógica de tarjeta vinculada ────
+// Si el gasto fijo tiene una tarjeta vinculada:
+//   → Suma el monto al saldo_principal de esa tarjeta (como si compraras con TC)
+//   → NO descuenta del cashBalance (la tarjeta "paga" por ti)
+// Si NO tiene tarjeta:
+//   → Proceso normal de pago (descuenta del cashBalance)
+
+const payFixedSchema = z.object({
+  monto: z.number().min(0.01).optional(),
+}).strict()
+
+router.patch('/:id/pay', validate(payFixedSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+
+    const existing = await prisma.fixedExpense.findFirst({
+      where: { id, userId },
+      include: { tarjetaVinculada: true },
+    })
+    if (!existing) {
+      res.status(404).json({ error: 'Gasto fijo no encontrado' })
+      return
+    }
+
+    const montoPago = req.body.monto ?? Number(existing.monto)
+    const prevPaid = Number(existing.montoPagadoEstePeriodo ?? 0)
+    const totalPaid = prevPaid + montoPago
+    const isFullyPaid = totalPaid >= Number(existing.monto)
+
+    if (existing.tarjetaVinculadaId && existing.tarjetaVinculada) {
+      // ═══ PAGO CON TARJETA DE CRÉDITO ═══
+      // Sumar al saldo de la tarjeta (la deuda de la tarjeta crece)
+      // NO descontar del cashBalance (la tarjeta paga por ti)
+      await prisma.$transaction([
+        prisma.fixedExpense.update({
+          where: { id },
+          data: { pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid },
+        }),
+        prisma.debt.update({
+          where: { id: existing.tarjetaVinculadaId },
+          data: {
+            saldoRestante: { increment: montoPago },
+            saldoPrincipal: { increment: montoPago },
+          },
+        }),
+      ])
+
+      res.json({
+        fixedExpense: { ...existing, pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid },
+        pagoConTarjeta: true,
+        tarjetaNombre: existing.tarjetaVinculada.nombre,
+        nuevoSaldoTarjeta: Number(existing.tarjetaVinculada.saldoRestante) + montoPago,
+      })
+    } else {
+      // ═══ PAGO NORMAL ═══
+      await prisma.fixedExpense.update({
+        where: { id },
+        data: { pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid },
+      })
+
+      res.json({
+        fixedExpense: { ...existing, pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid },
+        pagoConTarjeta: false,
+      })
+    }
+  } catch (error) {
+    console.error('[PayFixed]', error)
+    res.status(500).json({ error: 'Error al registrar pago' })
+  }
+})
+
+// ─── POST /fixed-expenses/:id/undo-pay ────────────────────────────────────────
+// Revierte el pago de un gasto fijo. Devuelve el monto al cashBalance.
+// Usa $transaction para garantizar consistencia atómica.
+
+router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+
+    // Buscar el gasto fijo que tenga algún pago (parcial o completo)
+    const existing = await prisma.fixedExpense.findFirst({ where: { id, userId } })
+    if (!existing) {
+      res.status(404).json({ error: 'Gasto fijo no encontrado' })
+      return
+    }
+
+    // Si no tiene ningún pago registrado, no hay nada que deshacer
+    const montoPagado = Number(existing.montoPagadoEstePeriodo ?? 0)
+    if (montoPagado <= 0 && !existing.pagadoEstePeriodo) {
+      res.status(400).json({ error: 'Este gasto no tiene pagos registrados' })
+      return
+    }
+
+    // Devolver lo que se haya pagado (parcial o completo)
+    const montoDevolver = montoPagado > 0 ? montoPagado : Number(existing.monto)
+
+    // Transacción atómica: revertir gasto fijo + devolver cashBalance
+    const [expense, user] = await prisma.$transaction([
+      prisma.fixedExpense.update({
+        where: { id },
+        data: { pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          cashBalance: { increment: montoDevolver },
+        },
+        select: {
+          cashBalance: true,
+          walletAhorro: true,
+          walletObligaciones: true,
+          walletLibre: true,
+          walletEndeudamiento: true,
+        },
+      }),
+    ])
+
+    res.json({
+      fixedExpense: expense,
+      montoDevuelto: montoDevolver,
+      wallet: {
+        cashBalance: Number(user.cashBalance),
+        ahorro: Number(user.walletAhorro),
+        obligaciones: Number(user.walletObligaciones),
+        libre: Number(user.walletLibre),
+        endeudamiento: Number(user.walletEndeudamiento),
+      },
+    })
+  } catch (error) {
+    console.error('[UndoPayFixed]', error)
+    res.status(500).json({ error: 'Error al deshacer pago de gasto fijo' })
+  }
+})
+
 // ─── DELETE /fixed-expenses/:id ───────────────────────────────────────────────
 
 router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
