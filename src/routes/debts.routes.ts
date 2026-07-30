@@ -14,6 +14,7 @@ router.use(authMiddleware)
 const createDebtSchema = z.object({
   nombre: z.string().min(1, 'El nombre es requerido'),
   montoTotal: z.number().min(0.01),
+  saldoRestante: z.number().min(0).optional(),
   cuotaPeriodo: z.number().min(0.01),
   acreedor: z.string().default(''),
   frecuenciaPago: z.enum(['mensual', 'quincenal']).default('mensual'),
