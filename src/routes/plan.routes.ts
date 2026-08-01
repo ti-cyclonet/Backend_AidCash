@@ -177,6 +177,77 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
 })
 
 /**
+ * POST /api/plan/upgrade-from-landing
+ * Called from the landing page for users who exist in Kiri but NOT in Authoriza.
+ * Validates password locally, creates the user in Authoriza if needed, then upgrades.
+ */
+router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
+  try {
+    const { email, password, packageId } = req.body
+
+    if (!email || !password || !packageId) {
+      return res.status(400).json({ success: false, error: 'Todos los campos son requeridos.' })
+    }
+
+    // 1. Validate user exists locally and password is correct
+    const user = await prisma.user.findUnique({ where: { correo: email } })
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'Usuario no encontrado.' })
+    }
+
+    const bcrypt = await import('bcryptjs')
+    const isValid = await bcrypt.compare(password, user.passwordHash)
+    if (!isValid) {
+      return res.status(401).json({ success: false, error: 'Contraseña incorrecta.' })
+    }
+
+    // 2. Register user in Authoriza (self-register with same email/password)
+    //    Then call upgrade-plan
+    const registerUrl = `${env.AUTHORIZA_API_URL}/api/auth/ensure-kiri-user`
+    const registerRes = await fetch(registerUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, nombre: user.nombre }),
+    })
+
+    // If user already exists in Authoriza or was just created, proceed with upgrade
+    if (registerRes.ok || registerRes.status === 409) {
+      // Call upgrade-plan
+      const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
+      const upgradeRes = await fetch(upgradeUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, packageId }),
+      })
+      const upgradeData = await upgradeRes.json()
+
+      if (upgradeRes.ok && upgradeData.success) {
+        // Deactivate local user (pending contract approval)
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { isActive: false },
+        })
+
+        return res.json({ success: true, message: upgradeData.message })
+      }
+
+      return res.status(upgradeRes.status).json({
+        success: false,
+        error: upgradeData.message || 'Error al procesar el cambio de plan.',
+      })
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: 'No se pudo preparar tu cuenta para el cambio de plan. Contacta soporte.',
+    })
+  } catch (error: any) {
+    console.error('[Plan] Error in upgrade-from-landing:', error.message)
+    return res.status(500).json({ success: false, error: 'Error al procesar el cambio de plan.' })
+  }
+})
+
+/**
  * POST /api/plan/activate-user
  * Webhook called by Authoriza when a Kiri contract is activated.
  * Reactivates the local user so they can access the app again.
