@@ -119,6 +119,15 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
       return
     }
 
+    // Verificar que el usuario esté activo
+    if (user.isActive === false) {
+      res.status(403).json({
+        error: 'Tu cuenta está temporalmente suspendida mientras se aprueba tu cambio de plan. Recibirás un correo cuando tu contrato sea activado.',
+        code: 'ACCOUNT_SUSPENDED',
+      })
+      return
+    }
+
     // Generar tokens
     const tokenPayload: AuthPayload = { userId: user.id, correo: user.correo }
     const accessToken = generateAccessToken(tokenPayload)
@@ -170,6 +179,16 @@ router.post('/refresh', async (req: Request, res: Response): Promise<void> => {
         await prisma.refreshToken.delete({ where: { id: stored.id } })
       }
       res.status(401).json({ error: 'Refresh token inválido o expirado' })
+      return
+    }
+
+    // Verificar que el usuario esté activo
+    if (stored.user.isActive === false) {
+      await prisma.refreshToken.delete({ where: { id: stored.id } })
+      res.status(403).json({
+        error: 'Tu cuenta está temporalmente suspendida mientras se aprueba tu cambio de plan.',
+        code: 'ACCOUNT_SUSPENDED',
+      })
       return
     }
 
@@ -296,6 +315,52 @@ router.post('/forgot-password', validate(forgotPasswordSchema), async (req: Requ
   } catch (error) {
     console.error('[ForgotPassword]', error)
     res.status(500).json({ error: 'Error al procesar la solicitud' })
+  }
+})
+
+// ─── POST /auth/change-password ───────────────────────────────────────────────
+
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, 'La contraseña actual es requerida'),
+  newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres'),
+})
+
+router.post('/change-password', authMiddleware, validate(changePasswordSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { currentPassword, newPassword } = req.body
+    const userId = req.user!.userId
+
+    const user = await prisma.user.findUnique({ where: { id: userId } })
+    if (!user) {
+      res.status(404).json({ error: 'Usuario no encontrado' })
+      return
+    }
+
+    // Validate current password
+    const isValid = await bcrypt.compare(currentPassword, user.passwordHash)
+    if (!isValid) {
+      res.status(401).json({ error: 'La contraseña actual es incorrecta.' })
+      return
+    }
+
+    // Prevent reusing the same password
+    const isSame = await bcrypt.compare(newPassword, user.passwordHash)
+    if (isSame) {
+      res.status(400).json({ error: 'La nueva contraseña debe ser diferente a la actual.' })
+      return
+    }
+
+    // Hash and update
+    const newHash = await bcrypt.hash(newPassword, 12)
+    await prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash: newHash },
+    })
+
+    res.json({ message: 'Contraseña actualizada exitosamente.' })
+  } catch (error) {
+    console.error('[ChangePassword]', error)
+    res.status(500).json({ error: 'Error al cambiar la contraseña' })
   }
 })
 

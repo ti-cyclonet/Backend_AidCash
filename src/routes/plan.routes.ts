@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { authMiddleware } from '../middleware/auth.js'
 import { env } from '../config/env.js'
+import { prisma } from '../config/database.js'
 
 const router = Router()
 
@@ -103,6 +104,112 @@ router.get('/available', authMiddleware, async (_req: Request, res: Response) =>
     return res.status(503).json({
       error: 'No se pudieron obtener los planes disponibles.',
     })
+  }
+})
+
+/**
+ * POST /api/plan/upgrade
+ * Self-service plan change. Validates password and upgrades the user's plan
+ * in Authoriza. This triggers contract generation, adminInvoices role assignment,
+ * and marks the user as Firmante (authorized signer).
+ */
+router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userEmail = (req as any).user?.correo
+    const { packageId, password } = req.body
+
+    if (!packageId || !password) {
+      return res.status(400).json({
+        success: false,
+        error: 'Se requiere packageId y password.',
+      })
+    }
+
+    if (!userEmail) {
+      return res.status(400).json({
+        success: false,
+        error: 'No se pudo identificar tu cuenta. Intenta iniciar sesión de nuevo.',
+      })
+    }
+
+    // Call Authoriza's upgrade-plan endpoint
+    const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
+    const upgradeResponse = await fetch(upgradeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: userEmail,
+        password,
+        packageId,
+      }),
+    })
+
+    const upgradeData = await upgradeResponse.json()
+
+    if (!upgradeResponse.ok) {
+      return res.status(upgradeResponse.status).json({
+        success: false,
+        error: upgradeData.message || 'Error al cambiar de plan.',
+      })
+    }
+
+    // Deactivate local Kiri user while contract is pending approval
+    const userId = (req as any).user?.userId
+    if (userId) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { isActive: false },
+      })
+      console.log(`[Plan] User ${userId} deactivated locally (pending contract approval)`)
+    }
+
+    return res.json({
+      success: true,
+      message: upgradeData.message || 'Plan actualizado exitosamente.',
+    })
+  } catch (error: any) {
+    console.error('[Plan] Error upgrading plan:', error.message)
+    return res.status(500).json({
+      success: false,
+      error: 'Error al procesar el cambio de plan. Intente más tarde.',
+    })
+  }
+})
+
+/**
+ * POST /api/plan/activate-user
+ * Webhook called by Authoriza when a Kiri contract is activated.
+ * Reactivates the local user so they can access the app again.
+ * This is a server-to-server call (no auth required).
+ */
+router.post('/activate-user', async (req: Request, res: Response) => {
+  try {
+    const { email, contractId } = req.body
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Email is required.' })
+    }
+
+    const user = await prisma.user.findUnique({ where: { correo: email } })
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found in Kiri.' })
+    }
+
+    if (user.isActive) {
+      return res.json({ success: true, message: 'User is already active.' })
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { isActive: true },
+    })
+
+    console.log(`[Plan] User ${user.correo} reactivated (contract ${contractId || 'N/A'} approved)`)
+
+    return res.json({ success: true, message: 'User reactivated successfully.' })
+  } catch (error: any) {
+    console.error('[Plan] Error reactivating user:', error.message)
+    return res.status(500).json({ success: false, error: 'Error reactivating user.' })
   }
 })
 
