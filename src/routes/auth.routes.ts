@@ -318,6 +318,25 @@ router.post('/forgot-password', validate(forgotPasswordSchema), async (req: Requ
   }
 })
 
+// ─── POST /auth/check-email ───────────────────────────────────────────────────
+// Public endpoint used by the landing page to verify if a Kiri user exists.
+
+router.post('/check-email', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { correo } = req.body
+    if (!correo) {
+      res.json({ exists: false })
+      return
+    }
+
+    const user = await prisma.user.findUnique({ where: { correo } })
+    res.json({ exists: !!user })
+  } catch (error) {
+    console.error('[CheckEmail]', error)
+    res.json({ exists: false })
+  }
+})
+
 // ─── POST /auth/change-password ───────────────────────────────────────────────
 
 const changePasswordSchema = z.object({
