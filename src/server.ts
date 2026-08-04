@@ -69,7 +69,8 @@ app.use(limiter)
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: env.NODE_ENV === 'development' ? 100 : 15,
+  max: 50,
+  keyGenerator: (req) => req.headers['x-forwarded-for'] as string || req.ip || 'unknown',
   message: { error: 'Demasiados intentos, espera 15 minutos.' },
 })
 
