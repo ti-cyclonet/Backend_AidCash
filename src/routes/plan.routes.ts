@@ -28,9 +28,31 @@ interface TenantLimitsResponse {
  */
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const userId = (req as any).userId
+    const userEmail = (req as any).user?.correo
 
-    const url = `${env.AUTHORIZA_API_URL}/api/contracts/tenant/${userId}/limits`
+    if (!userEmail) {
+      return res.json({ planName: 'Sin plan', features: {}, limits: {}, hasPlan: false })
+    }
+
+    // First, find the user in Authoriza by email to get their Authoriza userId
+    const checkUrl = `${env.AUTHORIZA_API_URL}/api/auth/check-email`
+    const checkRes = await fetch(checkUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: userEmail }),
+    })
+
+    if (!checkRes.ok) {
+      return res.json({ planName: 'Sin plan', features: {}, limits: {}, hasPlan: false })
+    }
+
+    const checkData = await checkRes.json() as any
+    if (!checkData.exists || !checkData.userId) {
+      return res.json({ planName: 'Sin plan', features: {}, limits: {}, hasPlan: false })
+    }
+
+    const authorizaUserId = checkData.userId
+    const url = `${env.AUTHORIZA_API_URL}/api/contracts/tenant/${authorizaUserId}/limits`
     const response = await fetch(url)
 
     if (!response.ok) {
