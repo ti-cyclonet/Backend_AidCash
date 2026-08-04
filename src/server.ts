@@ -43,11 +43,14 @@ app.use(helmet())
 
 // CORS: soporta múltiples orígenes separados por coma en FRONTEND_URL
 const allowedOrigins = env.FRONTEND_URL.split(',').map(o => o.trim()).filter(Boolean)
+// Always allow the landing page origins for cross-origin plan upgrade requests
+const landingOrigins = ['https://www.cyclonet.com.co', 'https://cyclonet.com.co']
+const allAllowedOrigins = [...new Set([...allowedOrigins, ...landingOrigins])]
 app.use(cors({
   origin: (origin, callback) => {
     // Permitir requests sin origin (mobile apps, curl, server-to-server)
     if (!origin) return callback(null, true)
-    if (allowedOrigins.includes(origin)) return callback(null, true)
+    if (allAllowedOrigins.includes(origin)) return callback(null, true)
     callback(new Error(`Origin ${origin} not allowed by CORS`))
   },
   credentials: true,
