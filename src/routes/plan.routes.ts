@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import bcrypt from 'bcryptjs'
 import { authMiddleware } from '../middleware/auth.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
@@ -195,7 +196,6 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Usuario no encontrado.' })
     }
 
-    const bcrypt = await import('bcryptjs')
     const isValid = await bcrypt.compare(password, user.passwordHash)
     if (!isValid) {
       return res.status(401).json({ success: false, error: 'Contraseña incorrecta.' })
