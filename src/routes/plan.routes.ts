@@ -144,7 +144,7 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
       }),
     })
 
-    const upgradeData = await upgradeResponse.json()
+    const upgradeData = await upgradeResponse.json() as any
 
     if (!upgradeResponse.ok) {
       return res.status(upgradeResponse.status).json({
@@ -219,7 +219,7 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, packageId }),
       })
-      const upgradeData = await upgradeRes.json()
+      const upgradeData = await upgradeRes.json() as any
 
       if (upgradeRes.ok && upgradeData.success) {
         // Deactivate local user (pending contract approval)
