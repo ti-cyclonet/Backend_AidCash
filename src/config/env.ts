@@ -32,4 +32,9 @@ export const env = {
   // ─── Cyclonet / Authoriza Integration ────────────────────────────────────────
   AUTHORIZA_JWT_SECRET: process.env.AUTHORIZA_JWT_SECRET || 'wSddeEwq2e',
   AUTHORIZA_API_URL: process.env.AUTHORIZA_API_URL || 'http://localhost:3000',
+
+  // ─── Belvo Open Banking ─────────────────────────────────────────────────────
+  BELVO_SECRET_ID: process.env.BELVO_SECRET_ID || '',
+  BELVO_SECRET_PASSWORD: process.env.BELVO_SECRET_PASSWORD || '',
+  BELVO_ENV: process.env.BELVO_ENV || 'sandbox', // sandbox | production
 } as const

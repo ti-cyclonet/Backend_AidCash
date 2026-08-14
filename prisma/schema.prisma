@@ -49,6 +49,13 @@ model User {
   incomeRecords         IncomeRecord[]
   pushSubscriptions     PushSubscription[]
 
+  // Bolsillos de ahorro personales y categorías de presupuesto
+  savingsPockets        SavingsPocket[]
+  budgetCategories      BudgetCategory[]
+
+  // Open Banking — Belvo
+  belvoLinks            BelvoLink[]
+
   // Relaciones Phase 3 — Social
   sentConnections       Connection[]       @relation("ConnectionRequester")
   receivedConnections   Connection[]       @relation("ConnectionAddressee")
@@ -146,6 +153,9 @@ model BankEntity {
   nombre              String   @unique
   tasaInteresPromedio Decimal  @map("tasa_interes_promedio") @db.Decimal(7, 4)
   esVerificado        Boolean  @default(false) @map("es_verificado")
+  // Campos para integración Open Banking (Belvo)
+  apiProvider         String?  @map("api_provider")       // "belvo" | "plaid" | null
+  providerItemId      String?  @map("provider_item_id")   // ID del link en el proveedor
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -292,6 +302,98 @@ model PushSubscription {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("push_subscriptions")
+}
+
+// ─── Open Banking — Belvo Links & Transacciones ──────────────────────────────
+
+model BelvoLink {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  linkId          String   @unique @map("link_id")         // ID del link en Belvo
+  institution     String                                    // Nombre del banco conectado
+  institutionType String   @default("bank") @map("institution_type") // bank | fiscal
+  accessMode      String   @default("recurrent") @map("access_mode") // single | recurrent
+  status          String   @default("valid")               // valid | invalid | unconfirmed
+  lastSyncAt      DateTime? @map("last_sync_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accounts     BelvoAccount[]
+  transactions BelvoTransaction[]
+
+  @@map("belvo_links")
+}
+
+model BelvoAccount {
+  id              String   @id @default(uuid())
+  belvoLinkId     String   @map("belvo_link_id")
+  accountId       String   @unique @map("account_id")    // ID de la cuenta en Belvo
+  nombre          String
+  tipo            String                                  // checking | savings | credit_card | loan
+  numero          String?                                 // últimos 4 dígitos
+  moneda          String   @default("COP")
+  balanceActual   Decimal  @default(0) @map("balance_actual") @db.Decimal(14, 2)
+  balanceDisponible Decimal? @map("balance_disponible") @db.Decimal(14, 2)
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  belvoLink BelvoLink @relation(fields: [belvoLinkId], references: [id], onDelete: Cascade)
+
+  @@map("belvo_accounts")
+}
+
+model BelvoTransaction {
+  id              String   @id @default(uuid())
+  belvoLinkId     String   @map("belvo_link_id")
+  transactionId   String   @unique @map("transaction_id") // ID en Belvo (evitar duplicados)
+  accountId       String   @map("account_id")
+  fecha           DateTime @db.Date
+  monto           Decimal  @db.Decimal(14, 2)
+  tipo            String                                   // INFLOW | OUTFLOW
+  categoria       String?                                  // categoría de Belvo
+  descripcion     String?
+  comercio        String?                                  // nombre del comercio
+  status          String   @default("PROCESSED")           // PENDING | PROCESSED
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  belvoLink BelvoLink @relation(fields: [belvoLinkId], references: [id], onDelete: Cascade)
+
+  @@index([belvoLinkId, fecha])
+  @@map("belvo_transactions")
+}
+
+// ─── Bolsillos de Ahorro Personales ───────────────────────────────────────────
+
+model SavingsPocket {
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  nombre       String
+  meta         Decimal  @default(0) @db.Decimal(12, 2)
+  montoActual  Decimal  @default(0) @map("monto_actual") @db.Decimal(12, 2)
+  color        String   @default("#10B981")
+  icono        String   @default("piggy-bank")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("savings_pockets")
+}
+
+// ─── Categorías de Presupuesto ────────────────────────────────────────────────
+
+model BudgetCategory {
+  id     String @id @default(uuid())
+  userId String @map("user_id")
+  nombre String
+  icono  String @default("tag")
+  color  String @default("#6366F1")
+  tipo   String @default("gasto") // gasto | ingreso | ahorro
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("budget_categories")
 }
 
 // ─── Phase 3: Social ──────────────────────────────────────────────────────────

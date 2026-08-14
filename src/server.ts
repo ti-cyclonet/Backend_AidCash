@@ -9,6 +9,8 @@ import { connectDatabase } from './config/database.js'
 import { errorHandler } from './middleware/error-handler.js'
 import { initSocket } from './lib/socket.js'
 import { initPaymentNotificationsCron } from './cron/payment-notifications.js'
+import { initBelvoSyncCron } from './cron/belvo-sync.js'
+import { initSpendingProjectionsCron } from './cron/spending-projections.js'
 
 // Routes
 import authRoutes from './routes/auth.routes.js'
@@ -30,6 +32,10 @@ import expenseSplitRoutes from './routes/expense-split.routes.js'
 import banksRoutes from './routes/banks.routes.js'
 import usageStatusRoutes from './routes/usage-status.routes.js'
 import planRoutes from './routes/plan.routes.js'
+import savingsPocketsRoutes from './routes/savings-pockets.routes.js'
+import budgetCategoriesRoutes from './routes/budget-categories.routes.js'
+import openBankingRoutes from './routes/open-banking.routes.js'
+import projectionsRoutes from './routes/projections.routes.js'
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -95,6 +101,10 @@ app.use('/api/expenses/split', expenseSplitRoutes)
 app.use('/api/banks', banksRoutes)
 app.use('/api/usage-status', usageStatusRoutes)
 app.use('/api/plan', planRoutes)
+app.use('/api/savings-pockets', savingsPocketsRoutes)
+app.use('/api/budget-categories', budgetCategoriesRoutes)
+app.use('/api/open-banking', openBankingRoutes)
+app.use('/api/projections', projectionsRoutes)
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 
@@ -114,6 +124,8 @@ async function bootstrap() {
 
   // Inicializar cron jobs
   initPaymentNotificationsCron()
+  initBelvoSyncCron()
+  initSpendingProjectionsCron()
 
   httpServer.listen(env.PORT, () => {
     console.log(`
