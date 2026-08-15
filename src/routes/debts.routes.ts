@@ -21,6 +21,8 @@ const createDebtSchema = z.object({
   diasPago: z.string().default('1'), // "15" o "15,30"
   tasaInteres: z.number().min(0).optional(),
   prioridad: z.enum(['alta', 'media', 'baja']).default('media'),
+  bankEntityId: z.string().uuid().nullable().optional(),
+  tipoDeuda: z.enum(['PRESTAMO', 'TARJETA_CREDITO']).default('PRESTAMO'),
 })
 
 const updateDebtSchema = z.object({
@@ -74,12 +76,13 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad } = req.body
+    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda } = req.body
 
     const debt = await prisma.debt.create({
       data: {
         userId,
         nombre,
+        tipoDeuda: tipoDeuda || 'PRESTAMO',
         montoTotal,
         // Si el usuario ingresó un saldo actual diferente (ya venía pagando), usarlo
         saldoRestante: saldoRestante ?? montoTotal,
@@ -94,6 +97,7 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
         pagadoEstePeriodo: false,
         estado: 'activa',
         fechaInicio: new Date(),
+        bankEntityId: bankEntityId || null,
       },
     })
 
@@ -145,13 +149,18 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
     const periodo = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
 
     // Transacción: actualizar deuda + registrar historial de pago
+    // ACUMULAR montoPagadoEstePeriodo (NO sobrescribir)
+    const prevPaid = existing.montoPagadoEstePeriodo ? Number(existing.montoPagadoEstePeriodo) : 0
+    const totalPaidThisPeriod = prevPaid + montoPago
+    const cuotaCubierta = totalPaidThisPeriod >= Number(existing.cuotaPeriodo)
+
     const [debt, payment] = await prisma.$transaction([
       prisma.debt.update({
         where: { id },
         data: {
           saldoRestante: nuevoSaldo,
-          pagadoEstePeriodo: true,
-          montoPagadoEstePeriodo: montoPago,
+          pagadoEstePeriodo: cuotaCubierta, // Solo true si se cubrió la cuota completa
+          montoPagadoEstePeriodo: totalPaidThisPeriod, // Acumulado del periodo
           estado: nuevoEstado,
         },
       }),
@@ -213,26 +222,51 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
     const userId = req.user!.userId
     const id = req.params.id as string
 
-    const existing = await prisma.debt.findFirst({ where: { id, userId, pagadoEstePeriodo: true } })
+    // Buscar deuda que tenga ALGÚN pago registrado en el periodo (parcial o completo)
+    const existing = await prisma.debt.findFirst({
+      where: {
+        id,
+        userId,
+        OR: [
+          { pagadoEstePeriodo: true },
+          { montoPagadoEstePeriodo: { gt: 0 } },
+        ],
+      },
+    })
     if (!existing) {
-      res.status(404).json({ error: 'Deuda pagada no encontrada' })
+      res.status(404).json({ error: 'No hay pagos registrados para deshacer' })
       return
     }
 
     // Usar el monto REAL que se pagó (guardado en montoPagadoEstePeriodo)
-    // Si no existe el campo, fallback a cuotaPeriodo
     const montoDevolver = existing.montoPagadoEstePeriodo
       ? Number(existing.montoPagadoEstePeriodo)
       : Number(existing.cuotaPeriodo)
 
-    // Transacción atómica: revertir deuda + devolver cashBalance
+    // Obtener los pagos del periodo actual para calcular cuánto capital se abonó.
+    // El saldoRestante solo se redujo por el capital (no por intereses), así que
+    // debemos devolver solo el CAPITAL al saldo, no el monto total pagado.
+    const now = new Date()
+    const periodo = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    const payments = await prisma.debtPayment.findMany({
+      where: { debtId: id, periodo },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    // Capital total abonado en este periodo (lo que realmente redujo saldoRestante)
+    const totalCapitalAbonado = payments.reduce((sum, p) => sum + Number(p.abonoCapital), 0)
+    // Usar el capital abonado para restaurar el saldo (no el monto total pagado)
+    const saldoToRestore = totalCapitalAbonado > 0 ? totalCapitalAbonado : montoDevolver
+
+    // Transacción atómica: revertir deuda + devolver cashBalance + walletObligaciones
+    // También eliminar los registros de pago del periodo
     const [debt, user] = await prisma.$transaction([
       prisma.debt.update({
         where: { id },
         data: {
-          saldoRestante: { increment: montoDevolver },
+          saldoRestante: { increment: saldoToRestore },
           pagadoEstePeriodo: false,
-          montoPagadoEstePeriodo: null, // Limpiar el registro del pago
+          montoPagadoEstePeriodo: null,
           estado: 'activa',
         },
       }),
@@ -240,6 +274,7 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
         where: { id: userId },
         data: {
           cashBalance: { increment: montoDevolver },
+          walletObligaciones: { increment: montoDevolver },
         },
         select: {
           cashBalance: true,
@@ -248,6 +283,10 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
           walletLibre: true,
           walletEndeudamiento: true,
         },
+      }),
+      // Eliminar registros de pago del periodo (historial de amortización)
+      prisma.debtPayment.deleteMany({
+        where: { debtId: id, periodo },
       }),
     ])
 

@@ -245,7 +245,10 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
         }),
         prisma.user.update({
           where: { id: userId },
-          data: { cashBalance: { increment: montoDevolver } },
+          data: {
+            cashBalance: { increment: montoDevolver },
+            walletObligaciones: { increment: montoDevolver },
+          },
           select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
         }),
       ])
