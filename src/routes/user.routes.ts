@@ -5,6 +5,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { sendPushToUser } from '../lib/push.js'
+import { env } from '../config/env.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -28,7 +29,14 @@ const updateProfileSchema = z.object({
   onboardingDone: z.boolean().optional(),
   metaAhorroGlobal: z.number().min(0).optional(),
   fondoEmergenciaActual: z.number().min(0).optional(),
-}).strict()
+  // Authoriza fields (not saved in Kiri DB)
+  firstName: z.string().optional(),
+  secondName: z.string().optional(),
+  firstSurname: z.string().optional(),
+  secondSurname: z.string().optional(),
+  documentType: z.string().optional(),
+  documentNumber: z.string().optional(),
+})
 
 const balanceSchema = z.object({
   monto: z.number(),
@@ -50,11 +58,12 @@ const walletDeductSchema = z.object({
 router.patch('/profile', validate(updateProfileSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const data = req.body
+    const { firstName, secondName, firstSurname, secondSurname, documentType, documentNumber, ...localData } = req.body
 
+    // Update local Kiri DB (only local fields)
     const user = await prisma.user.update({
       where: { id: userId },
-      data,
+      data: localData,
       select: {
         id: true,
         nombre: true,
@@ -70,6 +79,56 @@ router.patch('/profile', validate(updateProfileSchema), async (req: Request, res
         cashBalance: true,
       },
     })
+
+    // Sync with Authoriza (non-blocking)
+    if (firstName || firstSurname || documentType || documentNumber) {
+      const correo = localData.correo || user.correo
+      try {
+        const authorizaUrl = env.AUTHORIZA_API_URL || 'http://localhost:3000'
+        
+        // Check if user exists in Authoriza
+        const checkRes = await fetch(`${authorizaUrl}/api/auth/check-email`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: correo }),
+        })
+        const checkData = await checkRes.json() as any
+
+        if (checkData.exists && checkData.userId) {
+          // Update user in Authoriza via the users endpoint
+          await fetch(`${authorizaUrl}/api/users/${checkData.userId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              naturalPersonData: {
+                firstName: firstName || undefined,
+                secondName: secondName || undefined,
+                firstSurname: firstSurname || undefined,
+                secondSurname: secondSurname || undefined,
+              },
+              documentType: documentType && documentNumber ? {
+                strDocumentType: documentType,
+                strDocumentNumber: documentNumber,
+              } : undefined,
+            }),
+          })
+        } else if (firstName && firstSurname) {
+          // Create user in Authoriza if doesn't exist
+          await fetch(`${authorizaUrl}/api/users/full`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              user: { strUserName: correo, strStatus: 'ACTIVE' },
+              basicData: { strPersonType: 'N', strStatus: 'ACTIVE' },
+              documentType: { strDocumentType: documentType || 'CC', strDocumentNumber: documentNumber || '' },
+              naturalPersonData: { firstName, secondName, firstSurname, secondSurname },
+            }),
+          })
+        }
+      } catch (authErr) {
+        console.warn('[UpdateProfile] Failed to sync with Authoriza:', (authErr as Error).message)
+      }
+    }
 
     res.json({ user })
   } catch (error) {
