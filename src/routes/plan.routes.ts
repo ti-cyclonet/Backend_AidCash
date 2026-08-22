@@ -267,7 +267,7 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
  */
 router.post('/activate-user', async (req: Request, res: Response) => {
   try {
-    const { email, contractId } = req.body
+    const { email, contractId, planUpgraded, packageName } = req.body
 
     if (!email) {
       return res.status(400).json({ success: false, error: 'Email is required.' })
@@ -278,21 +278,87 @@ router.post('/activate-user', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'User not found in Kiri.' })
     }
 
-    if (user.isActive) {
-      return res.json({ success: true, message: 'User is already active.' })
+    // Set welcome flag for paid plan upgrade (shown as in-app notification)
+    const welcomeFlag = planUpgraded ? (packageName || 'Kiri Plus') : null
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        isActive: true,
+        ...(welcomeFlag ? { pendingWelcome: welcomeFlag } : {}),
+      },
+    })
+
+    console.log(`[Plan] User ${user.correo} activated (contract ${contractId || 'N/A'})${planUpgraded ? ' — plan upgraded to ' + welcomeFlag : ''}`)
+
+    return res.json({ success: true, message: 'User activated successfully.' })
+  } catch (error: any) {
+    console.error('[Plan] Error activating user:', error.message)
+    return res.status(500).json({ success: false, error: 'Error activating user.' })
+  }
+})
+
+/**
+ * GET /api/plan/welcome — check and clear pending welcome notification
+ * Returns { pendingWelcome: string | null } and clears the flag once read.
+ */
+router.get('/welcome', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.userId
+    if (!userId) {
+      return res.status(401).json({ pendingWelcome: null })
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: userId } })
+    const pending = user?.pendingWelcome || null
+
+    // Clear the flag once read
+    if (pending) {
+      await prisma.user.update({ where: { id: userId }, data: { pendingWelcome: null } })
+    }
+
+    return res.json({ pendingWelcome: pending })
+  } catch (error: any) {
+    console.error('[Plan] Error checking welcome:', error.message)
+    return res.json({ pendingWelcome: null })
+  }
+})
+
+/**
+ * POST /api/plan/set-user-status
+ * Webhook called by Authoriza when a user's status changes (block/unblock).
+ * Authoriza is the source of truth for access control.
+ * Server-to-server call (no auth required).
+ * Body: { email, allowed: boolean }
+ */
+router.post('/set-user-status', async (req: Request, res: Response) => {
+  try {
+    const { email, allowed } = req.body
+
+    if (!email || typeof allowed !== 'boolean') {
+      return res.status(400).json({ success: false, error: 'email and allowed (boolean) are required.' })
+    }
+
+    const user = await prisma.user.findUnique({ where: { correo: email } })
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found in Kiri.' })
     }
 
     await prisma.user.update({
       where: { id: user.id },
-      data: { isActive: true },
+      data: { isActive: allowed },
     })
 
-    console.log(`[Plan] User ${user.correo} reactivated (contract ${contractId || 'N/A'} approved)`)
+    // If blocking, revoke all active refresh tokens to force logout
+    if (!allowed) {
+      await prisma.refreshToken.deleteMany({ where: { userId: user.id } }).catch(() => {})
+    }
 
-    return res.json({ success: true, message: 'User reactivated successfully.' })
+    console.log(`[Plan] User ${user.correo} status updated: isActive=${allowed}`)
+    return res.json({ success: true, message: `User access ${allowed ? 'enabled' : 'disabled'}.` })
   } catch (error: any) {
-    console.error('[Plan] Error reactivating user:', error.message)
-    return res.status(500).json({ success: false, error: 'Error reactivating user.' })
+    console.error('[Plan] Error setting user status:', error.message)
+    return res.status(500).json({ success: false, error: 'Error updating user status.' })
   }
 })
 

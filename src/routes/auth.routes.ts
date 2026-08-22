@@ -62,12 +62,13 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
     // Hashear contraseña
     const passwordHash = await bcrypt.hash(password, 12)
 
-    // Crear usuario con valores default
+    // Crear usuario local INACTIVO (pendiente de verificación de correo)
     const user = await prisma.user.create({
       data: {
         nombre,
         correo,
         passwordHash,
+        isActive: false, // Inactivo hasta verificar el correo
         frecuenciaIngreso: 'mensual',
         ingresoBase: 0,
         onboardingDone: false,
@@ -77,44 +78,33 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
       },
     })
 
-    // Registrar también en Authoriza (non-blocking)
+    // Registrar en Authoriza con verificación de correo
+    let verificationRequired = true
     try {
       const authorizaUrl = env.AUTHORIZA_API_URL || 'http://localhost:3000'
-      await fetch(`${authorizaUrl}/api/users/full`, {
+      const authRes = await fetch(`${authorizaUrl}/api/auth/register-kiri`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user: { strUserName: correo, strPassword: password, strStatus: 'ACTIVE' },
-          basicData: { strPersonType: 'N', strStatus: 'ACTIVE' },
-          documentType: {
-            strDocumentType: documentType || 'CC',
-            strDocumentNumber: documentNumber || '',
-          },
-          naturalPersonData: {
-            firstName: firstName || nombre,
-            secondName: secondName || undefined,
-            firstSurname: firstSurname || '',
-            secondSurname: secondSurname || undefined,
-          },
+          email: correo,
+          password,
+          firstName: firstName || nombre,
+          secondName: secondName || undefined,
+          firstSurname: firstSurname || '',
+          secondSurname: secondSurname || undefined,
+          documentType: documentType || 'CC',
+          documentNumber: documentNumber || '',
         }),
       })
+      const authData = await authRes.json() as any
+      // If user already existed in Authoriza (verified), activate locally
+      if (authData.alreadyExists) {
+        verificationRequired = false
+        await prisma.user.update({ where: { id: user.id }, data: { isActive: true } })
+      }
     } catch (authErr) {
-      console.warn('[Register] Failed to sync with Authoriza:', (authErr as Error).message)
+      console.warn('[Register] Failed to register in Authoriza:', (authErr as Error).message)
     }
-
-    // Generar tokens
-    const tokenPayload: AuthPayload = { userId: user.id, correo: user.correo }
-    const accessToken = generateAccessToken(tokenPayload)
-    const refreshToken = generateRefreshToken()
-
-    // Guardar refresh token en BD
-    await prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        token: refreshToken,
-        expiresAt: getRefreshExpiry(),
-      },
-    })
 
     res.status(201).json({
       user: {
@@ -123,8 +113,10 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
         correo: user.correo,
         onboardingDone: user.onboardingDone,
       },
-      accessToken,
-      refreshToken,
+      verificationRequired,
+      message: verificationRequired
+        ? 'Registro exitoso. Revisa tu correo para verificar tu cuenta antes de iniciar sesión.'
+        : 'Registro exitoso.',
     })
   } catch (error) {
     console.error('[Register]', error)
@@ -150,10 +142,51 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
       return
     }
 
-    // Verificar que el usuario esté activo
+    // Verificar estado en Authoriza (fuente de verdad del control de acceso)
+    try {
+      const authorizaUrl = env.AUTHORIZA_API_URL || 'http://localhost:3000'
+      const statusRes = await fetch(`${authorizaUrl}/api/auth/user-status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: correo }),
+      })
+      if (statusRes.ok) {
+        const statusData = await statusRes.json() as any
+        // Only enforce if the user exists in Authoriza
+        if (statusData.exists && !statusData.allowed) {
+          // Sync local isActive flag to match Authoriza
+          await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
+
+          const messages: Record<string, string> = {
+            NOT_VERIFIED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
+            UNCONFIRMED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
+            SUSPENDED: 'Tu cuenta ha sido suspendida. Contacta al administrador.',
+            INACTIVE: 'Tu cuenta está inactiva. Contacta al administrador.',
+            DELINQUENT: 'Tu cuenta tiene un pago pendiente. Regulariza tu situación para continuar.',
+            DELETED: 'Esta cuenta ya no está disponible.',
+          }
+          res.status(403).json({
+            error: messages[statusData.reason] || 'Tu acceso ha sido restringido. Contacta al administrador.',
+            code: 'ACCESS_DENIED',
+            reason: statusData.reason,
+          })
+          return
+        }
+        // If Authoriza allows and local was inactive, reactivate locally
+        if (statusData.exists && statusData.allowed && user.isActive === false) {
+          await prisma.user.update({ where: { id: user.id }, data: { isActive: true } }).catch(() => {})
+          user.isActive = true
+        }
+      }
+    } catch (statusErr) {
+      // If Authoriza is unreachable, fall back to local isActive check (fail-safe)
+      console.warn('[Login] Could not verify status in Authoriza:', (statusErr as Error).message)
+    }
+
+    // Verificar que el usuario esté activo localmente (fallback)
     if (user.isActive === false) {
       res.status(403).json({
-        error: 'Tu cuenta está temporalmente suspendida mientras se aprueba tu cambio de plan. Recibirás un correo cuando tu contrato sea activado.',
+        error: 'Tu cuenta está temporalmente suspendida. Recibirás un correo cuando sea reactivada.',
         code: 'ACCOUNT_SUSPENDED',
       })
       return
