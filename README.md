@@ -131,3 +131,7 @@ Authorization: Bearer <access_token>
 Después de ejecutar el seed:
 - **Correo:** demo@kiri.app
 - **Contraseña:** demo123
+
+---
+
+<!-- Deploy: integrado a docker-compose.prod.yml de CycloNet como servicio kiri-api (2026-08-19) -->
