@@ -52,7 +52,7 @@ export async function fetchTenantLimits(tenantId: string): Promise<TenantLimitsR
     return cached.data
   }
 
-  const url = `${env.AUTHORIZA_API_URL}/api/contracts/tenant/${tenantId}/limits`
+  const url = `${env.AUTHORIZA_API_URL}/api/contracts/tenant/${tenantId}/limits?application=Kiri`
 
   try {
     const response = await fetch(url, {
