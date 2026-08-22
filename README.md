@@ -35,6 +35,8 @@ npm run prisma:seed
 npm run dev
 ```
 
+
+
 ## Endpoints API
 
 ### Auth
