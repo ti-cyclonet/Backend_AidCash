@@ -16,6 +16,12 @@ const registerSchema = z.object({
   nombre: z.string().min(2, 'El nombre debe tener al menos 2 caracteres'),
   correo: z.string().email('Correo electrónico inválido'),
   password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres'),
+  documentType: z.string().optional(),
+  documentNumber: z.string().optional(),
+  firstName: z.string().optional(),
+  secondName: z.string().optional(),
+  firstSurname: z.string().optional(),
+  secondSurname: z.string().optional(),
 })
 
 const loginSchema = z.object({
@@ -44,7 +50,7 @@ function getRefreshExpiry(): Date {
 
 router.post('/register', validate(registerSchema), async (req: Request, res: Response): Promise<void> => {
   try {
-    const { nombre, correo, password } = req.body
+    const { nombre, correo, password, documentType, documentNumber, firstName, secondName, firstSurname, secondSurname } = req.body
 
     // Verificar si el correo ya existe
     const existing = await prisma.user.findUnique({ where: { correo } })
@@ -70,6 +76,31 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
         fondoEmergenciaActual: 0,
       },
     })
+
+    // Registrar también en Authoriza (non-blocking)
+    try {
+      const authorizaUrl = env.AUTHORIZA_API_URL || 'http://localhost:3000'
+      await fetch(`${authorizaUrl}/api/users/full`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user: { strUserName: correo, strPassword: password, strStatus: 'ACTIVE' },
+          basicData: { strPersonType: 'N', strStatus: 'ACTIVE' },
+          documentType: {
+            strDocumentType: documentType || 'CC',
+            strDocumentNumber: documentNumber || '',
+          },
+          naturalPersonData: {
+            firstName: firstName || nombre,
+            secondName: secondName || undefined,
+            firstSurname: firstSurname || '',
+            secondSurname: secondSurname || undefined,
+          },
+        }),
+      })
+    } catch (authErr) {
+      console.warn('[Register] Failed to sync with Authoriza:', (authErr as Error).message)
+    }
 
     // Generar tokens
     const tokenPayload: AuthPayload = { userId: user.id, correo: user.correo }

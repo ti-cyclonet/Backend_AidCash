@@ -53,7 +53,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     }
 
     const authorizaUserId = checkData.userId
-    const url = `${env.AUTHORIZA_API_URL}/api/contracts/tenant/${authorizaUserId}/limits`
+    const url = `${env.AUTHORIZA_API_URL}/api/contracts/tenant/${authorizaUserId}/limits?application=Kiri`
     const response = await fetch(url)
 
     if (!response.ok) {
@@ -176,15 +176,10 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
       })
     }
 
-    // Deactivate local Kiri user while contract is pending approval
-    const userId = (req as any).user?.userId
-    if (userId) {
-      await prisma.user.update({
-        where: { id: userId },
-        data: { isActive: false },
-      })
-      console.log(`[Plan] User ${userId} deactivated locally (pending contract approval)`)
-    }
+    // User keeps access to Kiri while contract is pending approval.
+    // Access will upgrade automatically when the contract is signed and activated.
+    // NOTE: We do NOT deactivate the user here — they keep using the previous plan
+    // until the new contract is fully signed and activated by Authoriza's webhook.
 
     return res.json({
       success: true,
@@ -244,12 +239,7 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
       const upgradeData = await upgradeRes.json() as any
 
       if (upgradeRes.ok && upgradeData.success) {
-        // Deactivate local user (pending contract approval)
-        await prisma.user.update({
-          where: { id: user.id },
-          data: { isActive: false },
-        })
-
+        // User keeps access while contract is pending — do NOT deactivate
         return res.json({ success: true, message: upgradeData.message })
       }
 
