@@ -31,6 +31,32 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userEmail = (req as any).user?.correo
 
+    // ═══ BYPASS: Usuario de prueba tiene acceso completo a todos los módulos ═══
+    if (userEmail === 'test@kiri.app') {
+      return res.json({
+        planName: 'KIRI PRO (Test)',
+        features: {
+          budgetManagement: true,
+          debtsTracking: true,
+          fixedExpenses: true,
+          savingsPockets: true,
+          basicReports: true,
+          impulseExpenses: true,
+          extraIncomes: true,
+          emergencyFund: true,
+          gamification: true,
+          aiCoach: true,
+          advancedReports: true,
+          debtStrategies: true,
+          socialConnections: true,
+          sharedPockets: true,
+          p2pLoans: true,
+        },
+        limits: {},
+        hasPlan: true,
+      })
+    }
+
     if (!userEmail) {
       return res.json({ planName: 'Sin plan', features: {}, limits: {}, hasPlan: false })
     }
@@ -300,27 +326,50 @@ router.post('/activate-user', async (req: Request, res: Response) => {
 
 /**
  * GET /api/plan/welcome — check and clear pending welcome notification
- * Returns { pendingWelcome: string | null } and clears the flag once read.
+ * Returns { pendingWelcome: string | null, planPrice: number | null } and clears the flag once read.
  */
 router.get('/welcome', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.userId
     if (!userId) {
-      return res.status(401).json({ pendingWelcome: null })
+      return res.status(401).json({ pendingWelcome: null, planPrice: null })
     }
 
-    const user = await prisma.user.findUnique({ where: { id: userId } })
-    const pending = user?.pendingWelcome || null
-
-    // Clear the flag once read
-    if (pending) {
-      await prisma.user.update({ where: { id: userId }, data: { pendingWelcome: null } })
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { pendingWelcome: true } })
+    if (!user || !user.pendingWelcome) {
+      return res.json({ pendingWelcome: null, planPrice: null })
     }
 
-    return res.json({ pendingWelcome: pending })
+    const welcomeFlag = user.pendingWelcome
+
+    // Intentar obtener el precio del plan desde Authoriza
+    let planPrice: number | null = null
+    try {
+      const url = `${env.AUTHORIZA_API_URL}/api/packages/landing?application=Kiri`
+      const response = await fetch(url)
+      if (response.ok) {
+        const packages = await response.json() as Array<{ name?: string; displayName?: string; price?: number; isHighlighted?: boolean }>
+        const matchedPlan = packages.find((p) =>
+          (p.name || p.displayName || '').toLowerCase().includes(welcomeFlag.toLowerCase())
+        ) || packages.find((p) => p.isHighlighted)
+        if (matchedPlan && typeof matchedPlan.price === 'number') {
+          planPrice = matchedPlan.price
+        }
+      }
+    } catch {
+      // silently ignore — price will be null
+    }
+
+    // Clear the flag so it only shows once
+    await prisma.user.update({
+      where: { id: userId },
+      data: { pendingWelcome: null },
+    })
+
+    return res.json({ pendingWelcome: welcomeFlag, planPrice })
   } catch (error: any) {
     console.error('[Plan] Error checking welcome:', error.message)
-    return res.json({ pendingWelcome: null })
+    return res.json({ pendingWelcome: null, planPrice: null })
   }
 })
 
