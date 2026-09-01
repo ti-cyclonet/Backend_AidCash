@@ -18,11 +18,22 @@ const walletLimiter = rateLimit({
   message: { error: 'Demasiadas operaciones de billetera. Espera un momento.' },
 })
 
+// Rate limit para búsqueda de usuarios (máx 10 por minuto por usuario) — evita
+// fuerza bruta probando correos/usuarios al azar.
+const searchLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  keyGenerator: (req: Request) => req.user?.userId ?? req.ip ?? 'unknown',
+  message: { error: 'Demasiadas búsquedas. Espera un momento.' },
+})
+
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
 const updateProfileSchema = z.object({
   nombre: z.string().min(2).optional(),
   correo: z.string().email().optional(),
+  username: z.string().min(3).max(20).regex(/^[a-z0-9_]+$/, 'Solo minúsculas, números y guión bajo').optional(),
+  avatarUrl: z.string().max(700_000, 'La imagen es demasiado grande').nullable().optional(),
   ingresoBase: z.number().min(0).optional(),
   frecuenciaIngreso: z.enum(['mensual', 'quincenal']).optional(),
   diasPago: z.array(z.number().min(1).max(31)).max(2).optional(),
@@ -68,6 +79,8 @@ router.patch('/profile', validate(updateProfileSchema), async (req: Request, res
         id: true,
         nombre: true,
         correo: true,
+        username: true,
+        avatarUrl: true,
         ingresoBase: true,
         frecuenciaIngreso: true,
         onboardingDone: true,
@@ -132,8 +145,38 @@ router.patch('/profile', validate(updateProfileSchema), async (req: Request, res
 
     res.json({ user })
   } catch (error) {
+    if ((error as { code?: string }).code === 'P2002') {
+      res.status(409).json({ error: 'Ese nombre de usuario ya está en uso' })
+      return
+    }
     console.error('[UpdateProfile]', error)
     res.status(500).json({ error: 'Error al actualizar perfil' })
+  }
+})
+
+// ─── GET /users/search — buscar por @username o correo, coincidencia exacta ──
+// Nunca devuelve `correo` en la respuesta (evita exponer de más en un buscador
+// de personas), y solo hace match exacto — nunca `contains`/autocomplete.
+
+router.get('/search', searchLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const method = req.query.method as string
+    const value = (req.query.value as string | undefined)?.trim()
+
+    if (!value || (method !== 'username' && method !== 'correo')) {
+      res.status(400).json({ error: 'Búsqueda inválida' })
+      return
+    }
+
+    const user = await prisma.user.findUnique({
+      where: method === 'username' ? { username: value.toLowerCase() } : { correo: value.toLowerCase() },
+      select: { id: true, nombre: true, username: true, avatarUrl: true },
+    })
+
+    res.json({ user: user ?? null })
+  } catch (error) {
+    console.error('[SearchUser]', error)
+    res.status(500).json({ error: 'Error al buscar usuario' })
   }
 })
 

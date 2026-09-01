@@ -1,9 +1,18 @@
 import { Router, Request, Response } from 'express'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
+import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
+import { generarTablaAmortizacion } from '../lib/amortization.js'
 
 const router = Router()
 router.use(authMiddleware)
+
+// Frontera Q1/Q2 de una obligación quincenal: sus PROPIOS días de cobro, no
+// los del sueldo del usuario — ver nota en debts.routes.ts.
+function itemPeriodo(frecuencia: string, ownDays: string): string {
+  if (frecuencia !== 'quincenal') return getPeriodo(frecuencia)
+  return getPeriodo('quincenal', parseDiasPago(ownDays))
+}
 
 // ─── Helpers de rango de fechas ───────────────────────────────────────────────
 
@@ -112,14 +121,21 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       }),
     ])
 
+    // Historial de pagos de gastos fijos dentro del rango (ledger, mismo patrón que debtPayments)
+    const fixedExpensePayments = await prisma.fixedExpensePayment.findMany({
+      where: { fixedExpense: { userId }, createdAt: { gte: from, lte: to } },
+      orderBy: { createdAt: 'desc' },
+    })
+
     // ── Totales para el balance ─────────────────────────────────────────────────
 
     const totalImpulse = impulseExpenses.reduce((s, e) => s + Number(e.monto), 0)
     const totalSaved   = savingsHistory.filter(e => e.tipo === 'ahorro').reduce((s, e) => s + Number(e.monto), 0)
     const totalExtra   = extraIncomes.reduce((s, e) => s + Number(e.monto), 0)
-    // Deudas y fijos pagados EN ESTE PERIODO (marcados como pagado)
-    const totalDebts   = debts.filter(d => d.pagadoEstePeriodo).reduce((s, d) => s + Number(d.cuotaPeriodo), 0)
-    const totalFixed   = fixedExpenses.filter(f => f.pagadoEstePeriodo).reduce((s, f) => s + Number(f.monto), 0)
+    // Deudas y fijos EFECTIVAMENTE PAGADOS dentro del rango — se toma del ledger
+    // de pagos (montoPagado real), no de una columna "pagado" que ya no existe.
+    const totalDebts   = debtPayments.reduce((s, p) => s + Number(p.montoPagado), 0)
+    const totalFixed   = fixedExpensePayments.reduce((s, p) => s + Number(p.montoPagado), 0)
 
     // ── Amortización: intereses pagados vs capital abonado ────────────────────
     const totalInteresPagado = debtPayments.reduce((s, p) => s + Number(p.pagoInteres), 0)
@@ -135,6 +151,40 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     const totalInteresHistorico = Number(allDebtPaymentsEver._sum.pagoInteres ?? 0)
     const totalCapitalHistorico = Number(allDebtPaymentsEver._sum.abonoCapital ?? 0)
 
+    // ── Interés evitado: cuánto interés te ahorraste pagando más que el mínimo ──
+    // Por deuda: interés total SI solo se hubieran hecho pagos mínimos (tabla de
+    // amortización completa desde el monto inicial) vs interés real proyectado
+    // (lo ya pagado + lo que falta proyectado desde el saldo ACTUAL, que es menor
+    // porque hubo abonos extra). La diferencia es interés que ya no se pagará.
+    const interesPorDeuda = await prisma.debtPayment.groupBy({
+      by: ['debtId'],
+      where: { debt: { userId } },
+      _sum: { pagoInteres: true },
+    })
+    const interesPagadoPorDeuda = new Map(interesPorDeuda.map(r => [r.debtId, Number(r._sum.pagoInteres ?? 0)]))
+
+    let interesEvitado = 0
+    for (const d of debts) {
+      const tasa = d.tasaInteresAplicada ? Number(d.tasaInteresAplicada) : (d.tasaInteres ? Number(d.tasaInteres) : null)
+      if (!tasa || tasa <= 0) continue
+      const cuota = Number(d.cuotaPeriodo)
+      if (!cuota || cuota <= 0) continue
+
+      const montoInicial = Number(d.montoInicial ?? d.montoTotal)
+      const interesOriginalTotal = generarTablaAmortizacion(montoInicial, tasa, cuota)
+        .reduce((s, r) => s + r.pagoInteres, 0)
+
+      const interesYaPagado = interesPagadoPorDeuda.get(d.id) ?? 0
+      const saldoActual = Number(d.saldoRestante)
+      const interesRestanteProyectado = saldoActual > 0
+        ? generarTablaAmortizacion(saldoActual, tasa, cuota).reduce((s, r) => s + r.pagoInteres, 0)
+        : 0
+      const interesProyectadoActual = interesYaPagado + interesRestanteProyectado
+
+      interesEvitado += Math.max(0, interesOriginalTotal - interesProyectadoActual)
+    }
+    interesEvitado = Math.round(interesEvitado)
+
     // Ingreso REAL del periodo = lo que el usuario ha registrado en income_records dentro del rango
     // Si no hay registros en el periodo, usamos ingresoBase como referencia
     const ingresoBase = Number(user?.ingresoBase ?? 0)
@@ -149,7 +199,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // totalIngreso: si hay registros reales en el periodo, usar esos. Si no, usar base + extra.
     const totalIngreso = ingresosRealPeriodo > 0 ? ingresosRealPeriodo + totalExtra : ingresoBase + totalExtra
     // totalEgreso: lo que realmente se ha pagado/gastado en el periodo
-    const totalFixedPaid = fixedExpenses.filter(f => f.pagadoEstePeriodo).reduce((s, f) => s + Number(f.montoPagadoEstePeriodo ?? f.monto), 0)
+    const totalFixedPaid = totalFixed
     const totalEgreso  = totalPagosDeuda + totalFixedPaid + totalImpulse
 
     // Totales históricos (toda la vida)
@@ -197,10 +247,9 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // Egresos
     impulseExpenses.forEach(e => addToMonth(new Date(e.createdAt), 'egresos', Number(e.monto)))
     debtPayments.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
-    // Gastos fijos pagados en el periodo
-    fixedExpenses.filter(f => f.pagadoEstePeriodo && f.montoPagadoEstePeriodo).forEach(f => {
-      addToMonth(new Date(f.updatedAt), 'egresos', Number(f.montoPagadoEstePeriodo))
-    })
+    // Gastos fijos pagados — fecha real de cada pago del ledger, no `updatedAt`
+    // de la fila (que se mueve con cualquier PATCH, no solo con un pago)
+    fixedExpensePayments.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
 
     // Ingresos reales registrados
     const incomeRecordsPeriodList = await prisma.incomeRecord.findMany({
@@ -241,6 +290,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         totalPagosDeuda,
         totalInteresHistorico,
         totalCapitalHistorico,
+        interesEvitado,
       },
 
       // Para charts
@@ -251,8 +301,28 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       impulseExpenses:  impulseExpenses.map(e => ({ ...e, monto: Number(e.monto) })),
       savingsHistory:   savingsHistory.map(e => ({ ...e, monto: Number(e.monto) })),
       extraIncomes:     extraIncomes.map(e => ({ ...e, monto: Number(e.monto) })),
-      debts:            debts.map(d => ({ ...d, montoTotal: Number(d.montoTotal), cuotaPeriodo: Number(d.cuotaPeriodo), montoPagadoEstePeriodo: d.montoPagadoEstePeriodo ? Number(d.montoPagadoEstePeriodo) : null })),
-      fixedExpenses:    fixedExpenses.map(f => ({ ...f, monto: Number(f.monto) })),
+      debts: debts.map(d => {
+        const periodo = itemPeriodo(d.frecuenciaPago === 'quincenal' ? 'quincenal' : 'mensual', d.diasPago)
+        const paid = debtPayments.filter(p => p.debtId === d.id && p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
+        return {
+          ...d,
+          montoTotal: Number(d.montoTotal),
+          cuotaPeriodo: Number(d.cuotaPeriodo),
+          pagadoEstePeriodo: paid >= Number(d.cuotaPeriodo),
+          montoPagadoEstePeriodo: paid > 0 ? paid : null,
+        }
+      }),
+      fixedExpenses: fixedExpenses.map(f => {
+        const periodo = itemPeriodo(f.frecuencia, f.fechaCorte)
+        const montoPorPeriodo = getMontoPorPeriodo(Number(f.monto), f.frecuencia)
+        const paid = fixedExpensePayments.filter(p => p.fixedExpenseId === f.id && p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
+        return {
+          ...f,
+          monto: Number(f.monto),
+          pagadoEstePeriodo: paid >= montoPorPeriodo,
+          montoPagadoEstePeriodo: paid > 0 ? paid : null,
+        }
+      }),
 
       // Historial de amortización
       debtPayments: debtPayments.map(p => ({

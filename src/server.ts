@@ -11,6 +11,7 @@ import { initSocket } from './lib/socket.js'
 import { initPaymentNotificationsCron } from './cron/payment-notifications.js'
 import { initBelvoSyncCron } from './cron/belvo-sync.js'
 import { initSpendingProjectionsCron } from './cron/spending-projections.js'
+import { initObligationDueDatesCron } from './cron/obligation-due-dates.js'
 
 // Routes
 import authRoutes from './routes/auth.routes.js'
@@ -22,6 +23,7 @@ import extraIncomesRoutes from './routes/extra-incomes.routes.js'
 import impulseRoutes from './routes/impulse.routes.js'
 import emergencyFundRoutes from './routes/emergency-fund.routes.js'
 import gamificationRoutes from './routes/gamification.routes.js'
+import missionsRoutes from './routes/missions.routes.js'
 import aiRoutes from './routes/ai.routes.js'
 import reportsRoutes from './routes/reports.routes.js'
 import connectionsRoutes from './routes/connections.routes.js'
@@ -91,6 +93,7 @@ app.use('/api/extra-incomes', extraIncomesRoutes)
 app.use('/api/impulse-expenses', impulseRoutes)
 app.use('/api/emergency-fund', emergencyFundRoutes)
 app.use('/api/gamification', gamificationRoutes)
+app.use('/api/missions', missionsRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api/reports', reportsRoutes)
 app.use('/api/connections', connectionsRoutes)
@@ -126,6 +129,7 @@ async function bootstrap() {
   initPaymentNotificationsCron()
   initBelvoSyncCron()
   initSpendingProjectionsCron()
+  initObligationDueDatesCron()
 
   httpServer.listen(env.PORT, () => {
     console.log(`

@@ -4,8 +4,10 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
-import { pushSocialInvite } from '../lib/push.js'
+import { pushSocialInvite, pushGardenWatered } from '../lib/push.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
+import { getUserGardenHealth } from '../lib/garden-health.js'
+import { todayPeriodo } from '../lib/missions.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -13,9 +15,14 @@ router.use(authMiddleware)
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
 const inviteSchema = z.object({
-  correo: z.string().email('Correo inválido'),
+  method: z.enum(['username', 'correo']),
+  value: z.string().min(1, 'Valor requerido'),
   role: z.enum(['FRIEND', 'FAMILY', 'PARTNER']).optional().default('FRIEND'),
 })
+
+// Selección de usuario reutilizada en todo este archivo — nunca incluye la
+// contraseña ni datos sensibles, solo lo necesario para mostrar a un peer.
+const PEER_SELECT = { id: true, nombre: true, correo: true, username: true, avatarUrl: true } as const
 
 const respondSchema = z.object({
   connectionId: z.string().min(1),
@@ -35,20 +42,20 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           OR: [{ requesterId: userId }, { addresseeId: userId }],
         },
         include: {
-          requester: { select: { id: true, nombre: true, correo: true } },
-          addressee: { select: { id: true, nombre: true, correo: true } },
+          requester: { select: PEER_SELECT },
+          addressee: { select: PEER_SELECT },
         },
       }),
       prisma.connection.findMany({
         where: { addresseeId: userId, status: 'PENDING' },
         include: {
-          requester: { select: { id: true, nombre: true, correo: true } },
+          requester: { select: PEER_SELECT },
         },
       }),
       prisma.connection.findMany({
         where: { requesterId: userId, status: 'PENDING' },
         include: {
-          addressee: { select: { id: true, nombre: true, correo: true } },
+          addressee: { select: PEER_SELECT },
         },
       }),
     ])
@@ -65,24 +72,30 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/invite', validate(inviteSchema), checkLimit('nConexiones'), async (req: Request, res: Response): Promise<void> => {
   try {
     const requesterId = req.user!.userId
-    const { correo, role = 'FRIEND' } = req.body as { correo: string; role?: 'FRIEND' | 'FAMILY' | 'PARTNER' }
+    const { method, value, role = 'FRIEND' } = req.body as {
+      method: 'username' | 'correo'
+      value: string
+      role?: 'FRIEND' | 'FAMILY' | 'PARTNER'
+    }
+    const normalizedValue = value.trim().toLowerCase()
 
-    // No invitarse a sí mismo
     const requester = await prisma.user.findUnique({
       where: { id: requesterId },
-      select: { correo: true, nombre: true },
+      select: { correo: true, nombre: true, username: true },
     })
-    if (requester?.correo === correo) {
-      res.status(400).json({ error: 'No puedes invitarte a ti mismo' })
+
+    const addressee = await prisma.user.findUnique({
+      where: method === 'username' ? { username: normalizedValue } : { correo: normalizedValue },
+      select: PEER_SELECT,
+    })
+    if (!addressee) {
+      res.status(404).json({ error: 'No encontramos a nadie con ese dato exacto' })
       return
     }
 
-    const addressee = await prisma.user.findUnique({
-      where: { correo },
-      select: { id: true, nombre: true, correo: true },
-    })
-    if (!addressee) {
-      res.status(404).json({ error: 'No existe ningún usuario con ese correo' })
+    // No invitarse a sí mismo
+    if (addressee.id === requesterId) {
+      res.status(400).json({ error: 'No puedes invitarte a ti mismo' })
       return
     }
 
@@ -150,8 +163,8 @@ router.post('/accept', validate(respondSchema), async (req: Request, res: Respon
     const conn = await prisma.connection.findFirst({
       where: { id: connectionId, addresseeId: userId, status: 'PENDING' },
       include: {
-        requester: { select: { id: true, nombre: true, correo: true } },
-        addressee: { select: { id: true, nombre: true, correo: true } },
+        requester: { select: PEER_SELECT },
+        addressee: { select: PEER_SELECT },
       },
     })
     if (!conn) {
@@ -246,8 +259,8 @@ router.get('/:id/shared', async (req: Request, res: Response): Promise<void> => 
     const conn = await prisma.connection.findFirst({
       where: { id: connId, status: 'ACCEPTED', OR: [{ requesterId: userId }, { addresseeId: userId }] },
       include: {
-        requester: { select: { id: true, nombre: true, correo: true } },
-        addressee: { select: { id: true, nombre: true, correo: true } },
+        requester: { select: PEER_SELECT },
+        addressee: { select: PEER_SELECT },
       },
     })
     if (!conn) {
@@ -272,6 +285,23 @@ router.get('/:id/shared', async (req: Request, res: Response): Promise<void> => 
       },
     })
 
+    // Cuánto ha aportado cada quien a cada bolsillo — el "Reto en pareja" necesita
+    // el total real, no solo los últimos 5 depósitos.
+    const pocketIds = pockets.map(p => p.id)
+    const contributionRows = pocketIds.length > 0
+      ? await prisma.sharedDeposit.groupBy({
+          by: ['sharedPocketId', 'userId'],
+          where: { sharedPocketId: { in: pocketIds } },
+          _sum: { monto: true },
+        })
+      : []
+    const contributionsByPocket = new Map<string, Record<string, number>>()
+    for (const row of contributionRows) {
+      const byUser = contributionsByPocket.get(row.sharedPocketId) ?? {}
+      byUser[row.userId] = Number(row._sum.monto ?? 0)
+      contributionsByPocket.set(row.sharedPocketId, byUser)
+    }
+
     // Préstamos entre ambos
     const loans = await prisma.loan.findMany({
       where: {
@@ -294,8 +324,10 @@ router.get('/:id/shared', async (req: Request, res: Response): Promise<void> => 
         nombre: p.nombre,
         balance: Number(p.balance),
         meta: Number(p.meta),
+        deadline: p.deadline,
         members: p.members.map(m => ({ id: m.user.id, nombre: m.user.nombre, role: m.role })),
         recentDeposits: p.deposits.map(d => ({ ...d, monto: Number(d.monto) })),
+        contributions: contributionsByPocket.get(p.id) ?? {},
       })),
       loans: loans.map(l => ({
         id: l.id,
@@ -361,6 +393,114 @@ router.patch('/:id/role', validate(updateRoleSchema), async (req: Request, res: 
   } catch (error) {
     console.error('[UpdateConnectionRole]', error)
     res.status(500).json({ error: 'Error al actualizar rol' })
+  }
+})
+
+// ─── GET /connections/friends-garden — Racha entre amigos + Jardines vecinos ──
+// Solo conexiones role=FRIEND (nunca PARTNER/FAMILY — regla de diseño: estas
+// secciones nunca muestran montos de dinero, solo racha y salud del jardín).
+
+router.get('/friends-garden', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const periodo = todayPeriodo()
+
+    const friendConnections = await prisma.connection.findMany({
+      where: {
+        status: 'ACCEPTED',
+        role: 'FRIEND',
+        OR: [{ requesterId: userId }, { addresseeId: userId }],
+      },
+      include: {
+        requester: { select: PEER_SELECT },
+        addressee: { select: PEER_SELECT },
+      },
+    })
+
+    const friends = await Promise.all(
+      friendConnections.map(async (conn) => {
+        const peer = conn.requesterId === userId ? conn.addressee : conn.requester
+        const [peerUser, health, badgesCount, wateredByMe] = await Promise.all([
+          prisma.user.findUnique({ where: { id: peer.id }, select: { streakActual: true, streakMejor: true } }),
+          getUserGardenHealth(peer.id),
+          prisma.userBadge.count({ where: { userId: peer.id } }),
+          prisma.gardenWatering.findUnique({
+            where: { waterId_targetUserId_periodo: { waterId: userId, targetUserId: peer.id, periodo } },
+          }),
+        ])
+        return {
+          connectionId: conn.id,
+          peer: { id: peer.id, nombre: peer.nombre, username: peer.username, avatarUrl: peer.avatarUrl },
+          streak: peerUser?.streakActual ?? 0,
+          streakMejor: peerUser?.streakMejor ?? 0,
+          badgesCount,
+          health,
+          wateredByMeToday: !!wateredByMe,
+        }
+      })
+    )
+
+    const [friendsWhoWateredYouToday, me, myHealth, myBadgesCount] = await Promise.all([
+      prisma.gardenWatering.count({ where: { targetUserId: userId, periodo } }),
+      prisma.user.findUnique({ where: { id: userId }, select: { streakActual: true, streakMejor: true } }),
+      getUserGardenHealth(userId),
+      prisma.userBadge.count({ where: { userId } }),
+    ])
+
+    res.json({
+      friends,
+      friendsWhoWateredYouToday,
+      you: {
+        streak: me?.streakActual ?? 0,
+        streakMejor: me?.streakMejor ?? 0,
+        badgesCount: myBadgesCount,
+        health: myHealth,
+      },
+    })
+  } catch (error) {
+    console.error('[GetFriendsGarden]', error)
+    res.status(500).json({ error: 'Error al obtener jardines de amigos' })
+  }
+})
+
+// ─── POST /connections/:id/water — Regar el jardín de un amigo ───────────────
+// Máximo 1 vez por conexión por día — validado acá, no solo deshabilitando el
+// botón en el cliente.
+
+router.post('/:id/water', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+
+    const conn = await prisma.connection.findFirst({
+      where: { id, status: 'ACCEPTED', role: 'FRIEND', OR: [{ requesterId: userId }, { addresseeId: userId }] },
+    })
+    if (!conn) {
+      res.status(404).json({ error: 'Conexión de amistad no encontrada' })
+      return
+    }
+
+    const targetUserId = conn.requesterId === userId ? conn.addresseeId : conn.requesterId
+    const periodo = todayPeriodo()
+
+    const already = await prisma.gardenWatering.findUnique({
+      where: { waterId_targetUserId_periodo: { waterId: userId, targetUserId, periodo } },
+    })
+    if (already) {
+      res.status(400).json({ error: 'Ya regaste este jardín hoy' })
+      return
+    }
+
+    await prisma.gardenWatering.create({ data: { waterId: userId, targetUserId, periodo } })
+
+    const waterer = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
+    emitToUser(targetUserId, 'social:garden_watered', { fromId: userId, fromName: waterer?.nombre ?? 'Un amigo' })
+    pushGardenWatered(targetUserId, waterer?.nombre ?? 'Un amigo')
+
+    res.status(201).json({ watered: true })
+  } catch (error) {
+    console.error('[WaterGarden]', error)
+    res.status(500).json({ error: 'Error al regar el jardín' })
   }
 })
 

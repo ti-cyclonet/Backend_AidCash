@@ -5,6 +5,83 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { sendPushToUser } from '../lib/push.js'
 import { checkLimit, attachUsageWarning } from '../middleware/limit-enforcement.js'
+import { recordMissionAction } from '../lib/missions.js'
+import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
+import type { DebtPayment, DebtCardInstallment } from '@prisma/client'
+
+// ─── Estado derivado por periodo ────────────────────────────────────────────────
+// pagadoEstePeriodo/montoPagadoEstePeriodo ya no son columnas: se calculan sumando
+// los DebtPayment cuyo `periodo` coincide con el periodo actual de la deuda. Así,
+// al cruzar a un periodo nuevo (quincena/mes siguiente) el monto vuelve a $0 solo,
+// sin necesitar un cron que resetee nada.
+//
+// La frontera Q1/Q2 de una deuda QUINCENAL usa sus PROPIOS `diasPago` (ej. "5,28"
+// — las dos fechas reales en que se cobra ESA deuda), no los días de pago del
+// sueldo del usuario: son dos ciclos distintos (cuándo te pagan a ti vs. cuándo
+// te cobran a ti esta deuda en particular) que pueden no coincidir en absoluto.
+function debtPeriodo(debt: { frecuenciaPago: string; diasPago: string }, now: Date = new Date()): string {
+  if (debt.frecuenciaPago !== 'quincenal') return getPeriodo('mensual', [], now)
+  return getPeriodo('quincenal', parseDiasPago(debt.diasPago), now)
+}
+
+interface DebtPeriodStatus {
+  periodo: string
+  montoPagadoEstePeriodo: number
+  interesPagadoEstePeriodo: number
+  /** Saldo justo antes del primer pago del periodo actual — base para calcular el interés del periodo completo */
+  saldoAlIniciarPeriodo: number
+}
+
+function computePeriodStatus(payments: DebtPayment[], periodo: string, saldoActualFallback: number): DebtPeriodStatus {
+  const own = payments.filter(p => p.periodo === periodo).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+  const montoPagadoEstePeriodo = own.reduce((s, p) => s + Number(p.montoPagado), 0)
+  const interesPagadoEstePeriodo = own.reduce((s, p) => s + Number(p.pagoInteres), 0)
+  const saldoAlIniciarPeriodo = own.length > 0 ? Number(own[0].saldoAnterior) : saldoActualFallback
+  return { periodo, montoPagadoEstePeriodo, interesPagadoEstePeriodo, saldoAlIniciarPeriodo }
+}
+
+interface PagoDeudaResult {
+  pagoInteres: number
+  abonoCapital: number
+  nuevoSaldo: number
+  nuevoEstado: 'activa' | 'saldada'
+}
+
+/**
+ * Calcula cómo se divide un pago de deuda entre interés y abono a capital —
+ * usada tanto por /pay como por /pay-with-card, para que pagar con tarjeta NO
+ * se salte el interés real de la deuda que se está pagando (el costo financiero
+ * de esa deuda no depende de cómo se pagó, solo de su saldo y tasa).
+ */
+function calcularPagoDeuda(currentSaldo: number, tasaMensual: number | null, status: DebtPeriodStatus, montoPago: number): PagoDeudaResult {
+  const interesTotalPeriodo = tasaMensual && tasaMensual > 0
+    ? Math.round(status.saldoAlIniciarPeriodo * (tasaMensual / 100) * 100) / 100
+    : 0
+  const interesRestante = Math.max(0, Math.round((interesTotalPeriodo - status.interesPagadoEstePeriodo) * 100) / 100)
+  // El interés de este pago nunca puede superar ni el efectivo pagado ni lo que falta del periodo.
+  const pagoInteres = Math.min(montoPago, interesRestante)
+  const abonoCapital = Math.round((montoPago - pagoInteres) * 100) / 100
+  const nuevoSaldo = Math.max(0, Math.round((currentSaldo - abonoCapital) * 100) / 100)
+  const nuevoEstado: 'activa' | 'saldada' = nuevoSaldo <= 0 ? 'saldada' : 'activa'
+  return { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado }
+}
+
+/** Meses de calendario completos entre dos fechas (ignora el día del mes). */
+function mesesTranscurridos(desde: Date, hasta: Date): number {
+  return (hasta.getFullYear() - desde.getFullYear()) * 12 + (hasta.getMonth() - desde.getMonth())
+}
+
+/**
+ * Cuota efectiva de una tarjeta: la cuota base (la que el usuario definió al
+ * crear/editar la tarjeta) más los planes de cuotas de pay-with-card que siguen
+ * vigentes. Un plan deja de sumar solo, sin cron ni que nadie lo borre, cuando
+ * ya pasaron sus `cuotasTotal` meses — mismo patrón "periodo" del resto de la app.
+ */
+function cuotaEfectivaTarjeta(cuotaBase: number, installments: DebtCardInstallment[], now: Date = new Date()): number {
+  const activos = installments.filter(p => mesesTranscurridos(p.createdAt, now) < p.cuotasTotal)
+  const sumaActivos = activos.reduce((s, p) => s + Number(p.cuotaMensual), 0)
+  return Math.round((cuotaBase + sumaActivos) * 100) / 100
+}
 
 const router = Router()
 router.use(authMiddleware)
@@ -35,7 +112,6 @@ const updateDebtSchema = z.object({
   diasPago: z.string().optional(),
   tasaInteres: z.number().min(0).nullable().optional(),
   prioridad: z.enum(['alta', 'media', 'baja']).optional(),
-  pagadoEstePeriodo: z.boolean().optional(),
   estado: z.enum(['activa', 'saldada', 'vencida']).optional(),
   pagoAutomatico: z.boolean().optional(),
 }).strict()
@@ -51,19 +127,53 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.userId
     const estado = (req.query.estado as string) || 'activa'
 
-    const debts = await prisma.debt.findMany({
-      where: { userId, estado },
-      orderBy: { createdAt: 'desc' },
-    })
+    const debts = await prisma.debt.findMany({ where: { userId, estado }, orderBy: { createdAt: 'desc' } })
+
+    // Traer los pagos recientes de todas las deudas en una sola query (evita N+1).
+    // 40 días cubre de sobra un mes calendario o una quincena en curso.
+    const fortyDaysAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000)
+    const recentPayments = debts.length > 0
+      ? await prisma.debtPayment.findMany({
+          where: { debtId: { in: debts.map(d => d.id) }, createdAt: { gte: fortyDaysAgo } },
+        })
+      : []
+    const paymentsByDebt = new Map<string, DebtPayment[]>()
+    for (const p of recentPayments) {
+      const arr = paymentsByDebt.get(p.debtId) ?? []
+      arr.push(p)
+      paymentsByDebt.set(p.debtId, arr)
+    }
+
+    // Planes de cuotas de tarjeta (pay-with-card) — solo aplica a tarjetas de
+    // crédito, pero se trae para todas en una sola query igual de simple.
+    const tarjetaIds = debts.filter(d => d.tipoDeuda === 'TARJETA_CREDITO').map(d => d.id)
+    const installments = tarjetaIds.length > 0
+      ? await prisma.debtCardInstallment.findMany({ where: { tarjetaId: { in: tarjetaIds } } })
+      : []
+    const installmentsByTarjeta = new Map<string, DebtCardInstallment[]>()
+    for (const p of installments) {
+      const arr = installmentsByTarjeta.get(p.tarjetaId) ?? []
+      arr.push(p)
+      installmentsByTarjeta.set(p.tarjetaId, arr)
+    }
 
     res.json({
-      debts: debts.map(d => ({
-        ...d,
-        montoTotal: Number(d.montoTotal),
-        saldoRestante: Number(d.saldoRestante),
-        cuotaPeriodo: Number(d.cuotaPeriodo),
-        tasaInteres: d.tasaInteres ? Number(d.tasaInteres) : null,
-      })),
+      debts: debts.map(d => {
+        const periodo = debtPeriodo(d)
+        const status = computePeriodStatus(paymentsByDebt.get(d.id) ?? [], periodo, Number(d.saldoRestante))
+        const cuotaPeriodo = d.tipoDeuda === 'TARJETA_CREDITO'
+          ? cuotaEfectivaTarjeta(Number(d.cuotaPeriodo), installmentsByTarjeta.get(d.id) ?? [])
+          : Number(d.cuotaPeriodo)
+        return {
+          ...d,
+          montoTotal: Number(d.montoTotal),
+          saldoRestante: Number(d.saldoRestante),
+          cuotaPeriodo,
+          tasaInteres: d.tasaInteres ? Number(d.tasaInteres) : null,
+          pagadoEstePeriodo: status.montoPagadoEstePeriodo >= cuotaPeriodo,
+          montoPagadoEstePeriodo: status.montoPagadoEstePeriodo > 0 ? status.montoPagadoEstePeriodo : null,
+        }
+      }),
     })
   } catch (error) {
     console.error('[GetDebts]', error)
@@ -94,7 +204,6 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
         tasaInteres: tasaInteres ?? null,
         tasaInteresAplicada: tasaInteres ?? null,
         prioridad: prioridad || 'media',
-        pagadoEstePeriodo: false,
         estado: 'activa',
         fechaInicio: new Date(),
         bankEntityId: bankEntityId || null,
@@ -102,7 +211,15 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
     })
 
     res.status(201).json({
-      debt: { ...debt, montoTotal: Number(debt.montoTotal), saldoRestante: Number(debt.saldoRestante), cuotaPeriodo: Number(debt.cuotaPeriodo), tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null },
+      debt: {
+        ...debt,
+        montoTotal: Number(debt.montoTotal),
+        saldoRestante: Number(debt.saldoRestante),
+        cuotaPeriodo: Number(debt.cuotaPeriodo),
+        tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
+        pagadoEstePeriodo: false,
+        montoPagadoEstePeriodo: null,
+      },
     })
   } catch (error) {
     console.error('[CreateDebt]', error)
@@ -137,45 +254,38 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
         ? Number(existing.tasaInteres)
         : null
 
-    // Calcular amortización
-    const { calcularAmortizacion } = await import('../lib/amortization.js')
-    const amort = calcularAmortizacion(currentSaldo, tasaMensual, montoPago)
+    // Periodo actual de esta deuda + pagos ya registrados en ese periodo.
+    const periodo = debtPeriodo(existing)
+    const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId: id, periodo } })
+    const status = computePeriodStatus(paymentsThisPeriod, periodo, currentSaldo)
 
-    const nuevoSaldo = amort.saldoPosterior
-    const nuevoEstado = nuevoSaldo <= 0 ? 'saldada' : 'activa'
+    // Interés calculado UNA SOLA VEZ por periodo, sobre el saldo con que arrancó
+    // el periodo — así, partir un pago en abonos parciales no cuesta más interés
+    // total que pagarlo de una sola vez.
+    const { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaMensual, status, montoPago)
 
-    // Periodo actual (para historial)
-    const now = new Date()
-    const periodo = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-
-    // Transacción: actualizar deuda + registrar historial de pago
-    // ACUMULAR montoPagadoEstePeriodo (NO sobrescribir)
-    const prevPaid = existing.montoPagadoEstePeriodo ? Number(existing.montoPagadoEstePeriodo) : 0
-    const totalPaidThisPeriod = prevPaid + montoPago
+    const totalPaidThisPeriod = status.montoPagadoEstePeriodo + montoPago
     const cuotaCubierta = totalPaidThisPeriod >= Number(existing.cuotaPeriodo)
 
     const [debt, payment] = await prisma.$transaction([
       prisma.debt.update({
         where: { id },
-        data: {
-          saldoRestante: nuevoSaldo,
-          pagadoEstePeriodo: cuotaCubierta, // Solo true si se cubrió la cuota completa
-          montoPagadoEstePeriodo: totalPaidThisPeriod, // Acumulado del periodo
-          estado: nuevoEstado,
-        },
+        data: { saldoRestante: nuevoSaldo, estado: nuevoEstado },
       }),
       prisma.debtPayment.create({
         data: {
           debtId: id,
           montoPagado: montoPago,
-          abonoCapital: amort.abonoCapital,
-          pagoInteres: amort.pagoInteres,
-          saldoAnterior: amort.saldoAnterior,
-          saldoPosterior: amort.saldoPosterior,
+          abonoCapital,
+          pagoInteres,
+          saldoAnterior: currentSaldo,
+          saldoPosterior: nuevoSaldo,
           periodo,
         },
       }),
     ])
+
+    await recordMissionAction(userId, 'pagar_obligacion')
 
     res.json({
       debt: {
@@ -183,13 +293,14 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
         montoTotal: Number(debt.montoTotal),
         saldoRestante: Number(debt.saldoRestante),
         cuotaPeriodo: Number(debt.cuotaPeriodo),
-        montoPagadoEstePeriodo: debt.montoPagadoEstePeriodo ? Number(debt.montoPagadoEstePeriodo) : null,
+        pagadoEstePeriodo: cuotaCubierta,
+        montoPagadoEstePeriodo: totalPaidThisPeriod > 0 ? totalPaidThisPeriod : null,
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
       },
       amortizacion: {
-        montoPagado: amort.montoPagado,
-        pagoInteres: amort.pagoInteres,
-        abonoCapital: amort.abonoCapital,
+        montoPagado: montoPago,
+        pagoInteres,
+        abonoCapital,
       },
       pagado: montoPago,
       saldoAnterior: currentSaldo,
@@ -222,41 +333,31 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
     const userId = req.user!.userId
     const id = req.params.id as string
 
-    // Buscar deuda que tenga ALGÚN pago registrado en el periodo (parcial o completo)
-    const existing = await prisma.debt.findFirst({
-      where: {
-        id,
-        userId,
-        OR: [
-          { pagadoEstePeriodo: true },
-          { montoPagadoEstePeriodo: { gt: 0 } },
-        ],
-      },
-    })
+    // Buscar deuda del usuario
+    const existing = await prisma.debt.findFirst({ where: { id, userId } })
     if (!existing) {
-      res.status(404).json({ error: 'No hay pagos registrados para deshacer' })
+      res.status(404).json({ error: 'Deuda no encontrada' })
       return
     }
 
-    // Usar el monto REAL que se pagó (guardado en montoPagadoEstePeriodo)
-    const montoDevolver = existing.montoPagadoEstePeriodo
-      ? Number(existing.montoPagadoEstePeriodo)
-      : Number(existing.cuotaPeriodo)
-
-    // Obtener los pagos del periodo actual para calcular cuánto capital se abonó.
-    // El saldoRestante solo se redujo por el capital (no por intereses), así que
-    // debemos devolver solo el CAPITAL al saldo, no el monto total pagado.
-    const now = new Date()
-    const periodo = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+    // Solo se puede deshacer un pago que quede DENTRO del periodo actual de la
+    // deuda — al no haber columnas mutables, el periodo es lo único que define
+    // "el pago más reciente"; un pago de un periodo ya cerrado no se puede tocar.
+    const periodo = debtPeriodo(existing)
     const payments = await prisma.debtPayment.findMany({
       where: { debtId: id, periodo },
       orderBy: { createdAt: 'desc' },
     })
+    if (payments.length === 0) {
+      res.status(404).json({ error: 'No hay pagos registrados para deshacer' })
+      return
+    }
 
-    // Capital total abonado en este periodo (lo que realmente redujo saldoRestante)
+    // Monto real pagado en el periodo (efectivo que salió del usuario)
+    const montoDevolver = payments.reduce((sum, p) => sum + Number(p.montoPagado), 0)
+    // El saldoRestante solo se redujo por el capital (no por intereses), así que
+    // debemos devolver solo el CAPITAL al saldo, no el monto total pagado.
     const totalCapitalAbonado = payments.reduce((sum, p) => sum + Number(p.abonoCapital), 0)
-    // Usar el capital abonado para restaurar el saldo (no el monto total pagado)
-    const saldoToRestore = totalCapitalAbonado > 0 ? totalCapitalAbonado : montoDevolver
 
     // Transacción atómica: revertir deuda + devolver cashBalance + walletObligaciones
     // También eliminar los registros de pago del periodo
@@ -264,9 +365,7 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
       prisma.debt.update({
         where: { id },
         data: {
-          saldoRestante: { increment: saldoToRestore },
-          pagadoEstePeriodo: false,
-          montoPagadoEstePeriodo: null,
+          saldoRestante: { increment: totalCapitalAbonado },
           estado: 'activa',
         },
       }),
@@ -296,6 +395,7 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
         montoTotal: Number(debt.montoTotal),
         saldoRestante: Number(debt.saldoRestante),
         cuotaPeriodo: Number(debt.cuotaPeriodo),
+        pagadoEstePeriodo: false,
         montoPagadoEstePeriodo: null,
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
       },
@@ -327,13 +427,30 @@ router.patch('/:id', validate(updateDebtSchema), async (req: Request, res: Respo
       return
     }
 
-    const debt = await prisma.debt.update({
-      where: { id },
-      data: req.body,
-    })
+    // Al editar la tasa declarada, sincronizar también la tasa APLICADA — antes
+    // quedaban desincronizadas (el pago siempre usa tasaInteresAplicada, que se
+    // congelaba en el valor de creación y nunca se actualizaba desde acá).
+    const data: Record<string, unknown> = { ...req.body }
+    if ('tasaInteres' in req.body) {
+      data.tasaInteresAplicada = req.body.tasaInteres
+    }
+
+    const debt = await prisma.debt.update({ where: { id }, data })
+
+    const periodo = debtPeriodo(debt)
+    const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId: id, periodo } })
+    const status = computePeriodStatus(paymentsThisPeriod, periodo, Number(debt.saldoRestante))
 
     res.json({
-      debt: { ...debt, montoTotal: Number(debt.montoTotal), saldoRestante: Number(debt.saldoRestante), cuotaPeriodo: Number(debt.cuotaPeriodo), tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null },
+      debt: {
+        ...debt,
+        montoTotal: Number(debt.montoTotal),
+        saldoRestante: Number(debt.saldoRestante),
+        cuotaPeriodo: Number(debt.cuotaPeriodo),
+        tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
+        pagadoEstePeriodo: status.montoPagadoEstePeriodo >= Number(debt.cuotaPeriodo),
+        montoPagadoEstePeriodo: status.montoPagadoEstePeriodo > 0 ? status.montoPagadoEstePeriodo : null,
+      },
     })
   } catch (error) {
     console.error('[UpdateDebt]', error)
@@ -365,9 +482,12 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
 // ─── POST /debts/pay-with-card — Pagar obligación con tarjeta de crédito en cuotas ─
 // Recibe: tarjetaId, monto, cuotas, sourceType (debt|fixed), sourceId
 // Lógica:
-//   1. Marca la obligación original como pagada
+//   1. Marca la obligación original como pagada (si es una deuda, con su
+//      interés real de por medio — ver calcularPagoDeuda)
 //   2. Suma el monto total al saldoRestante de la tarjeta
-//   3. Suma (monto / cuotas) a la cuotaPeriodo de la tarjeta
+//   3. Crea un DebtCardInstallment de (monto / cuotas) por mes — la cuota
+//      EFECTIVA de la tarjeta (ver cuotaEfectivaTarjeta) sube mientras el plan
+//      esté vigente y baja sola cuando termina, sin mutar cuotaPeriodo directo
 
 const payWithCardSchema = z.object({
   tarjetaId: z.string().uuid(),
@@ -383,9 +503,7 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
     const { tarjetaId, monto, cuotas, sourceType, sourceId } = req.body
 
     // Verificar que la tarjeta existe y pertenece al usuario
-    const tarjeta = await prisma.debt.findFirst({
-      where: { id: tarjetaId, userId, estado: 'activa' },
-    })
+    const tarjeta = await prisma.debt.findFirst({ where: { id: tarjetaId, userId, estado: 'activa' } })
     if (!tarjeta) {
       res.status(404).json({ error: 'Tarjeta de crédito no encontrada' })
       return
@@ -404,28 +522,50 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
 
       const montoPago = monto
       const currentSaldo = Number(deuda.saldoRestante)
-      const nuevoSaldo = Math.max(0, currentSaldo - montoPago)
-      const nuevoEstado = nuevoSaldo <= 0 ? 'saldada' : 'activa'
+      const tasaMensual = deuda.tasaInteresAplicada
+        ? Number(deuda.tasaInteresAplicada)
+        : deuda.tasaInteres
+          ? Number(deuda.tasaInteres)
+          : null
+      const periodo = debtPeriodo(deuda)
+      const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId: sourceId, periodo } })
+      const status = computePeriodStatus(paymentsThisPeriod, periodo, currentSaldo)
+
+      // Pagar con tarjeta NO exime del interés de la deuda original — el costo
+      // financiero de esa deuda depende de su saldo y tasa, no de cómo se pagó.
+      // Misma función que usa /pay, para que partir/completar con tarjeta calce
+      // exactamente igual que hacerlo en efectivo.
+      const { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaMensual, status, montoPago)
 
       await prisma.$transaction([
-        // Marcar la deuda original como pagada
         prisma.debt.update({
           where: { id: sourceId },
+          data: { saldoRestante: nuevoSaldo, estado: nuevoEstado },
+        }),
+        prisma.debtPayment.create({
           data: {
-            saldoRestante: nuevoSaldo,
-            pagadoEstePeriodo: true,
-            montoPagadoEstePeriodo: montoPago,
-            estado: nuevoEstado,
+            debtId: sourceId,
+            montoPagado: montoPago,
+            abonoCapital,
+            pagoInteres,
+            saldoAnterior: currentSaldo,
+            saldoPosterior: nuevoSaldo,
+            periodo,
           },
         }),
-        // Incrementar saldo y cuota de la tarjeta
+        // La tarjeta sí recibe el monto completo (ella le presta el 100% al
+        // usuario, sin importar cuánto de eso era interés de la deuda original)
         prisma.debt.update({
           where: { id: tarjetaId },
           data: {
             saldoRestante: { increment: monto },
             saldoPrincipal: { increment: monto },
-            cuotaPeriodo: { increment: incrementoCuota },
           },
+        }),
+        // Plan de cuotas de la tarjeta — no muta cuotaPeriodo directamente, se
+        // suma en el momento (GET /debts) mientras el plan siga vigente.
+        prisma.debtCardInstallment.create({
+          data: { tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: cuotas, descripcion: deuda.nombre },
         }),
       ])
     } else {
@@ -436,33 +576,34 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
         return
       }
 
-      const montoTotal = Number(gasto.monto)
-      const montoPorPeriodo = gasto.frecuencia === 'quincenal' ? Math.round(montoTotal / 2) : montoTotal
+      const montoPorPeriodo = getMontoPorPeriodo(Number(gasto.monto), gasto.frecuencia)
       const montoPago = monto || montoPorPeriodo
-      const prevPaid = Number(gasto.montoPagadoEstePeriodo ?? 0)
-      const totalPaid = prevPaid + montoPago
-      const isFullyPaid = totalPaid >= montoTotal
+      const periodoGasto = gasto.frecuencia === 'quincenal'
+        ? getPeriodo('quincenal', parseDiasPago(gasto.fechaCorte))
+        : getPeriodo(gasto.frecuencia)
 
       await prisma.$transaction([
-        // Marcar gasto fijo como pagado
-        prisma.fixedExpense.update({
-          where: { id: sourceId },
-          data: { pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid },
+        prisma.fixedExpensePayment.create({
+          data: { fixedExpenseId: sourceId, montoPagado: montoPago, periodo: periodoGasto },
         }),
-        // Incrementar saldo y cuota de la tarjeta
         prisma.debt.update({
           where: { id: tarjetaId },
           data: {
             saldoRestante: { increment: monto },
             saldoPrincipal: { increment: monto },
-            cuotaPeriodo: { increment: incrementoCuota },
           },
+        }),
+        prisma.debtCardInstallment.create({
+          data: { tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: cuotas, descripcion: gasto.nombre },
         }),
       ])
     }
 
-    // Obtener estado actualizado de la tarjeta
-    const tarjetaActualizada = await prisma.debt.findUnique({ where: { id: tarjetaId } })
+    // Obtener estado actualizado de la tarjeta + su cuota efectiva (base + planes vigentes)
+    const [tarjetaActualizada, installments] = await Promise.all([
+      prisma.debt.findUnique({ where: { id: tarjetaId } }),
+      prisma.debtCardInstallment.findMany({ where: { tarjetaId } }),
+    ])
 
     res.json({
       success: true,
@@ -470,7 +611,7 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
         id: tarjetaActualizada.id,
         nombre: tarjetaActualizada.nombre,
         saldoRestante: Number(tarjetaActualizada.saldoRestante),
-        cuotaPeriodo: Number(tarjetaActualizada.cuotaPeriodo),
+        cuotaPeriodo: cuotaEfectivaTarjeta(Number(tarjetaActualizada.cuotaPeriodo), installments),
       } : null,
       cuotasAgregadas: cuotas,
       incrementoCuota,
