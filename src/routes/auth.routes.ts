@@ -6,6 +6,7 @@ import { prisma } from '../config/database.js'
 import { env } from '../config/env.js'
 import { validate } from '../middleware/validate.js'
 import { authMiddleware, AuthPayload } from '../middleware/auth.js'
+import { generateUniqueUsername } from '../lib/username.js'
 import crypto from 'crypto'
 
 const router = Router()
@@ -62,11 +63,15 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
     // Hashear contraseña
     const passwordHash = await bcrypt.hash(password, 12)
 
+    // @username público (Social) — se autogenera del nombre, editable después
+    const username = await generateUniqueUsername(nombre)
+
     // Crear usuario local INACTIVO (pendiente de verificación de correo)
     const user = await prisma.user.create({
       data: {
         nombre,
         correo,
+        username,
         passwordHash,
         isActive: false, // Inactivo hasta verificar el correo
         frecuenciaIngreso: 'mensual',

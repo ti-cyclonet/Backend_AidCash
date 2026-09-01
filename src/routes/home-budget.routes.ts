@@ -3,9 +3,50 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
 
 const router = Router()
 router.use(authMiddleware)
+
+/** Frontera Q1/Q2 de una obligación quincenal: usa sus PROPIOS días de cobro
+ * (`diasPago`/`fechaCorte`), no los del sueldo del usuario — ver debts.routes.ts. */
+function itemPeriodo(frecuencia: string, ownDays: string): string {
+  if (frecuencia !== 'quincenal') return getPeriodo(frecuencia)
+  return getPeriodo('quincenal', parseDiasPago(ownDays))
+}
+
+/** Suma las obligaciones (deudas + gastos fijos) que siguen PENDIENTES en el
+ * periodo actual de cada una — "pendiente" ya no es una columna, se deriva
+ * comparando lo pagado en el periodo (ledger) contra lo que corresponde. */
+async function pendingObligationsTotal(userId: string): Promise<number> {
+  const [debts, fixedExpenses] = await Promise.all([
+    prisma.debt.findMany({ where: { userId, estado: 'activa' } }),
+    prisma.fixedExpense.findMany({ where: { userId } }),
+  ])
+  const fortyDaysAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000)
+  const [debtPayments, fixedPayments] = await Promise.all([
+    debts.length > 0
+      ? prisma.debtPayment.findMany({ where: { debtId: { in: debts.map(d => d.id) }, createdAt: { gte: fortyDaysAgo } } })
+      : Promise.resolve([]),
+    fixedExpenses.length > 0
+      ? prisma.fixedExpensePayment.findMany({ where: { fixedExpenseId: { in: fixedExpenses.map(f => f.id) }, createdAt: { gte: fortyDaysAgo } } })
+      : Promise.resolve([]),
+  ])
+
+  let total = 0
+  for (const d of debts) {
+    const periodo = itemPeriodo(d.frecuenciaPago === 'quincenal' ? 'quincenal' : 'mensual', d.diasPago)
+    const paid = debtPayments.filter(p => p.debtId === d.id && p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
+    if (paid < Number(d.cuotaPeriodo)) total += Number(d.cuotaPeriodo)
+  }
+  for (const f of fixedExpenses) {
+    const periodo = itemPeriodo(f.frecuencia, f.fechaCorte)
+    const montoPorPeriodo = getMontoPorPeriodo(Number(f.monto), f.frecuencia)
+    const paid = fixedPayments.filter(p => p.fixedExpenseId === f.id && p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
+    if (paid < montoPorPeriodo) total += Number(f.monto)
+  }
+  return total
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // calculateHomeBudget — Presupuesto unificado de pareja
@@ -56,16 +97,11 @@ export async function calculateHomeBudget(userId1: string, userId2: string): Pro
     }
   }
 
-  // Obtener obligaciones pendientes de ambos
-  const [debts1, debts2, fixed1, fixed2] = await Promise.all([
-    prisma.debt.findMany({ where: { userId: userId1, estado: 'activa', pagadoEstePeriodo: false } }),
-    prisma.debt.findMany({ where: { userId: userId2, estado: 'activa', pagadoEstePeriodo: false } }),
-    prisma.fixedExpense.findMany({ where: { userId: userId1, pagadoEstePeriodo: false } }),
-    prisma.fixedExpense.findMany({ where: { userId: userId2, pagadoEstePeriodo: false } }),
+  // Obtener obligaciones pendientes de ambos (derivado del ledger de pagos)
+  const [oblig1, oblig2] = await Promise.all([
+    pendingObligationsTotal(userId1),
+    pendingObligationsTotal(userId2),
   ])
-
-  const oblig1 = debts1.reduce((a, d) => a + Number(d.cuotaPeriodo), 0) + fixed1.reduce((a, f) => a + Number(f.monto), 0)
-  const oblig2 = debts2.reduce((a, d) => a + Number(d.cuotaPeriodo), 0) + fixed2.reduce((a, f) => a + Number(f.monto), 0)
   const obligacionesTotal = oblig1 + oblig2
 
   // Calcular distribución del hogar

@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
+import { requireConnection } from '../lib/connections.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -26,21 +27,6 @@ const depositSchema = z.object({
 const respondSchema = z.object({
   depositId: z.string().min(1),
 })
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-async function requireConnection(userAId: string, userBId: string): Promise<boolean> {
-  const conn = await prisma.connection.findFirst({
-    where: {
-      status: 'ACCEPTED',
-      OR: [
-        { requesterId: userAId, addresseeId: userBId },
-        { requesterId: userBId, addresseeId: userAId },
-      ],
-    },
-  })
-  return !!conn
-}
 
 export function calculateProportionalSplit(
   gastoTotal: number, ingresoA: number, ingresoB: number

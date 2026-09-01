@@ -14,18 +14,9 @@ import cron from 'node-cron'
 import { prisma } from '../config/database.js'
 import { emitToUser } from '../lib/socket.js'
 import { sendPushToUser, pushKiriTip } from '../lib/push.js'
+import { daysUntilDayOfMonth } from '../lib/date-helpers.js'
 
 const SOCKET_EVENT = 'alert:payment_proximity'
-
-/**
- * Calcula si un día de pago está a N días de distancia del día actual.
- * Maneja el cambio de mes (ej: hoy es 29, pago el 1 → faltan 2-3 días).
- */
-function daysUntilPayday(today: number, payday: number, daysInMonth: number): number {
-  if (payday >= today) return payday - today
-  // El día de pago es en el "próximo ciclo" (siguiente mes)
-  return (daysInMonth - today) + payday
-}
 
 export function initPaymentNotificationsCron() {
   // Ejecutar todos los días a las 8:00 AM (hora del servidor)
@@ -54,7 +45,7 @@ export function initPaymentNotificationsCron() {
 
       for (const user of users) {
         for (const payday of user.diasPago) {
-          const daysLeft = daysUntilPayday(today, payday, daysInMonth)
+          const daysLeft = daysUntilDayOfMonth(today, payday, daysInMonth)
 
           let message: string | null = null
           let type: 'reminder_2d' | 'reminder_1d' | 'payday' | null = null
@@ -102,7 +93,7 @@ export function initPaymentNotificationsCron() {
       for (const extra of extraIncomes) {
         if (!extra.fechaRecepcion) continue
         const extraDay = extra.fechaRecepcion.getDate()
-        const daysLeft = daysUntilPayday(today, extraDay, daysInMonth)
+        const daysLeft = daysUntilDayOfMonth(today, extraDay, daysInMonth)
 
         let extraMsg: string | null = null
         if (daysLeft === 2) {

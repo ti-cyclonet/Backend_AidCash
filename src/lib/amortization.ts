@@ -66,13 +66,21 @@ export function calcularAmortizacion(
   const tasaDecimal = tasaInteresMensual / 100
 
   // El interés se calcula sobre el saldo pendiente
-  const pagoInteres = Math.round(saldoActual * tasaDecimal * 100) / 100
+  const interesGenerado = Math.round(saldoActual * tasaDecimal * 100) / 100
+
+  // El interés registrado nunca puede superar lo efectivamente pagado — si la
+  // cuota no alcanza a cubrir el interés generado, el interés "cobrado" es solo
+  // la cuota completa (amortización negativa: el resto del interés generado que
+  // no se pagó se suma al saldo, en vez de inflar el ledger con más interés del
+  // que realmente entró en efectivo).
+  const pagoInteres = Math.min(cuota, interesGenerado)
+  const interesNoPagado = Math.round((interesGenerado - pagoInteres) * 100) / 100
 
   // Lo que queda después de pagar intereses va al capital
   const abonoCapital = Math.max(0, Math.round((cuota - pagoInteres) * 100) / 100)
 
-  // Nuevo saldo = anterior - lo que realmente se abonó al capital
-  const saldoPosterior = Math.max(0, Math.round((saldoActual - abonoCapital) * 100) / 100)
+  // Nuevo saldo = anterior - lo que se abonó a capital + el interés generado que no se pagó
+  const saldoPosterior = Math.max(0, Math.round((saldoActual - abonoCapital + interesNoPagado) * 100) / 100)
 
   return {
     montoPagado: cuota,

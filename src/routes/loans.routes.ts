@@ -4,8 +4,9 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
-import { pushLoanPayment } from '../lib/push.js'
+import { pushLoanPayment, pushLoanRequested, pushLoanApproved, pushLoanRejected, pushLoanCancelled, pushLoanPaymentStatus } from '../lib/push.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
+import { requireConnection } from '../lib/connections.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -33,20 +34,6 @@ const confirmPaymentSchema = z.object({
   paymentId: z.string().min(1),
 })
 
-// ─── Helper: verificar conexión aceptada ──────────────────────────────────────
-
-async function requireConnection(userAId: string, userBId: string): Promise<boolean> {
-  const conn = await prisma.connection.findFirst({
-    where: {
-      status: 'ACCEPTED',
-      OR: [
-        { requesterId: userAId, addresseeId: userBId },
-        { requesterId: userBId, addresseeId: userAId },
-      ],
-    },
-  })
-  return !!conn
-}
 
 // ─── GET /loans ───────────────────────────────────────────────────────────────
 // Devuelve préstamos donde el usuario es prestamista o prestatario
@@ -136,6 +123,7 @@ router.post('/request', validate(requestLoanSchema), checkLimit('nPrestamos'), a
       dueDate,
       borrower: { id: borrowerId, ...borrower },
     })
+    pushLoanRequested(lenderId, borrower?.nombre ?? 'Alguien', amount)
 
     res.status(201).json({ loan: { ...loan, amount: Number(loan.amount), remainingAmount: Number(loan.remainingAmount) } })
   } catch (error) {
@@ -211,6 +199,7 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
         requiresConfirmation: true,
         lenderName: lender?.nombre,
       })
+      pushLoanApproved(loan.borrowerId, lender?.nombre ?? 'Alguien', true)
 
       res.json({
         loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) },
@@ -240,6 +229,7 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
       emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_APPROVED, {
         loanId, amount: montoOriginal, tasaInteres: 0, requiresConfirmation: false,
       })
+      pushLoanApproved(loan.borrowerId, lender?.nombre ?? 'Alguien', false)
 
       res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, requiresConfirmation: false })
     }
@@ -269,6 +259,8 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
       return
     }
 
+    const borrower = await prisma.user.findUnique({ where: { id: borrowerId }, select: { nombre: true } })
+
     if (accept) {
       // Borrower acepta → Activar préstamo y descontar del lender
       const [updated] = await prisma.$transaction([
@@ -282,6 +274,7 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
       emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_APPROVED, {
         loanId, borrowerAccepted: true, amount: Number(updated.amount),
       })
+      pushLoanApproved(loan.lenderId, borrower?.nombre ?? 'Alguien', false)
 
       res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, accepted: true })
     } else {
@@ -297,6 +290,7 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
       })
 
       emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_REJECTED, { loanId, borrowerRejected: true })
+      pushLoanRejected(loan.lenderId, borrower?.nombre ?? 'Alguien')
 
       res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, accepted: false })
     }
@@ -326,7 +320,9 @@ router.post('/reject', validate(respondLoanSchema), async (req: Request, res: Re
       data: { status: 'REJECTED' },
     })
 
+    const lender = await prisma.user.findUnique({ where: { id: lenderId }, select: { nombre: true } })
     emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_REJECTED, { loanId })
+    pushLoanRejected(loan.borrowerId, lender?.nombre ?? 'Alguien')
 
     res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) } })
   } catch (error) {
@@ -350,8 +346,13 @@ router.post('/cancel', validate(respondLoanSchema), async (req: Request, res: Re
       return
     }
 
+    const borrower = await prisma.user.findUnique({ where: { id: borrowerId }, select: { nombre: true } })
+
     // Eliminar directamente (ya no tiene sentido mantenerla)
     await prisma.loan.delete({ where: { id: loanId } })
+
+    emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_REJECTED, { loanId, cancelled: true })
+    pushLoanCancelled(loan.lenderId, borrower?.nombre ?? 'Alguien')
 
     res.json({ message: 'Solicitud cancelada' })
   } catch (error) {
@@ -428,6 +429,7 @@ router.post('/payment', validate(paymentSchema), async (req: Request, res: Respo
         autoConfirmed: true,
         borrower: { id: borrowerId, nombre: borrower?.nombre },
       })
+      pushLoanPayment(loan.lenderId, borrower?.nombre ?? 'Alguien', monto)
 
       res.status(201).json({
         payment: { ...payment, monto: Number(payment.monto) },
@@ -507,6 +509,7 @@ router.post('/payment/confirm', validate(confirmPaymentSchema), async (req: Requ
       remainingAmount: Number(updatedLoan.remainingAmount),
       loanStatus:      newLoanStatus,
     })
+    pushLoanPaymentStatus(payment.userId, 'confirmado', Number(payment.monto))
 
     res.json({
       payment:         { ...confirmedPayment, monto: Number(confirmedPayment.monto) },
@@ -544,6 +547,7 @@ router.post('/payment/reject', validate(confirmPaymentSchema), async (req: Reque
       paymentId,
       loanId: payment.loanId,
     })
+    pushLoanPaymentStatus(payment.userId, 'rechazado', Number(rejected.monto))
 
     res.json({ payment: { ...rejected, monto: Number(rejected.monto) } })
   } catch (error) {

@@ -3,9 +3,25 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { recordMissionAction } from '../lib/missions.js'
+import { getPeriodo } from '../lib/period.js'
 
 const router = Router()
 router.use(authMiddleware)
+
+/**
+ * Un gasto hormiga no tiene frecuencia propia — pertenece al periodo de
+ * INGRESO del usuario (mensual o quincenal, con sus días de pago reales), no
+ * al de una obligación. Antes se etiquetaba con el mes en español
+ * ("agosto de 2026", sin concepto de quincena) y el listado por defecto ni
+ * siquiera filtraba por periodo — traía los últimos 50 registros de todo el
+ * historial. Ahora usa la misma `getPeriodo()` que deudas y gastos fijos, así
+ * "gasto de este periodo" significa lo mismo en toda la app.
+ */
+async function currentUserPeriodo(userId: string, now: Date = new Date()): Promise<string> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { frecuenciaIngreso: true, diasPago: true } })
+  return getPeriodo(user?.frecuenciaIngreso ?? 'mensual', user?.diasPago ?? [], now)
+}
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -21,19 +37,18 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const limit = parseInt(req.query.limit as string) || 50
-    const periodo = req.query.periodo as string | undefined
-
-    const where: Record<string, unknown> = { userId }
-    if (periodo) where.periodo = periodo
+    const currentPeriodo = await currentUserPeriodo(userId)
+    // Sin `periodo` explícito en query → periodo ACTUAL del usuario, no
+    // "los últimos 50 registros de todo el historial" (así se comportaba antes).
+    const periodo = (req.query.periodo as string | undefined) ?? currentPeriodo
 
     const expenses = await prisma.impulseExpense.findMany({
-      where,
+      where: { userId, periodo },
       orderBy: { createdAt: 'desc' },
       take: limit,
     })
 
     // Total del periodo actual
-    const currentPeriodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
     const totalResult = await prisma.impulseExpense.aggregate({
       where: { userId, periodo: currentPeriodo },
       _sum: { monto: true },
@@ -59,16 +74,11 @@ router.get('/top-consumos', async (req: Request, res: Response): Promise<void> =
     const userId = req.user!.userId
     const categoria = req.query.categoria as string | undefined
     const limit = parseInt(req.query.limit as string) || 10
-    const periodo = req.query.periodo as string | undefined
+    const periodo = (req.query.periodo as string | undefined) ?? await currentUserPeriodo(userId)
 
     // Filtro base
-    const where: Record<string, unknown> = { userId }
+    const where: Record<string, unknown> = { userId, periodo }
     if (categoria) where.categoria = categoria
-    if (periodo) where.periodo = periodo
-    else {
-      // Default: periodo actual
-      where.periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
-    }
 
     // Agrupar por nombre y sumar montos
     const grouped = await prisma.impulseExpense.groupBy({
@@ -100,7 +110,7 @@ router.get('/top-consumos', async (req: Request, res: Response): Promise<void> =
     res.json({
       items,
       totalGastado,
-      periodo: (periodo || where.periodo) as string,
+      periodo,
     })
   } catch (error) {
     console.error('[TopConsumos]', error)
@@ -115,11 +125,13 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
     const userId = req.user!.userId
     const { nombre, monto, categoria } = req.body
 
-    const periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
+    const periodo = await currentUserPeriodo(userId)
 
     const expense = await prisma.impulseExpense.create({
       data: { userId, nombre, monto, categoria, periodo },
     })
+
+    await recordMissionAction(userId, 'gasto_hormiga')
 
     res.status(201).json({ expense })
   } catch (error) {

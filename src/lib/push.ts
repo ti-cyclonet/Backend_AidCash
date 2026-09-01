@@ -132,3 +132,91 @@ export function pushSavingsDeposit(userId: string, pocketName: string, fromName:
     url: '/social',
   })
 }
+
+export function pushGardenWatered(userId: string, fromName: string) {
+  return sendPushToUser(userId, {
+    title: '💧 Alguien regó tu jardín',
+    body: `${fromName} regó tu jardín hoy. ¡Ve a ver cómo va creciendo!`,
+    tag: 'garden-watered',
+    url: '/jardin',
+  })
+}
+
+export function pushMissionReady(userId: string, missionTitle: string) {
+  return sendPushToUser(userId, {
+    title: '🎯 ¡Misión completada!',
+    body: `"${missionTitle}" ya está lista — ve a reclamar tu recompensa.`,
+    tag: 'mission-ready',
+    url: '/misiones',
+  })
+}
+
+export function pushLoanRequested(userId: string, borrowerName: string, amount: number) {
+  return sendPushToUser(userId, {
+    title: '🤝 Nueva solicitud de préstamo',
+    body: `${borrowerName} te pidió prestado $${amount.toLocaleString('es-CO')}.`,
+    tag: 'loan-request',
+    url: '/social',
+  })
+}
+
+export function pushLoanApproved(userId: string, otherName: string, requiresConfirmation: boolean) {
+  return sendPushToUser(userId, {
+    title: requiresConfirmation ? '📋 Contraoferta de préstamo' : '✅ Préstamo aprobado',
+    body: requiresConfirmation
+      ? `${otherName} te propuso una tasa de interés — revisa y confirma.`
+      : `${otherName} aprobó tu solicitud de préstamo.`,
+    tag: 'loan-approved',
+    url: '/social',
+  })
+}
+
+export function pushLoanRejected(userId: string, otherName: string) {
+  return sendPushToUser(userId, {
+    title: '❌ Préstamo rechazado',
+    body: `${otherName} rechazó la solicitud de préstamo.`,
+    tag: 'loan-rejected',
+    url: '/social',
+  })
+}
+
+export function pushLoanCancelled(userId: string, borrowerName: string) {
+  return sendPushToUser(userId, {
+    title: '🚫 Solicitud cancelada',
+    body: `${borrowerName} canceló su solicitud de préstamo.`,
+    tag: 'loan-cancelled',
+    url: '/social',
+  })
+}
+
+export function pushLoanPaymentStatus(userId: string, status: 'confirmado' | 'rechazado', monto: number) {
+  return sendPushToUser(userId, {
+    title: status === 'confirmado' ? '✅ Abono confirmado' : '❌ Abono rechazado',
+    body: status === 'confirmado'
+      ? `Tu abono de $${monto.toLocaleString('es-CO')} fue confirmado.`
+      : `Tu abono de $${monto.toLocaleString('es-CO')} fue rechazado — vuelve a intentarlo.`,
+    tag: 'loan-payment-status',
+    url: '/social',
+  })
+}
+
+export function pushObligationDue(userId: string, nombre: string, diasRestantes: number) {
+  const body = diasRestantes === 0
+    ? `"${nombre}" vence hoy. No olvides pagarlo.`
+    : `"${nombre}" vence en ${diasRestantes} día${diasRestantes > 1 ? 's' : ''}.`
+  return sendPushToUser(userId, {
+    title: diasRestantes === 0 ? '⏰ Vence hoy' : '📅 Pago próximo a vencer',
+    body,
+    tag: 'obligation-due',
+    url: '/obligaciones',
+  })
+}
+
+export function pushObligationOverdue(userId: string, nombre: string) {
+  return sendPushToUser(userId, {
+    title: '🚨 Pago vencido',
+    body: `"${nombre}" ya venció y sigue sin pagarse.`,
+    tag: 'obligation-overdue',
+    url: '/obligaciones',
+  })
+}

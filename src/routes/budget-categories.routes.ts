@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { recordMissionAction } from '../lib/missions.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -14,6 +15,8 @@ const createCategorySchema = z.object({
   icono: z.string().default('tag'),
   color: z.string().default('#6366F1'),
   tipo: z.enum(['gasto', 'ingreso', 'ahorro']).default('gasto'),
+  montoLimite: z.number().min(0).optional().default(0),
+  linkedFixedExpenseIds: z.array(z.string()).optional().default([]),
 })
 
 const updateCategorySchema = z.object({
@@ -21,6 +24,8 @@ const updateCategorySchema = z.object({
   icono: z.string().optional(),
   color: z.string().optional(),
   tipo: z.enum(['gasto', 'ingreso', 'ahorro']).optional(),
+  montoLimite: z.number().min(0).optional(),
+  linkedFixedExpenseIds: z.array(z.string()).optional(),
 })
 
 /** Schema para bulk insert (migración desde localStorage) */
@@ -44,7 +49,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       orderBy: { nombre: 'asc' },
     })
 
-    res.json({ categories })
+    res.json({ categories: categories.map(c => ({ ...c, montoLimite: Number(c.montoLimite) })) })
   } catch (error) {
     console.error('[GetBudgetCategories]', error)
     res.status(500).json({ error: 'Error al obtener categorías de presupuesto' })
@@ -56,13 +61,15 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createCategorySchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, icono, color, tipo } = req.body
+    const { nombre, icono, color, tipo, montoLimite, linkedFixedExpenseIds } = req.body
 
     const category = await prisma.budgetCategory.create({
-      data: { userId, nombre, icono, color, tipo },
+      data: { userId, nombre, icono, color, tipo, montoLimite, linkedFixedExpenseIds },
     })
 
-    res.status(201).json({ category })
+    await recordMissionAction(userId, 'categorizar')
+
+    res.status(201).json({ category: { ...category, montoLimite: Number(category.montoLimite) } })
   } catch (error) {
     console.error('[CreateBudgetCategory]', error)
     res.status(500).json({ error: 'Error al crear categoría de presupuesto' })
@@ -111,7 +118,7 @@ router.patch('/:id', validate(updateCategorySchema), async (req: Request, res: R
       data: req.body,
     })
 
-    res.json({ category })
+    res.json({ category: { ...category, montoLimite: Number(category.montoLimite) } })
   } catch (error) {
     console.error('[UpdateBudgetCategory]', error)
     res.status(500).json({ error: 'Error al actualizar categoría' })

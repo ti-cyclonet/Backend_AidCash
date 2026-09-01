@@ -16,6 +16,10 @@ model User {
   id                    String   @id @default(uuid())
   nombre                String
   correo                String   @unique
+  // @username público para buscarse entre usuarios (Social) — se autogenera del
+  // nombre al registrarse, editable después desde Perfil.
+  username              String   @unique
+  avatarUrl             String?  @map("avatar_url") // foto de perfil en base64
   passwordHash          String   @map("password_hash")
   ingresoBase           Decimal  @default(0) @map("ingreso_base") @db.Decimal(12, 2)
   frecuenciaIngreso     String   @default("mensual") @map("frecuencia_ingreso")
@@ -27,6 +31,9 @@ model User {
   streakActual          Int      @default(0) @map("streak_actual")
   streakMejor           Int      @default(0) @map("streak_mejor")
   streakUltimoCheck     DateTime? @map("streak_ultimo_check") @db.Date
+  // Misiones — XP acumulado por misiones reclamadas, y boost temporal (x2 XP) activo
+  xpFromMissions        Int      @default(0) @map("xp_from_missions")
+  xpBoostExpiresAt      DateTime? @map("xp_boost_expires_at")
   cashBalance           Decimal  @default(0) @map("cash_balance") @db.Decimal(12, 2)
   // Wallet — saldo real distribuido en 4 bolsillos
   walletAhorro          Decimal  @default(0) @map("wallet_ahorro") @db.Decimal(12, 2)
@@ -47,6 +54,8 @@ model User {
   impulseExpenses       ImpulseExpense[]
   emergencyFundHistory  EmergencyFundHistory[]
   badges                UserBadge[]
+  missionProgress       MissionProgress[]
+  rewardClaims          RewardClaim[]
   refreshTokens         RefreshToken[]
   incomeRecords         IncomeRecord[]
   pushSubscriptions     PushSubscription[]
@@ -65,6 +74,10 @@ model User {
   loansGiven            Loan[]             @relation("LoanLender")
   loansReceived         Loan[]             @relation("LoanBorrower")
   coOwnedDebts          Debt[]             @relation("DebtCoOwner")
+
+  // Fase 4 — Social gamificado: riego de jardines entre amigos
+  wateringsGiven        GardenWatering[]   @relation("WaterGiven")
+  wateringsReceived     GardenWatering[]   @relation("WaterReceived")
 
   @@map("users")
 }
@@ -109,8 +122,6 @@ model Debt {
   acreedor          String     @default("")
   frecuenciaPago    String     @default("mensual") @map("frecuencia_pago")
   diasPago          String     @default("1") @map("dias_pago")
-  pagadoEstePeriodo Boolean    @default(false) @map("pagado_este_periodo")
-  montoPagadoEstePeriodo Decimal? @map("monto_pagado_este_periodo") @db.Decimal(12, 2)
   estado            String     @default("activa") // activa | saldada | vencida
   prioridad         String     @default("media") // alta | media | baja
   vencidoDesde      DateTime?  @map("vencido_desde")
@@ -126,8 +137,31 @@ model Debt {
   bankEntity       BankEntity?   @relation(fields: [bankEntityId], references: [id], onDelete: SetNull)
   payments         DebtPayment[]
   gastosVinculados FixedExpense[] @relation("TarjetaVinculada")
+  cardInstallments DebtCardInstallment[] @relation("TarjetaInstallments")
 
   @@map("debts")
+}
+
+// ─── Planes de cuotas cargados a una tarjeta (pay-with-card) ──────────────────
+// Cada compra/pago diferido a cuotas queda como una fila acá en vez de mutar
+// Debt.cuotaPeriodo directamente. La cuota EFECTIVA de la tarjeta se calcula en
+// el momento (GET /debts) sumando solo los planes cuyos meses transcurridos
+// desde createdAt sean menores a cuotasTotal — mismo patrón "periodo, sin cron"
+// que el resto de la app: cuando un plan termina, deja de sumar solo, sin que
+// nada tenga que borrarlo ni resetearlo.
+
+model DebtCardInstallment {
+  id           String   @id @default(uuid())
+  tarjetaId    String   @map("tarjeta_id")
+  cuotaMensual Decimal  @map("cuota_mensual") @db.Decimal(12, 2)
+  cuotasTotal  Int      @map("cuotas_total")
+  descripcion  String?
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tarjeta Debt @relation("TarjetaInstallments", fields: [tarjetaId], references: [id], onDelete: Cascade)
+
+  @@index([tarjetaId])
+  @@map("debt_card_installments")
 }
 
 // ─── Historial de pagos de deuda (amortización) ───────────────────────────────
@@ -178,8 +212,6 @@ model FixedExpense {
   frecuencia        String  @default("mensual")
   metodoPago        String? @map("metodo_pago")
   renovacionAuto    Boolean @default(false) @map("renovacion_auto")
-  pagadoEstePeriodo Boolean @default(false) @map("pagado_este_periodo")
-  montoPagadoEstePeriodo Decimal? @map("monto_pagado_este_periodo") @db.Decimal(12, 2)
   // Vinculación a tarjeta de crédito (al pagar, suma al saldo de la tarjeta)
   tarjetaVinculadaId String? @map("tarjeta_vinculada_id")
   pagoAutomatico    Boolean @default(false) @map("pago_automatico")
@@ -188,8 +220,24 @@ model FixedExpense {
 
   user             User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   tarjetaVinculada Debt? @relation("TarjetaVinculada", fields: [tarjetaVinculadaId], references: [id], onDelete: SetNull)
+  payments         FixedExpensePayment[]
 
   @@map("fixed_expenses")
+}
+
+// ─── Historial de pagos de gasto fijo (ledger por periodo, espejo de DebtPayment) ─
+
+model FixedExpensePayment {
+  id             String   @id @default(uuid())
+  fixedExpenseId String   @map("fixed_expense_id")
+  montoPagado    Decimal  @map("monto_pagado") @db.Decimal(12, 2)
+  periodo        String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  fixedExpense FixedExpense @relation(fields: [fixedExpenseId], references: [id], onDelete: Cascade)
+
+  @@index([fixedExpenseId, periodo])
+  @@map("fixed_expense_payments")
 }
 
 // ─── Historial de Ahorro ──────────────────────────────────────────────────────
@@ -270,6 +318,41 @@ model UserBadge {
 
   @@unique([userId, badgeId])
   @@map("user_badges")
+}
+
+// ─── Misiones diarias/semanales — progreso y reclamos de recompensa ──────────
+
+model MissionProgress {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  missionKey String    @map("mission_key") // gasto_hormiga | pagar_obligacion | categorizar | racha_semanal
+  periodo    String    // "2026-08-29" (diarias) o "2026-W35" (semanal)
+  progress   Int       @default(0)
+  target     Int
+  claimedAt  DateTime? @map("claimed_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, missionKey, periodo])
+  @@index([userId, periodo])
+  @@map("mission_progress")
+}
+
+model RewardClaim {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  missionKey  String   @map("mission_key")
+  periodo     String
+  rewardType  String   @map("reward_type") // xp | boost
+  rewardValue Int      @map("reward_value") // monto de XP, u horas de boost
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("reward_claims")
 }
 
 // ─── Registro de Ingresos Reales (Flujo de Caja) ──────────────────────────────
@@ -386,12 +469,14 @@ model SavingsPocket {
 // ─── Categorías de Presupuesto ────────────────────────────────────────────────
 
 model BudgetCategory {
-  id     String @id @default(uuid())
-  userId String @map("user_id")
-  nombre String
-  icono  String @default("tag")
-  color  String @default("#6366F1")
-  tipo   String @default("gasto") // gasto | ingreso | ahorro
+  id                    String   @id @default(uuid())
+  userId                String   @map("user_id")
+  nombre                String
+  icono                 String   @default("tag")
+  color                 String   @default("#6366F1")
+  tipo                  String   @default("gasto") // gasto | ingreso | ahorro
+  montoLimite           Decimal  @default(0) @map("monto_limite") @db.Decimal(12, 2)
+  linkedFixedExpenseIds String[] @default([]) @map("linked_fixed_expense_ids")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -431,6 +516,7 @@ model SharedPocket {
   nombre      String
   balance     Decimal  @default(0) @db.Decimal(12, 2)
   meta        Decimal  @default(0) @db.Decimal(12, 2)
+  deadline    String?  // texto libre, ej. "Antes del 15 de diciembre" — mismo patrón que Loan.dueDate
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
 
@@ -511,4 +597,24 @@ model LoanPayment {
   loan Loan @relation(fields: [loanId], references: [id], onDelete: Cascade)
 
   @@map("loan_payments")
+}
+
+// ─── Fase 4: Riego de jardines entre amigos ──────────────────────────────────
+// Mismo patrón `periodo` que MissionProgress (Fase 3) — sin cron, la fila del
+// día se crea/consulta al vuelo. El unique constraint es el guard real de
+// "máximo 1 vez por conexión por día", validado en el servidor.
+
+model GardenWatering {
+  id           String   @id @default(uuid())
+  waterId      String   @map("water_id")       // quién riega
+  targetUserId String   @map("target_user_id") // a quién le riegan
+  periodo      String                           // "2026-08-30"
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  water      User @relation("WaterGiven", fields: [waterId], references: [id], onDelete: Cascade)
+  targetUser User @relation("WaterReceived", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@unique([waterId, targetUserId, periodo])
+  @@index([targetUserId, periodo])
+  @@map("garden_watering")
 }
