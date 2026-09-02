@@ -4,7 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
-import { recordMissionAction } from '../lib/missions.js'
+import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
 import type { FixedExpensePayment } from '@prisma/client'
 
@@ -107,6 +107,8 @@ router.post('/', validate(createSchema), checkLimit('nGastosFijos'), async (req:
         renovacionAuto: renovacionAuto ?? false,
       },
     })
+
+    await recordOnboardingAction(userId, 'registrar_obligacion')
 
     res.status(201).json({ fixedExpense: { ...expense, pagadoEstePeriodo: false, montoPagadoEstePeriodo: null } })
   } catch (error) {

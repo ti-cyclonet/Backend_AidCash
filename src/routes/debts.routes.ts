@@ -5,7 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { sendPushToUser } from '../lib/push.js'
 import { checkLimit, attachUsageWarning } from '../middleware/limit-enforcement.js'
-import { recordMissionAction } from '../lib/missions.js'
+import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
 import type { DebtPayment, DebtCardInstallment } from '@prisma/client'
 
@@ -209,6 +209,8 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
         bankEntityId: bankEntityId || null,
       },
     })
+
+    await recordOnboardingAction(userId, 'registrar_obligacion')
 
     res.status(201).json({
       debt: {

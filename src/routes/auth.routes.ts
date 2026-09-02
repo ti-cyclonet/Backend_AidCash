@@ -315,6 +315,7 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
         id: true,
         nombre: true,
         correo: true,
+        username: true,
         ingresoBase: true,
         frecuenciaIngreso: true,
         diasPago: true,
@@ -332,6 +333,14 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
     if (!user) {
       res.status(404).json({ error: 'Usuario no encontrado' })
       return
+    }
+
+    // Autosanar cuentas viejas sin @username (de antes de que existiera esta
+    // generación, o creadas por un flujo que no pasó por /auth/register).
+    if (!user.username) {
+      const username = await generateUniqueUsername(user.nombre)
+      await prisma.user.update({ where: { id: user.id }, data: { username } })
+      user.username = username
     }
 
     res.json({ user })
