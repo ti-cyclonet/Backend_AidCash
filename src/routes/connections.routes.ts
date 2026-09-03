@@ -7,7 +7,7 @@ import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { pushSocialInvite, pushGardenWatered } from '../lib/push.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { getUserGardenHealth } from '../lib/garden-health.js'
-import { todayPeriodo } from '../lib/missions.js'
+import { todayPeriodo, recordOnboardingAction } from '../lib/missions.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -135,6 +135,8 @@ router.post('/invite', validate(inviteSchema), checkLimit('nConexiones'), async 
     const connection = await prisma.connection.create({
       data: { requesterId, addresseeId: addressee.id, status: 'PENDING', role },
     })
+
+    await recordOnboardingAction(requesterId, 'invitar_amigo')
 
     // Notificar en tiempo real al destinatario
     emitToUser(addressee.id, SOCKET_EVENTS.NEW_INVITE, {

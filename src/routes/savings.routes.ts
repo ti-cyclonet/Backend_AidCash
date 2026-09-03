@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { recordOnboardingAction } from '../lib/missions.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -65,6 +66,7 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
           saldoAhorroTotal: { increment: monto },
         },
       })
+      await recordOnboardingAction(userId, 'registrar_ahorro')
     }
 
     res.status(201).json({ entry })

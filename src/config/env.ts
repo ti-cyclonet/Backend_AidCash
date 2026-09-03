@@ -37,4 +37,14 @@ export const env = {
   BELVO_SECRET_ID: process.env.BELVO_SECRET_ID || '',
   BELVO_SECRET_PASSWORD: process.env.BELVO_SECRET_PASSWORD || '',
   BELVO_ENV: process.env.BELVO_ENV || 'sandbox', // sandbox | production
+
+  // ─── Correo saliente (SMTP) — usado por /support. Sin configurar, sendMail
+  // no-opea con un warning (mismo patrón que VAPID_* para push) ─────────────
+  SMTP_HOST: process.env.SMTP_HOST || '',
+  SMTP_PORT: parseInt(process.env.SMTP_PORT || '587', 10),
+  SMTP_SECURE: process.env.SMTP_SECURE === 'true',
+  SMTP_USER: process.env.SMTP_USER || '',
+  SMTP_PASS: process.env.SMTP_PASS || '',
+  SMTP_FROM: process.env.SMTP_FROM || 'Kiri Finance <notificaciones@cyclonet.com.co>',
+  SUPPORT_EMAIL_TO: process.env.SUPPORT_EMAIL_TO || 'notificaciones@cyclonet.com.co',
 } as const

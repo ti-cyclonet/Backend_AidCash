@@ -24,7 +24,6 @@ import impulseRoutes from './routes/impulse.routes.js'
 import emergencyFundRoutes from './routes/emergency-fund.routes.js'
 import gamificationRoutes from './routes/gamification.routes.js'
 import missionsRoutes from './routes/missions.routes.js'
-import aiRoutes from './routes/ai.routes.js'
 import reportsRoutes from './routes/reports.routes.js'
 import connectionsRoutes from './routes/connections.routes.js'
 import sharedPocketsRoutes from './routes/shared-pockets.routes.js'
@@ -38,6 +37,7 @@ import savingsPocketsRoutes from './routes/savings-pockets.routes.js'
 import budgetCategoriesRoutes from './routes/budget-categories.routes.js'
 import openBankingRoutes from './routes/open-banking.routes.js'
 import projectionsRoutes from './routes/projections.routes.js'
+import supportRoutes from './routes/support.routes.js'
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -94,7 +94,6 @@ app.use('/api/impulse-expenses', impulseRoutes)
 app.use('/api/emergency-fund', emergencyFundRoutes)
 app.use('/api/gamification', gamificationRoutes)
 app.use('/api/missions', missionsRoutes)
-app.use('/api/ai', aiRoutes)
 app.use('/api/reports', reportsRoutes)
 app.use('/api/connections', connectionsRoutes)
 app.use('/api/shared-pockets', sharedPocketsRoutes)
@@ -108,6 +107,7 @@ app.use('/api/savings-pockets', savingsPocketsRoutes)
 app.use('/api/budget-categories', budgetCategoriesRoutes)
 app.use('/api/open-banking', openBankingRoutes)
 app.use('/api/projections', projectionsRoutes)
+app.use('/api/support', supportRoutes)
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 

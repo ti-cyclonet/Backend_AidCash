@@ -6,6 +6,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { sendPushToUser } from '../lib/push.js'
 import { env } from '../config/env.js'
+import { recordOnboardingAction } from '../lib/missions.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -336,6 +337,10 @@ router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async
         },
       }),
     ])
+
+    if (tipo === 'salario') {
+      await recordOnboardingAction(userId, 'registrar_ingreso_real')
+    }
 
     res.status(201).json({
       record: { ...record, monto: Number(record.monto) },

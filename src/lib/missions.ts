@@ -20,7 +20,10 @@
 import { prisma } from '../config/database.js'
 import { pushMissionReady } from './push.js'
 
-export type MissionKey = 'gasto_hormiga' | 'pagar_obligacion' | 'categorizar' | 'racha_semanal'
+export type MissionKey =
+  | 'gasto_hormiga' | 'pagar_obligacion' | 'categorizar' | 'racha_semanal'
+  | 'registrar_obligacion' | 'registrar_ingreso_real' | 'registrar_ahorro' | 'invitar_amigo'
+export type OnboardingMissionKey = 'registrar_obligacion' | 'registrar_ingreso_real' | 'registrar_ahorro' | 'invitar_amigo'
 export type RewardType = 'xp' | 'boost'
 
 export interface MissionCatalogEntry {
@@ -44,6 +47,22 @@ export const WEEKLY_MISSION: MissionCatalogEntry = {
   icon: '🏆',
   target: 7,
 }
+
+/**
+ * Misiones de "primeros pasos" — de una sola vez, no se renuevan. Usan el
+ * mismo modelo `MissionProgress` que las diarias/semanal, pero con un
+ * `periodo` FIJO ("onboarding", ver `ONBOARDING_PERIODO`) en vez de uno que
+ * cambia cada día/semana — así cada una solo se puede completar y reclamar
+ * una vez en la vida del usuario, sin tocar el schema.
+ */
+export const ONBOARDING_CATALOG: MissionCatalogEntry[] = [
+  { key: 'registrar_obligacion', title: 'Registra tu primera obligación', desc: 'Añade una deuda o un gasto fijo en Obligaciones', icon: '🏛️', target: 1 },
+  { key: 'registrar_ingreso_real', title: 'Registra tu sueldo real', desc: 'Registra un ingreso en Billetera para empezar a distribuir tu dinero', icon: '💰', target: 1 },
+  { key: 'registrar_ahorro', title: 'Haz tu primer aporte de ahorro', desc: 'Deposita en un bolsillo de ahorro', icon: '🐷', target: 1 },
+  { key: 'invitar_amigo', title: 'Invita a un amigo', desc: 'Conecta con alguien en Social', icon: '🤝', target: 1 },
+]
+
+const ONBOARDING_REWARD_XP = 50
 
 export interface MissionView {
   key: MissionKey
@@ -71,6 +90,10 @@ export function weekPeriodo(date: Date = new Date()): string {
   const weekNo = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7)
   return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`
 }
+
+/** Periodo fijo de las misiones de primeros pasos — nunca cambia, así cada
+ * una se completa y reclama una sola vez en la vida del usuario. */
+export const ONBOARDING_PERIODO = 'onboarding'
 
 // ─── Progreso ───────────────────────────────────────────────────────────────
 
@@ -111,6 +134,44 @@ export async function recordMissionAction(userId: string, missionKey: Exclude<Mi
   } catch (error) {
     console.error('[RecordMissionAction]', error)
   }
+}
+
+/**
+ * Registra que el usuario completó una misión de primeros pasos (progreso al
+ * tope de una vez, `target` siempre es 1). Igual que `recordMissionAction`:
+ * se llama desde las rutas que ya hacen la acción real, nunca desde el
+ * cliente, y cualquier error acá solo se loguea.
+ */
+export async function recordOnboardingAction(userId: string, missionKey: OnboardingMissionKey): Promise<void> {
+  try {
+    const entry = ONBOARDING_CATALOG.find((m) => m.key === missionKey)
+    if (!entry) return
+
+    const row = await getOrCreateProgress(userId, missionKey, ONBOARDING_PERIODO, entry.target)
+    if (row.progress >= row.target) return
+
+    const newProgress = Math.min(row.progress + 1, row.target)
+    await prisma.missionProgress.update({
+      where: { id: row.id },
+      data: { progress: newProgress },
+    })
+
+    if (newProgress >= row.target) {
+      pushMissionReady(userId, entry.title)
+    }
+  } catch (error) {
+    console.error('[RecordOnboardingAction]', error)
+  }
+}
+
+/** Misiones de primeros pasos, listas para mostrar en el frontend. */
+export async function getOnboardingMissionsForUser(userId: string): Promise<MissionView[]> {
+  return Promise.all(
+    ONBOARDING_CATALOG.map(async (m) => {
+      const row = await getOrCreateProgress(userId, m.key, ONBOARDING_PERIODO, m.target)
+      return { key: m.key, title: m.title, desc: m.desc, icon: m.icon, target: m.target, progress: row.progress, claimed: !!row.claimedAt }
+    })
+  )
 }
 
 /** Misiones de hoy + la semanal, listas para mostrar en el frontend. */
@@ -173,6 +234,7 @@ const REWARD_POOL: RewardOption[] = [
 ]
 
 const WEEKLY_REWARD: RewardOption = { type: 'xp', amount: 150, weight: 100, label: '+150 XP', icon: '🏆' }
+const ONBOARDING_REWARD: RewardOption = { type: 'xp', amount: ONBOARDING_REWARD_XP, weight: 100, label: `+${ONBOARDING_REWARD_XP} XP`, icon: '🌱' }
 
 function pickReward(): RewardOption {
   const total = REWARD_POOL.reduce((s, r) => s + r.weight, 0)
@@ -202,10 +264,11 @@ export type ClaimResult =
  */
 export async function claimMission(userId: string, missionKey: MissionKey): Promise<ClaimResult> {
   const isWeekly = missionKey === WEEKLY_MISSION.key
-  const entry = isWeekly ? WEEKLY_MISSION : MISSION_CATALOG.find((m) => m.key === missionKey)
+  const isOnboarding = ONBOARDING_CATALOG.some((m) => m.key === missionKey)
+  const entry = isWeekly ? WEEKLY_MISSION : isOnboarding ? ONBOARDING_CATALOG.find((m) => m.key === missionKey) : MISSION_CATALOG.find((m) => m.key === missionKey)
   if (!entry) return { ok: false, error: 'Misión no reconocida' }
 
-  const periodo = isWeekly ? weekPeriodo() : todayPeriodo()
+  const periodo = isWeekly ? weekPeriodo() : isOnboarding ? ONBOARDING_PERIODO : todayPeriodo()
 
   const row = await prisma.missionProgress.findUnique({
     where: { userId_missionKey_periodo: { userId, missionKey, periodo } },
@@ -217,7 +280,7 @@ export async function claimMission(userId: string, missionKey: MissionKey): Prom
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { xpBoostExpiresAt: true } })
   const boostActive = !!(user?.xpBoostExpiresAt && user.xpBoostExpiresAt.getTime() > Date.now())
 
-  const picked = isWeekly ? WEEKLY_REWARD : pickReward()
+  const picked = isWeekly ? WEEKLY_REWARD : isOnboarding ? ONBOARDING_REWARD : pickReward()
   const finalAmount = picked.type === 'xp' && boostActive ? picked.amount * 2 : picked.amount
 
   await prisma.$transaction([
