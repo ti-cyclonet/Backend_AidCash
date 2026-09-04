@@ -6,7 +6,8 @@ import { validate } from '../middleware/validate.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
-import type { FixedExpensePayment } from '@prisma/client'
+import { planPocketDeduction } from '../lib/wallet.js'
+import type { FixedExpensePayment, Prisma } from '@prisma/client'
 
 // ─── Estado derivado por periodo (mismo patrón que debts.routes.ts) ────────────
 
@@ -196,7 +197,10 @@ router.patch('/:id/pay', validate(payFixedSchema), async (req: Request, res: Res
       // Sumar al saldo de la tarjeta (la deuda de la tarjeta crece)
       // NO descontar del cashBalance (la tarjeta paga por ti)
       await prisma.$transaction([
-        prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: montoPago, periodo } }),
+        // tarjetaId queda registrado en el propio pago (no solo en el gasto
+        // fijo) para que undo-pay sepa revertirlo sin tener que re-consultar
+        // el vínculo permanente — mismo campo que usa el pago puntual con TC.
+        prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: montoPago, periodo, tarjetaId: existing.tarjetaVinculadaId } }),
         prisma.debt.update({
           where: { id: existing.tarjetaVinculadaId },
           data: {
@@ -216,7 +220,15 @@ router.patch('/:id/pay', validate(payFixedSchema), async (req: Request, res: Res
       })
     } else {
       // ═══ PAGO NORMAL ═══
-      await prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: montoPago, periodo } })
+      // El descuento de billetera va en la MISMA transacción que el pago —
+      // antes era una segunda llamada HTTP aparte que si fallaba dejaba el
+      // gasto "pagado" sin que el saldo disponible bajara.
+      const walletDeductionData = planPocketDeduction('obligaciones', montoPago)
+
+      await prisma.$transaction([
+        prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: montoPago, periodo } }),
+        prisma.user.update({ where: { id: userId }, data: walletDeductionData }),
+      ])
 
       await recordMissionAction(userId, 'pagar_obligacion')
 
@@ -256,67 +268,66 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    const montoDevolver = payments.reduce((s, p) => s + Number(p.montoPagado), 0)
+    // Cada pago dice por sí mismo si salió en efectivo o de una tarjeta
+    // (tarjetaVinculada permanente o un pay-with-card puntual) — ya no hace
+    // falta adivinar por el vínculo del gasto fijo, que solo cubría un caso.
+    const cashPayments = payments.filter(p => !p.tarjetaId)
+    const cardPayments = payments.filter(p => p.tarjetaId)
+    const montoDevolver = cashPayments.reduce((s, p) => s + Number(p.montoPagado), 0)
 
-    if (existing.tarjetaVinculadaId) {
-      // ═══ FUE PAGADO CON TARJETA → Restar del saldo de la tarjeta ═══
-      const [, , expense] = await prisma.$transaction([
-        prisma.fixedExpensePayment.deleteMany({ where: { fixedExpenseId: id, periodo } }),
-        prisma.debt.update({
-          where: { id: existing.tarjetaVinculadaId },
-          data: {
-            saldoRestante: { decrement: montoDevolver },
-            saldoPrincipal: { decrement: montoDevolver },
-          },
-        }),
-        prisma.fixedExpense.findUniqueOrThrow({ where: { id } }),
-      ])
-
-      // Obtener wallet actual (no cambió porque la TC pagó)
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
-      })
-
-      res.json({
-        fixedExpense: { ...expense, pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
-        montoDevuelto: montoDevolver,
-        revertidoDeTarjeta: true,
-        wallet: {
-          cashBalance: Number(user?.cashBalance ?? 0),
-          ahorro: Number(user?.walletAhorro ?? 0),
-          obligaciones: Number(user?.walletObligaciones ?? 0),
-          libre: Number(user?.walletLibre ?? 0),
-          endeudamiento: Number(user?.walletEndeudamiento ?? 0),
-        },
-      })
-    } else {
-      // ═══ PAGO NORMAL → Devolver al cashBalance ═══
-      const [, user] = await prisma.$transaction([
-        prisma.fixedExpensePayment.deleteMany({ where: { fixedExpenseId: id, periodo } }),
-        prisma.user.update({
-          where: { id: userId },
-          data: {
-            cashBalance: { increment: montoDevolver },
-            walletObligaciones: { increment: montoDevolver },
-          },
-          select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
-        }),
-      ])
-
-      res.json({
-        fixedExpense: { ...existing, pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
-        montoDevuelto: montoDevolver,
-        revertidoDeTarjeta: false,
-        wallet: {
-          cashBalance: Number(user.cashBalance),
-          ahorro: Number(user.walletAhorro),
-          obligaciones: Number(user.walletObligaciones),
-          libre: Number(user.walletLibre),
-          endeudamiento: Number(user.walletEndeudamiento),
-        },
-      })
+    const montoPorTarjeta = new Map<string, number>()
+    const installmentIds = new Set<string>()
+    for (const p of cardPayments) {
+      montoPorTarjeta.set(p.tarjetaId!, (montoPorTarjeta.get(p.tarjetaId!) ?? 0) + Number(p.montoPagado))
+      if (p.installmentId) installmentIds.add(p.installmentId)
     }
+
+    const ops: Prisma.PrismaPromise<unknown>[] = [
+      prisma.fixedExpensePayment.deleteMany({ where: { fixedExpenseId: id, periodo } }),
+    ]
+    if (montoDevolver > 0) {
+      ops.push(prisma.user.update({
+        where: { id: userId },
+        data: {
+          cashBalance: { increment: montoDevolver },
+          walletObligaciones: { increment: montoDevolver },
+        },
+      }))
+    }
+    for (const [tarjetaId, monto] of montoPorTarjeta) {
+      ops.push(prisma.debt.update({
+        where: { id: tarjetaId },
+        data: {
+          saldoRestante: { decrement: monto },
+          saldoPrincipal: { decrement: monto },
+        },
+      }))
+    }
+    if (installmentIds.size > 0) {
+      ops.push(prisma.debtCardInstallment.deleteMany({ where: { id: { in: [...installmentIds] } } }))
+    }
+
+    await prisma.$transaction(ops)
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
+    })
+
+    res.json({
+      fixedExpense: { ...existing, pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
+      montoDevuelto: montoDevolver,
+      revertidoDeTarjeta: montoPorTarjeta.size > 0
+        ? [...montoPorTarjeta.entries()].map(([tarjetaId, monto]) => ({ tarjetaId, monto }))
+        : null,
+      wallet: {
+        cashBalance: Number(user?.cashBalance ?? 0),
+        ahorro: Number(user?.walletAhorro ?? 0),
+        obligaciones: Number(user?.walletObligaciones ?? 0),
+        libre: Number(user?.walletLibre ?? 0),
+        endeudamiento: Number(user?.walletEndeudamiento ?? 0),
+      },
+    })
   } catch (error) {
     console.error('[UndoPayFixed]', error)
     res.status(500).json({ error: 'Error al deshacer pago de gasto fijo' })

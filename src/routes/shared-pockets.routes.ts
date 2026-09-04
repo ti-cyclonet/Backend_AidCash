@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { requireConnection } from '../lib/connections.js'
+import { planPocketDeduction } from '../lib/wallet.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -173,11 +174,11 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
         return
       }
 
-      // Descontar del wallet del usuario inmediatamente
-      await prisma.user.update({
-        where: { id: userId },
-        data: { cashBalance: { decrement: monto }, walletAhorro: { decrement: Math.min(monto, Number(user.cashBalance)) } },
-      })
+      // Descontar del wallet del usuario inmediatamente. El aporte ya se validó
+      // contra el cashBalance total (no solo contra el bolsillo de ahorro), así
+      // que cashBalance se descuenta completo — y walletAhorro por ese MISMO
+      // monto para que ambos campos no se desincronicen.
+      await prisma.user.update({ where: { id: userId }, data: planPocketDeduction('ahorro', monto) })
 
       // Sumar al balance del bolsillo compartido
       await prisma.sharedPocket.update({

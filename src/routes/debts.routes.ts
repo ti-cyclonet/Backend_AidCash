@@ -7,7 +7,9 @@ import { sendPushToUser } from '../lib/push.js'
 import { checkLimit, attachUsageWarning } from '../middleware/limit-enforcement.js'
 import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
-import type { DebtPayment, DebtCardInstallment } from '@prisma/client'
+import { planPocketDeduction } from '../lib/wallet.js'
+import { randomUUID } from 'crypto'
+import type { DebtPayment, DebtCardInstallment, Prisma } from '@prisma/client'
 
 // ─── Estado derivado por periodo ────────────────────────────────────────────────
 // pagadoEstePeriodo/montoPagadoEstePeriodo ya no son columnas: se calculan sumando
@@ -269,6 +271,11 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
     const totalPaidThisPeriod = status.montoPagadoEstePeriodo + montoPago
     const cuotaCubierta = totalPaidThisPeriod >= Number(existing.cuotaPeriodo)
 
+    // El descuento de billetera va en la MISMA transacción que el pago — antes
+    // era una segunda llamada HTTP aparte (userApi.walletDeduct) que si fallaba
+    // dejaba la deuda "pagada" sin que el saldo disponible bajara.
+    const walletDeductionData = planPocketDeduction('obligaciones', montoPago)
+
     const [debt, payment] = await prisma.$transaction([
       prisma.debt.update({
         where: { id },
@@ -285,6 +292,7 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
           periodo,
         },
       }),
+      prisma.user.update({ where: { id: userId }, data: walletDeductionData }),
     ])
 
     await recordMissionAction(userId, 'pagar_obligacion')
@@ -355,15 +363,27 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
       return
     }
 
-    // Monto real pagado en el periodo (efectivo que salió del usuario)
-    const montoDevolver = payments.reduce((sum, p) => sum + Number(p.montoPagado), 0)
     // El saldoRestante solo se redujo por el capital (no por intereses), así que
-    // debemos devolver solo el CAPITAL al saldo, no el monto total pagado.
+    // debemos devolver solo el CAPITAL al saldo, no el monto total pagado —
+    // esto aplica sin importar cómo se pagó (efectivo o tarjeta).
     const totalCapitalAbonado = payments.reduce((sum, p) => sum + Number(p.abonoCapital), 0)
 
-    // Transacción atómica: revertir deuda + devolver cashBalance + walletObligaciones
-    // También eliminar los registros de pago del periodo
-    const [debt, user] = await prisma.$transaction([
+    // Separar los pagos del periodo entre efectivo y tarjeta: solo los de
+    // efectivo devuelven dinero a cashBalance — los de tarjeta nunca lo
+    // tocaron, así que revertirlos significa restarle a LA TARJETA (no
+    // sumarle a la billetera) y borrar el plan de cuotas que generaron.
+    const cashPayments = payments.filter(p => !p.tarjetaId)
+    const cardPayments = payments.filter(p => p.tarjetaId)
+    const montoDevolver = cashPayments.reduce((sum, p) => sum + Number(p.montoPagado), 0)
+
+    const montoPorTarjeta = new Map<string, number>()
+    const installmentIds = new Set<string>()
+    for (const p of cardPayments) {
+      montoPorTarjeta.set(p.tarjetaId!, (montoPorTarjeta.get(p.tarjetaId!) ?? 0) + Number(p.montoPagado))
+      if (p.installmentId) installmentIds.add(p.installmentId)
+    }
+
+    const ops: Prisma.PrismaPromise<unknown>[] = [
       prisma.debt.update({
         where: { id },
         data: {
@@ -371,25 +391,44 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
           estado: 'activa',
         },
       }),
-      prisma.user.update({
+    ]
+    if (montoDevolver > 0) {
+      ops.push(prisma.user.update({
         where: { id: userId },
         data: {
           cashBalance: { increment: montoDevolver },
           walletObligaciones: { increment: montoDevolver },
         },
-        select: {
-          cashBalance: true,
-          walletAhorro: true,
-          walletObligaciones: true,
-          walletLibre: true,
-          walletEndeudamiento: true,
+      }))
+    }
+    for (const [tarjetaId, monto] of montoPorTarjeta) {
+      ops.push(prisma.debt.update({
+        where: { id: tarjetaId },
+        data: {
+          saldoRestante: { decrement: monto },
+          saldoPrincipal: { decrement: monto },
         },
-      }),
-      // Eliminar registros de pago del periodo (historial de amortización)
-      prisma.debtPayment.deleteMany({
-        where: { debtId: id, periodo },
-      }),
-    ])
+      }))
+    }
+    if (installmentIds.size > 0) {
+      ops.push(prisma.debtCardInstallment.deleteMany({ where: { id: { in: [...installmentIds] } } }))
+    }
+    // Eliminar registros de pago del periodo (historial de amortización)
+    ops.push(prisma.debtPayment.deleteMany({ where: { debtId: id, periodo } }))
+
+    const results = await prisma.$transaction(ops)
+    const debt = results[0] as typeof existing
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        cashBalance: true,
+        walletAhorro: true,
+        walletObligaciones: true,
+        walletLibre: true,
+        walletEndeudamiento: true,
+      },
+    })
 
     res.json({
       debt: {
@@ -402,12 +441,15 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
       },
       montoDevuelto: montoDevolver,
+      revertidoDeTarjeta: montoPorTarjeta.size > 0
+        ? [...montoPorTarjeta.entries()].map(([tarjetaId, monto]) => ({ tarjetaId, monto }))
+        : null,
       wallet: {
-        cashBalance: Number(user.cashBalance),
-        ahorro: Number(user.walletAhorro),
-        obligaciones: Number(user.walletObligaciones),
-        libre: Number(user.walletLibre),
-        endeudamiento: Number(user.walletEndeudamiento),
+        cashBalance: Number(user?.cashBalance ?? 0),
+        ahorro: Number(user?.walletAhorro ?? 0),
+        obligaciones: Number(user?.walletObligaciones ?? 0),
+        libre: Number(user?.walletLibre ?? 0),
+        endeudamiento: Number(user?.walletEndeudamiento ?? 0),
       },
     })
   } catch (error) {
@@ -539,7 +581,21 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
       // exactamente igual que hacerlo en efectivo.
       const { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaMensual, status, montoPago)
 
+      // El id del plan de cuotas se genera ANTES de la transacción para poder
+      // enlazarlo desde el mismo DebtPayment que lo originó — así undo-pay
+      // sabe exactamente qué plan borrar y qué tarjeta revertir, en vez de
+      // adivinar (antes no había ningún enlace: undo-pay trataba TODO pago
+      // como si hubiera salido en efectivo, sin importar cómo se pagó).
+      const installmentId = randomUUID()
+
       await prisma.$transaction([
+        // El plan de cuotas va PRIMERO: el pago lo referencia por FK
+        // (installmentId), así que debe existir antes de que se cree el pago
+        // que apunta a él — Postgres valida la llave foránea al momento de
+        // cada statement dentro de la transacción, no al final.
+        prisma.debtCardInstallment.create({
+          data: { id: installmentId, tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: cuotas, descripcion: deuda.nombre },
+        }),
         prisma.debt.update({
           where: { id: sourceId },
           data: { saldoRestante: nuevoSaldo, estado: nuevoEstado },
@@ -553,6 +609,8 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
             saldoAnterior: currentSaldo,
             saldoPosterior: nuevoSaldo,
             periodo,
+            tarjetaId,
+            installmentId,
           },
         }),
         // La tarjeta sí recibe el monto completo (ella le presta el 100% al
@@ -563,11 +621,6 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
             saldoRestante: { increment: monto },
             saldoPrincipal: { increment: monto },
           },
-        }),
-        // Plan de cuotas de la tarjeta — no muta cuotaPeriodo directamente, se
-        // suma en el momento (GET /debts) mientras el plan siga vigente.
-        prisma.debtCardInstallment.create({
-          data: { tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: cuotas, descripcion: deuda.nombre },
         }),
       ])
     } else {
@@ -584,9 +637,14 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
         ? getPeriodo('quincenal', parseDiasPago(gasto.fechaCorte))
         : getPeriodo(gasto.frecuencia)
 
+      const installmentId = randomUUID()
+
       await prisma.$transaction([
+        prisma.debtCardInstallment.create({
+          data: { id: installmentId, tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: cuotas, descripcion: gasto.nombre },
+        }),
         prisma.fixedExpensePayment.create({
-          data: { fixedExpenseId: sourceId, montoPagado: montoPago, periodo: periodoGasto },
+          data: { fixedExpenseId: sourceId, montoPagado: montoPago, periodo: periodoGasto, tarjetaId, installmentId },
         }),
         prisma.debt.update({
           where: { id: tarjetaId },
@@ -594,9 +652,6 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
             saldoRestante: { increment: monto },
             saldoPrincipal: { increment: monto },
           },
-        }),
-        prisma.debtCardInstallment.create({
-          data: { tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: cuotas, descripcion: gasto.nombre },
         }),
       ])
     }

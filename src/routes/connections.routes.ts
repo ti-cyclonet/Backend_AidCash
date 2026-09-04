@@ -4,7 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
-import { pushSocialInvite, pushGardenWatered } from '../lib/push.js'
+import { pushSocialInvite, pushGardenWatered, pushRoleChangeRequested, pushRoleChangeResponded } from '../lib/push.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { getUserGardenHealth } from '../lib/garden-health.js'
 import { todayPeriodo, recordOnboardingAction } from '../lib/missions.js'
@@ -319,7 +319,10 @@ router.get('/:id/shared', async (req: Request, res: Response): Promise<void> => 
     })
 
     res.json({
-      connection: { id: conn.id, role: conn.role, createdAt: conn.createdAt },
+      connection: {
+        id: conn.id, role: conn.role, createdAt: conn.createdAt,
+        pendingRole: conn.pendingRole, roleChangeRequestedBy: conn.roleChangeRequestedBy,
+      },
       peer,
       pockets: pockets.map(p => ({
         id: p.id,
@@ -349,14 +352,17 @@ router.get('/:id/shared', async (req: Request, res: Response): Promise<void> => 
   }
 })
 
-// ─── PATCH /connections/:id/role ──────────────────────────────────────────────
-// Cambiar el rol de una conexión existente
+// ─── POST /connections/:id/role-request ───────────────────────────────────────
+// Proponer un cambio de rol (ej. Amigo → Pareja) — YA NO es instantáneo ni
+// unilateral: queda en pendingRole hasta que la OTRA persona lo aprueba o lo
+// rechaza (mismo patrón que la tasa de interés de un préstamo). El rol real
+// (`role`) no cambia hasta el accept.
 
-const updateRoleSchema = z.object({
+const roleRequestSchema = z.object({
   role: z.enum(['FRIEND', 'FAMILY', 'PARTNER']),
 })
 
-router.patch('/:id/role', validate(updateRoleSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/:id/role-request', validate(roleRequestSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const id = req.params.id as string
@@ -364,21 +370,27 @@ router.patch('/:id/role', validate(updateRoleSchema), async (req: Request, res: 
 
     const conn = await prisma.connection.findFirst({
       where: { id, status: 'ACCEPTED', OR: [{ requesterId: userId }, { addresseeId: userId }] },
+      include: { requester: { select: { nombre: true } }, addressee: { select: { nombre: true } } },
     })
     if (!conn) {
       res.status(404).json({ error: 'Conexión no encontrada' })
       return
     }
+    if (role === conn.role) {
+      res.status(400).json({ error: 'Esa ya es la conexión actual.' })
+      return
+    }
+    if (conn.pendingRole) {
+      res.status(409).json({ error: 'Ya hay una solicitud de cambio de rol pendiente para esta conexión.' })
+      return
+    }
 
-    // Restricción PARTNER: solo una activa por usuario
+    // Restricción PARTNER: solo una activa por usuario — se revisa acá para
+    // no mandar una solicitud que de entrada no se podría aceptar, y otra
+    // vez en /role-respond por si algo cambió mientras estaba pendiente.
     if (role === 'PARTNER') {
       const existingPartner = await prisma.connection.findFirst({
-        where: {
-          id: { not: id },
-          status: 'ACCEPTED',
-          role: 'PARTNER',
-          OR: [{ requesterId: userId }, { addresseeId: userId }],
-        },
+        where: { id: { not: id }, status: 'ACCEPTED', role: 'PARTNER', OR: [{ requesterId: userId }, { addresseeId: userId }] },
       })
       if (existingPartner) {
         res.status(409).json({ error: 'Ya tienes una conexión de pareja activa.' })
@@ -388,13 +400,81 @@ router.patch('/:id/role', validate(updateRoleSchema), async (req: Request, res: 
 
     const updated = await prisma.connection.update({
       where: { id },
-      data: { role },
+      data: { pendingRole: role, roleChangeRequestedBy: userId },
     })
+
+    const otherId = conn.requesterId === userId ? conn.addresseeId : conn.requesterId
+    const requesterName = conn.requesterId === userId ? conn.requester.nombre : conn.addressee.nombre
+
+    emitToUser(otherId, SOCKET_EVENTS.ROLE_CHANGE_REQUESTED, {
+      connectionId: id, requestedBy: userId, requesterName, role,
+    })
+    pushRoleChangeRequested(otherId, requesterName, role)
 
     res.json({ connection: updated })
   } catch (error) {
-    console.error('[UpdateConnectionRole]', error)
-    res.status(500).json({ error: 'Error al actualizar rol' })
+    console.error('[RoleChangeRequest]', error)
+    res.status(500).json({ error: 'Error al solicitar el cambio de rol' })
+  }
+})
+
+// ─── POST /connections/:id/role-respond ───────────────────────────────────────
+// Solo puede responder quien NO propuso el cambio.
+
+const roleRespondSchema = z.object({
+  accept: z.boolean(),
+})
+
+router.post('/:id/role-respond', validate(roleRespondSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+    const { accept } = req.body as { accept: boolean }
+
+    const conn = await prisma.connection.findFirst({
+      where: { id, status: 'ACCEPTED', OR: [{ requesterId: userId }, { addresseeId: userId }] },
+      include: { requester: { select: { nombre: true } }, addressee: { select: { nombre: true } } },
+    })
+    if (!conn || !conn.pendingRole || !conn.roleChangeRequestedBy) {
+      res.status(404).json({ error: 'No hay ninguna solicitud de cambio de rol pendiente.' })
+      return
+    }
+    if (conn.roleChangeRequestedBy === userId) {
+      res.status(403).json({ error: 'No puedes aprobar tu propia solicitud de cambio de rol.' })
+      return
+    }
+
+    const proposedRole = conn.pendingRole
+    const requesterId = conn.roleChangeRequestedBy
+    const requesterName = conn.requesterId === requesterId ? conn.requester.nombre : conn.addressee.nombre
+    const responderName = conn.requesterId === userId ? conn.requester.nombre : conn.addressee.nombre
+
+    if (accept && proposedRole === 'PARTNER') {
+      const existingPartner = await prisma.connection.findFirst({
+        where: { id: { not: id }, status: 'ACCEPTED', role: 'PARTNER', OR: [{ requesterId: userId }, { addresseeId: userId }] },
+      })
+      if (existingPartner) {
+        res.status(409).json({ error: 'Ya tienes una conexión de pareja activa.' })
+        return
+      }
+    }
+
+    const updated = await prisma.connection.update({
+      where: { id },
+      data: accept
+        ? { role: proposedRole, pendingRole: null, roleChangeRequestedBy: null }
+        : { pendingRole: null, roleChangeRequestedBy: null },
+    })
+
+    emitToUser(requesterId, accept ? SOCKET_EVENTS.ROLE_CHANGE_ACCEPTED : SOCKET_EVENTS.ROLE_CHANGE_REJECTED, {
+      connectionId: id, role: proposedRole, respondedBy: userId, responderName,
+    })
+    pushRoleChangeResponded(requesterId, responderName, proposedRole, accept)
+
+    res.json({ connection: updated })
+  } catch (error) {
+    console.error('[RoleChangeRespond]', error)
+    res.status(500).json({ error: 'Error al responder el cambio de rol' })
   }
 })
 
@@ -496,7 +576,7 @@ router.post('/:id/water', async (req: Request, res: Response): Promise<void> => 
     await prisma.gardenWatering.create({ data: { waterId: userId, targetUserId, periodo } })
 
     const waterer = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
-    emitToUser(targetUserId, 'social:garden_watered', { fromId: userId, fromName: waterer?.nombre ?? 'Un amigo' })
+    emitToUser(targetUserId, SOCKET_EVENTS.GARDEN_WATERED, { fromId: userId, fromName: waterer?.nombre ?? 'Un amigo' })
     pushGardenWatered(targetUserId, waterer?.nombre ?? 'Un amigo')
 
     res.status(201).json({ watered: true })

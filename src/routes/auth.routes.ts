@@ -7,6 +7,7 @@ import { env } from '../config/env.js'
 import { validate } from '../middleware/validate.js'
 import { authMiddleware, AuthPayload } from '../middleware/auth.js'
 import { generateUniqueUsername } from '../lib/username.js'
+import { sendMail } from '../lib/mail.js'
 import crypto from 'crypto'
 
 const router = Router()
@@ -351,9 +352,9 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
 })
 
 // ─── POST /auth/forgot-password ───────────────────────────────────────────────
-// Envía un correo con un token para restablecer la contraseña.
-// Por ahora genera el token y lo guarda. La integración con un servicio de email
-// (SendGrid, Resend, etc.) se puede añadir después.
+// Genera un token de reset y envía el enlace por correo — antes el token se
+// generaba y se guardaba pero NUNCA se enviaba nada (solo un console.log de
+// desarrollo), así que "olvidé mi contraseña" no le llegaba nada al usuario.
 
 const forgotPasswordSchema = z.object({
   correo: z.string().email('Correo electrónico inválido'),
@@ -384,15 +385,79 @@ router.post('/forgot-password', validate(forgotPasswordSchema), async (req: Requ
       },
     })
 
-    // TODO: Integrar con servicio de email (SendGrid, Resend, Nodemailer)
-    // Por ahora, logueamos el link de reset para desarrollo
-    const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${resetToken}&email=${correo}`
-    console.log(`[ForgotPassword] Reset link for ${correo}: ${resetLink}`)
+    const resetLink = `${env.FRONTEND_URL.split(',')[0].trim()}/reset-password?token=${resetToken}&email=${encodeURIComponent(correo)}`
+    const html = `
+      <h2>Restablecer tu contraseña — Kiri Finance</h2>
+      <p>Hola${user.nombre ? ` ${user.nombre}` : ''},</p>
+      <p>Recibimos una solicitud para restablecer la contraseña de tu cuenta. Haz clic en el siguiente enlace para elegir una nueva:</p>
+      <p><a href="${resetLink}">${resetLink}</a></p>
+      <p>Este enlace vence en 1 hora. Si no fuiste tú quien lo solicitó, puedes ignorar este correo — tu contraseña seguirá siendo la misma.</p>
+    `
+    const sent = await sendMail({ to: correo, subject: 'Restablece tu contraseña — Kiri Finance', html })
+    if (!sent) console.warn(`[ForgotPassword] No se pudo enviar el correo a ${correo} (SMTP no configurado o falló el envío)`)
 
     res.json({ message: 'Si el correo está registrado, recibirás un enlace para restablecer tu contraseña.' })
   } catch (error) {
     console.error('[ForgotPassword]', error)
     res.status(500).json({ error: 'Error al procesar la solicitud' })
+  }
+})
+
+// ─── POST /auth/reset-password ────────────────────────────────────────────────
+// Consume el token enviado por correo y fija la nueva contraseña. Antes NO
+// existía ningún endpoint que validara ese token — se generaba y se guardaba
+// hasheado, pero nada en la API podía usarlo nunca para completar el reset.
+
+const resetPasswordSchema = z.object({
+  correo: z.string().email('Correo electrónico inválido'),
+  token: z.string().min(1, 'Token requerido'),
+  newPassword: z.string().min(6, 'La nueva contraseña debe tener al menos 6 caracteres'),
+})
+
+router.post('/reset-password', validate(resetPasswordSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { correo, token, newPassword } = req.body as { correo: string; token: string; newPassword: string }
+
+    const user = await prisma.user.findUnique({ where: { correo } })
+    if (!user) {
+      res.status(400).json({ error: 'Enlace inválido o vencido.' })
+      return
+    }
+
+    // Los tokens de reset se guardan hasheados en la misma tabla que los
+    // refresh tokens normales (que sí van en texto plano) — no se puede
+    // buscar por igualdad directa, hay que comparar contra cada candidato
+    // vigente de este usuario hasta encontrar el que hace match.
+    const candidates = await prisma.refreshToken.findMany({
+      where: { userId: user.id, expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    let matched: (typeof candidates)[number] | null = null
+    for (const candidate of candidates) {
+      try {
+        if (await bcrypt.compare(token, candidate.token)) { matched = candidate; break }
+      } catch { /* fila no es un hash bcrypt (ej. un refresh token normal en texto plano) — seguir */ }
+    }
+
+    if (!matched) {
+      res.status(400).json({ error: 'Enlace inválido o vencido. Solicita uno nuevo.' })
+      return
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 12)
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { passwordHash: newHash } }),
+      // Invalidar el token de reset usado y cualquier sesión activa — igual
+      // que un cambio de contraseña normal, para que un enlace viejo o una
+      // sesión robada no sigan sirviendo después del reset.
+      prisma.refreshToken.deleteMany({ where: { userId: user.id } }),
+    ])
+
+    res.json({ message: 'Contraseña actualizada. Ya puedes iniciar sesión.' })
+  } catch (error) {
+    console.error('[ResetPassword]', error)
+    res.status(500).json({ error: 'Error al restablecer la contraseña' })
   }
 })
 

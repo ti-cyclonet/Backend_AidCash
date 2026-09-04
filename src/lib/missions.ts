@@ -18,7 +18,22 @@
  */
 
 import { prisma } from '../config/database.js'
-import { pushMissionReady } from './push.js'
+import { pushMissionReady, pushBadgeUnlocked } from './push.js'
+
+/**
+ * Insignias que se desbloquean por racha de días — DEBE calzar con los `id`
+ * y `minStreak` de BADGES en Frontend_AidCash/src/hooks/use-streaks.ts (esa
+ * lista es la fuente de la verdad para nombre/ícono/copy; esta solo decide
+ * CUÁNDO se otorgan, porque el otorgamiento tiene que pasar por el server).
+ */
+const STREAK_BADGES: { id: string; nombre: string; minStreak: number }[] = [
+  { id: 'primer_periodo', nombre: 'Primer Paso', minStreak: 1 },
+  { id: 'dos_periodos', nombre: 'Vas Bien', minStreak: 3 },
+  { id: 'tres_periodos', nombre: 'Racha de una Semana', minStreak: 7 },
+  { id: 'cuatro_periodos', nombre: 'Hábito Formado', minStreak: 14 },
+  { id: 'seis_periodos', nombre: 'Disciplina de Acero', minStreak: 30 },
+  { id: 'doce_periodos', nombre: 'Leyenda Financiera', minStreak: 100 },
+]
 
 export type MissionKey =
   | 'gasto_hormiga' | 'pagar_obligacion' | 'categorizar' | 'racha_semanal'
@@ -81,6 +96,73 @@ export function todayPeriodo(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
+/** YYYY-MM-DD de una fecha cualquiera, para comparar días de calendario sin
+ * arrastrar la hora (streakUltimoCheck es @db.Date, así que ya viene así). */
+function dateKey(d: Date): string {
+  return d.toISOString().slice(0, 10)
+}
+
+/**
+ * Registra la "racha de días" (User.streakActual) — la misma que ya lee la
+ * misión semanal "racha_semanal" (getMissionsForUser, tope en 7 días) y que
+ * la UI de Jardín/Misiones siempre mostró como "X días". Antes nada la
+ * incrementaba nunca: el único código que lo hacía vivía en el cliente
+ * (useStreaks.incrementStreak) y ningún componente lo llamaba.
+ *
+ * Se llama desde recordMissionAction/recordOnboardingAction — el mismo
+ * funnel server-side por el que ya pasa toda acción financiera real, así
+ * que no hace falta tocar cada ruta por separado. Atómico y sin turnos de
+ * ida y vuelta con el cliente: lee el estado actual UNA vez, calcula el
+ * nuevo valor, y lo escribe — nunca confía en un streakActual que el cliente
+ * le mande (eso era lo que producía el "última escritura gana" original).
+ *
+ * Como mucho suma 1 por día, sin importar cuántas acciones distintas
+ * disparen misiones ese mismo día (ultimoCheck ya hoy → no hace nada). Si
+ * hay un hueco de más de un día desde el último check-in, la racha se
+ * reinicia en 1 en vez de en 0 — ya volviste a actuar hoy, así que hoy
+ * cuenta como el primer día de una racha nueva.
+ */
+export async function recordDailyStreak(userId: string): Promise<void> {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { streakActual: true, streakMejor: true, streakUltimoCheck: true },
+    })
+    if (!user) return
+
+    const today = new Date()
+    const todayKey = dateKey(today)
+    const lastCheckKey = user.streakUltimoCheck ? dateKey(user.streakUltimoCheck) : null
+    if (lastCheckKey === todayKey) return // ya se contó hoy
+
+    const yesterday = new Date(today)
+    yesterday.setUTCDate(yesterday.getUTCDate() - 1)
+    const continuing = lastCheckKey === dateKey(yesterday)
+
+    const newStreak = continuing ? user.streakActual + 1 : 1
+    const newBest = Math.max(newStreak, user.streakMejor)
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { streakActual: newStreak, streakMejor: newBest, streakUltimoCheck: today },
+    })
+
+    // Insignias por racha — antes esto solo pasaba dentro del incrementStreak
+    // muerto del cliente, así que nunca se otorgaban solas.
+    const reached = STREAK_BADGES.filter((b) => newStreak >= b.minStreak)
+    for (const badge of reached) {
+      const existing = await prisma.userBadge.findUnique({
+        where: { userId_badgeId: { userId, badgeId: badge.id } },
+      })
+      if (existing) continue
+      await prisma.userBadge.create({ data: { userId, badgeId: badge.id } })
+      pushBadgeUnlocked(userId, badge.nombre)
+    }
+  } catch (error) {
+    console.error('[RecordDailyStreak]', error)
+  }
+}
+
 /** "2026-W35" (ISO week) — periodo de la misión semanal */
 export function weekPeriodo(date: Date = new Date()): string {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
@@ -113,6 +195,10 @@ async function getOrCreateProgress(userId: string, missionKey: MissionKey, perio
  * falla la operación que la disparó: cualquier error acá solo se loguea.
  */
 export async function recordMissionAction(userId: string, missionKey: Exclude<MissionKey, 'racha_semanal'>): Promise<void> {
+  // Va ANTES del early-return de "esta misión ya llegó a su tope hoy": la
+  // racha de días debe contar el check-in aunque esta misión puntual ya
+  // estuviera completa, mientras sea una acción real del catálogo.
+  await recordDailyStreak(userId)
   try {
     const entry = MISSION_CATALOG.find((m) => m.key === missionKey)
     if (!entry) return
@@ -143,6 +229,7 @@ export async function recordMissionAction(userId: string, missionKey: Exclude<Mi
  * cliente, y cualquier error acá solo se loguea.
  */
 export async function recordOnboardingAction(userId: string, missionKey: OnboardingMissionKey): Promise<void> {
+  await recordDailyStreak(userId)
   try {
     const entry = ONBOARDING_CATALOG.find((m) => m.key === missionKey)
     if (!entry) return

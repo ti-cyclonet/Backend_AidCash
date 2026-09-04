@@ -135,8 +135,8 @@ export function pushSavingsDeposit(userId: string, pocketName: string, fromName:
 
 export function pushGardenWatered(userId: string, fromName: string) {
   return sendPushToUser(userId, {
-    title: '💧 Alguien regó tu jardín',
-    body: `${fromName} regó tu jardín hoy. ¡Ve a ver cómo va creciendo!`,
+    title: `💧 ${fromName} regó tu árbol`,
+    body: 'Entra a Kiri y sigue cuidando tus finanzas para que siga creciendo.',
     tag: 'garden-watered',
     url: '/jardin',
   })
@@ -147,6 +147,15 @@ export function pushMissionReady(userId: string, missionTitle: string) {
     title: '🎯 ¡Misión completada!',
     body: `"${missionTitle}" ya está lista — ve a reclamar tu recompensa.`,
     tag: 'mission-ready',
+    url: '/misiones',
+  })
+}
+
+export function pushBadgeUnlocked(userId: string, badgeName: string) {
+  return sendPushToUser(userId, {
+    title: '🏅 ¡Insignia desbloqueada!',
+    body: `Ganaste "${badgeName}" por tu racha — ve a verla en Misiones.`,
+    tag: 'badge-unlocked',
     url: '/misiones',
   })
 }
@@ -167,6 +176,28 @@ export function pushLoanApproved(userId: string, otherName: string, requiresConf
       ? `${otherName} te propuso una tasa de interés — revisa y confirma.`
       : `${otherName} aprobó tu solicitud de préstamo.`,
     tag: 'loan-approved',
+    url: '/social',
+  })
+}
+
+const ROLE_LABEL: Record<string, string> = { FRIEND: 'Amigo', FAMILY: 'Familia', PARTNER: 'Pareja' }
+
+export function pushRoleChangeRequested(userId: string, otherName: string, newRole: string) {
+  return sendPushToUser(userId, {
+    title: '🔄 Solicitud de cambio de rol',
+    body: `${otherName} quiere cambiar su conexión contigo a "${ROLE_LABEL[newRole] ?? newRole}" — debes aprobarlo.`,
+    tag: 'role-change-request',
+    url: '/social',
+  })
+}
+
+export function pushRoleChangeResponded(userId: string, otherName: string, newRole: string, accepted: boolean) {
+  return sendPushToUser(userId, {
+    title: accepted ? '✅ Cambio de rol aceptado' : '❌ Cambio de rol rechazado',
+    body: accepted
+      ? `${otherName} aceptó cambiar su conexión a "${ROLE_LABEL[newRole] ?? newRole}".`
+      : `${otherName} rechazó cambiar su conexión a "${ROLE_LABEL[newRole] ?? newRole}".`,
+    tag: 'role-change-response',
     url: '/social',
   })
 }

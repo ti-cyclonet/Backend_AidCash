@@ -55,16 +55,23 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
 })
 
 // ─── PATCH /gamification/streak ───────────────────────────────────────────────
+// El incremento diario real ya no pasa por acá — lo hace recordDailyStreak()
+// en el backend, atómico y sin depender de lo que mande el cliente (ver
+// lib/missions.ts). Este endpoint hoy solo lo usa breakStreak() para
+// reiniciar a 0 tras mucha inactividad.
 
 router.patch('/streak', validate(updateStreakSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { streakActual, streakMejor } = req.body
 
-    const updateData: Record<string, unknown> = {
-      streakActual,
-      streakUltimoCheck: new Date(),
-    }
+    const updateData: Record<string, unknown> = { streakActual }
+    // Solo marcar "hoy" como chequeado cuando de verdad se está registrando
+    // una racha activa (>0) — si streakActual llega en 0 es un reinicio por
+    // inactividad, no una acción de hoy. Estampar "hoy" en ese caso bloqueaba
+    // el incremento real si el usuario luego SÍ actuaba más tarde ese mismo
+    // día (recordDailyStreak lo habría visto como "ya contado hoy").
+    if (streakActual > 0) updateData.streakUltimoCheck = new Date()
 
     if (streakMejor !== undefined) {
       updateData.streakMejor = streakMejor

@@ -16,9 +16,25 @@ function itemPeriodo(frecuencia: string, ownDays: string): string {
 
 // ─── Helpers de rango de fechas ───────────────────────────────────────────────
 
-type Timeframe = 'week' | 'month' | 'year' | 'all'
+type Timeframe = 'week' | 'month' | 'year' | 'all' | 'custom'
 
-function getDateRange(timeframe: Timeframe): { from: Date; to: Date } {
+/**
+ * `custom` + `customFrom`/`customTo` válidos permite pedir el balance de UN
+ * mes específico (o cualquier rango) en vez de solo "el mes actual" — antes
+ * el export a PDF por mes elegido no tenía forma de pedirle esto al backend,
+ * así que siempre terminaba trayendo los datos del mes/año calendario ACTUAL
+ * sin importar qué mes hubiera elegido el usuario.
+ */
+function getDateRange(timeframe: Timeframe, customFrom?: string, customTo?: string): { from: Date; to: Date } {
+  if (timeframe === 'custom' && customFrom && customTo) {
+    const from = new Date(customFrom)
+    const to = new Date(customTo)
+    from.setHours(0, 0, 0, 0)
+    to.setHours(23, 59, 59, 999)
+    if (!isNaN(from.getTime()) && !isNaN(to.getTime()) && from <= to) return { from, to }
+    // Fechas inválidas: caer al comportamiento de "month" en vez de fallar.
+  }
+
   const now = new Date()
   const to = new Date(now)
   to.setHours(23, 59, 59, 999)
@@ -30,14 +46,16 @@ function getDateRange(timeframe: Timeframe): { from: Date; to: Date } {
     case 'week':
       from.setDate(now.getDate() - 6)      // últimos 7 días
       break
-    case 'month':
-      from.setDate(1)                       // primer día del mes actual
-      break
     case 'year':
       from.setMonth(0, 1)                   // 1 de enero del año actual
       break
     case 'all':
       from.setFullYear(2000, 0, 1)          // todo el historial
+      break
+    case 'month':
+    case 'custom':
+    default:
+      from.setDate(1)                       // primer día del mes actual
       break
   }
 
@@ -52,11 +70,11 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const rawTimeframe = req.query.timeframe as string
-    const validTimeframes: Timeframe[] = ['week', 'month', 'year', 'all']
+    const validTimeframes: Timeframe[] = ['week', 'month', 'year', 'all', 'custom']
     const timeframe: Timeframe = validTimeframes.includes(rawTimeframe as Timeframe)
       ? (rawTimeframe as Timeframe)
       : 'month'
-    const { from, to } = getDateRange(timeframe)
+    const { from, to } = getDateRange(timeframe, req.query.from as string | undefined, req.query.to as string | undefined)
 
     const [
       impulseExpenses,
@@ -116,36 +134,54 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
           debt: { userId },
           createdAt: { gte: from, lte: to },
         },
-        include: { debt: { select: { nombre: true, acreedor: true } } },
+        include: { debt: { select: { nombre: true, acreedor: true, tipoDeuda: true } } },
         orderBy: { createdAt: 'desc' },
       }),
     ])
 
-    // Historial de pagos de gastos fijos dentro del rango (ledger, mismo patrón que debtPayments)
+    // Historial de pagos de gastos fijos dentro del rango (ledger, mismo patrón que
+    // debtPayments) — antes solo se usaba para sumar el total, nunca se exponía
+    // como lista propia, así que la UI reconstruía la tabla de "Detalle de
+    // transacciones" a partir de fixedExpenses.pagadoEstePeriodo (calculado
+    // siempre contra el periodo ACTUAL, sin importar el rango pedido) en vez de
+    // este ledger real acotado por from/to.
     const fixedExpensePayments = await prisma.fixedExpensePayment.findMany({
       where: { fixedExpense: { userId }, createdAt: { gte: from, lte: to } },
+      include: { fixedExpense: { select: { nombre: true } } },
       orderBy: { createdAt: 'desc' },
     })
+
+    // Pagar el SALDO PROPIO de una tarjeta de crédito no es un gasto nuevo — el
+    // gasto ya se contó una vez, al momento de cargarlo a la tarjeta (como pago
+    // de la deuda original, o como gasto fijo pagado con esa tarjeta). Sumarlo
+    // de nuevo aquí duplicaba el mismo dinero en "Total gastado": pagar un
+    // gasto fijo de $100.000 con TC y luego abonar esos $100.000 a la tarjeta
+    // sumaba $200.000 gastados por una sola compra real.
+    const debtPaymentsForSpending = debtPayments.filter(p => p.debt.tipoDeuda !== 'TARJETA_CREDITO')
 
     // ── Totales para el balance ─────────────────────────────────────────────────
 
     const totalImpulse = impulseExpenses.reduce((s, e) => s + Number(e.monto), 0)
+    // Neto del periodo: lo depositado menos lo retirado — antes un retiro de
+    // bolsillo no restaba nada porque ni siquiera se registraba (ver BAL-05).
     const totalSaved   = savingsHistory.filter(e => e.tipo === 'ahorro').reduce((s, e) => s + Number(e.monto), 0)
+      - savingsHistory.filter(e => e.tipo === 'retiro').reduce((s, e) => s + Number(e.monto), 0)
     const totalExtra   = extraIncomes.reduce((s, e) => s + Number(e.monto), 0)
     // Deudas y fijos EFECTIVAMENTE PAGADOS dentro del rango — se toma del ledger
     // de pagos (montoPagado real), no de una columna "pagado" que ya no existe.
-    const totalDebts   = debtPayments.reduce((s, p) => s + Number(p.montoPagado), 0)
+    const totalDebts   = debtPaymentsForSpending.reduce((s, p) => s + Number(p.montoPagado), 0)
     const totalFixed   = fixedExpensePayments.reduce((s, p) => s + Number(p.montoPagado), 0)
 
     // ── Amortización: intereses pagados vs capital abonado ────────────────────
-    const totalInteresPagado = debtPayments.reduce((s, p) => s + Number(p.pagoInteres), 0)
-    const totalCapitalAbonado = debtPayments.reduce((s, p) => s + Number(p.abonoCapital), 0)
-    const totalPagosDeuda = debtPayments.reduce((s, p) => s + Number(p.montoPagado), 0)
+    const totalInteresPagado = debtPaymentsForSpending.reduce((s, p) => s + Number(p.pagoInteres), 0)
+    const totalCapitalAbonado = debtPaymentsForSpending.reduce((s, p) => s + Number(p.abonoCapital), 0)
+    const totalPagosDeuda = debtPaymentsForSpending.reduce((s, p) => s + Number(p.montoPagado), 0)
 
     // Intereses ahorrados: si el usuario paga más de la cuota mínima, ahorra intereses futuros
     // Cálculo simplificado: por cada peso extra abonado al capital, se evita pagar interés sobre ese peso
+    // (excluye pagos a tarjetas propias — mismo motivo que debtPaymentsForSpending)
     const allDebtPaymentsEver = await prisma.debtPayment.aggregate({
-      where: { debt: { userId } },
+      where: { debt: { userId, tipoDeuda: { not: 'TARJETA_CREDITO' } } },
       _sum: { pagoInteres: true, abonoCapital: true, montoPagado: true },
     })
     const totalInteresHistorico = Number(allDebtPaymentsEver._sum.pagoInteres ?? 0)
@@ -204,10 +240,19 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
 
     // Totales históricos (toda la vida)
     const totalIngresosHistorico = Number(incomeRecordsAll._sum.monto ?? 0)
-    // Egresos históricos: suma de todos los pagos de deuda + impulse + gastos fijos pagados
+    // Egresos históricos: suma de todos los pagos de deuda + impulse + gastos fijos
+    // pagados — los tres SIN acotar por from/to. totalFixedPaid sí está acotado
+    // por el rango pedido (es correcto para el resumen del periodo), así que
+    // usarlo aquí hacía que "histórico" variara según qué rango se pidiera —
+    // p. ej. daba $50.000 al pedir un mes sin gastos fijos pagados y $95.000
+    // al pedir el mes actual, para la MISMA cuenta.
     const allImpulseEver = await prisma.impulseExpense.aggregate({ where: { userId }, _sum: { monto: true } })
+    const allFixedPaymentsEver = await prisma.fixedExpensePayment.aggregate({
+      where: { fixedExpense: { userId } },
+      _sum: { montoPagado: true },
+    })
     const allDebtPaymentsTotal = Number(allDebtPaymentsEver._sum.montoPagado ?? 0)
-    const totalEgresosHistorico = allDebtPaymentsTotal + totalFixedPaid + Number(allImpulseEver._sum.monto ?? 0)
+    const totalEgresosHistorico = allDebtPaymentsTotal + Number(allFixedPaymentsEver._sum.montoPagado ?? 0) + Number(allImpulseEver._sum.monto ?? 0)
 
     // ── Distribución por categoría (para pie chart) ───────────────────────────
     const categoryDistribution = [
@@ -218,7 +263,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     ].filter(c => c.value > 0)
 
     // ── Serie temporal de ingresos vs egresos (para chart) ─────────────────
-    // Granularidad dinámica según timeframe
+    // Granularidad dinámica según timeframe. Para "custom" (rango elegido a
+    // mano, ej. un mes específico del PDF) se decide por la duración real del
+    // rango: por día si cabe en ~un mes, por mes si es más largo.
+    const spanDays = (to.getTime() - from.getTime()) / (1000 * 60 * 60 * 24)
     const getKey = (date: Date): string => {
       switch (timeframe) {
         case 'week':
@@ -227,11 +275,14 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         case 'month':
           // Por día: "1 jul", "2 jul"...
           return date.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })
+        case 'custom':
+          return spanDays <= 31
+            ? date.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })
+            : date.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })
         case 'year':
-          // Por mes: "ene 2026", "feb 2026"...
-          return date.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })
         case 'all':
         default:
+          // Por mes: "ene 2026", "feb 2026"...
           return date.toLocaleDateString('es-ES', { month: 'short', year: 'numeric' })
       }
     }
@@ -246,7 +297,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
 
     // Egresos
     impulseExpenses.forEach(e => addToMonth(new Date(e.createdAt), 'egresos', Number(e.monto)))
-    debtPayments.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
+    debtPaymentsForSpending.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
     // Gastos fijos pagados — fecha real de cada pago del ledger, no `updatedAt`
     // de la fila (que se mueve con cualquier PATCH, no solo con un pago)
     fixedExpensePayments.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
@@ -306,8 +357,21 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         const paid = debtPayments.filter(p => p.debtId === d.id && p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
         return {
           ...d,
+          // Prisma serializa Decimal como STRING en JSON (Decimal.toJSON()).
+          // Antes solo se convertían montoTotal/cuotaPeriodo acá — el resto
+          // (saldoRestante en particular) llegaba al frontend como texto, y
+          // sumarlo con `+` hacía concatenación de strings en vez de suma
+          // numérica: "11300000" + "4520000" → "114520000"... un número
+          // gigante sin sentido en vez de un total real (visible en el PDF
+          // exportado como "Saldo restante $1.130.000.045.200.002.130.000").
           montoTotal: Number(d.montoTotal),
+          montoInicial: d.montoInicial != null ? Number(d.montoInicial) : null,
+          saldoRestante: Number(d.saldoRestante),
+          saldoPrincipal: d.saldoPrincipal != null ? Number(d.saldoPrincipal) : null,
           cuotaPeriodo: Number(d.cuotaPeriodo),
+          tasaInteres: d.tasaInteres != null ? Number(d.tasaInteres) : null,
+          tasaInteresAplicada: d.tasaInteresAplicada != null ? Number(d.tasaInteresAplicada) : null,
+          tasaInteresMensual: d.tasaInteresMensual != null ? Number(d.tasaInteresMensual) : null,
           pagadoEstePeriodo: paid >= Number(d.cuotaPeriodo),
           montoPagadoEstePeriodo: paid > 0 ? paid : null,
         }
@@ -324,8 +388,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         }
       }),
 
-      // Historial de amortización
-      debtPayments: debtPayments.map(p => ({
+      // Historial de amortización — excluye pagos al saldo propio de una
+      // tarjeta (ver debtPaymentsForSpending) para que la suma de estas filas
+      // coincida con summary.totalDebts/totalEgreso, no las duplique.
+      debtPayments: debtPaymentsForSpending.map(p => ({
         id: p.id,
         debtName: p.debt.nombre,
         acreedor: p.debt.acreedor,
@@ -334,6 +400,19 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         pagoInteres: Number(p.pagoInteres),
         saldoAnterior: Number(p.saldoAnterior),
         saldoPosterior: Number(p.saldoPosterior),
+        periodo: p.periodo,
+        createdAt: p.createdAt,
+      })),
+
+      // Ledger real de pagos de gastos fijos dentro del rango pedido — a
+      // diferencia de fixedExpenses[].pagadoEstePeriodo (que SIEMPRE refleja
+      // el periodo actual sin importar from/to), esta lista sí respeta el
+      // rango solicitado. Es lo que debe usar la UI para construir la tabla
+      // de "Detalle de transacciones", no el flag de arriba.
+      fixedExpensePayments: fixedExpensePayments.map(p => ({
+        id: p.id,
+        nombre: p.fixedExpense.nombre,
+        montoPagado: Number(p.montoPagado),
         periodo: p.periodo,
         createdAt: p.createdAt,
       })),
