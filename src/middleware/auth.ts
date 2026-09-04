@@ -51,7 +51,21 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // 2. Intentar con el secret de Authoriza
   try {
     const payload = jwt.verify(token, env.AUTHORIZA_JWT_SECRET) as any
-    const tenantId = payload.basicDataId || payload.tenantId || payload.contractId || payload.contract_id
+
+    // Gate por aplicación: un token de Authoriza solo habilita Kiri si su rol
+    // pertenece a Kiri. Un token de otra app (InOut/Shotra/FactoNet) NO da acceso.
+    const KIRI_ROLES = ['adminKiri', 'userKiri']
+    if (payload.rol && !KIRI_ROLES.includes(payload.rol)) {
+      res.status(403).json({
+        error: 'Este token no tiene acceso a Kiri. Inicia sesión en Kiri.',
+        code: 'WRONG_APP_TOKEN',
+      })
+      return
+    }
+
+    // tenantId = dueño del contrato (lo emite Authoriza). No usar contractId como
+    // fallback (namespace distinto). Kiri scopea por userId igualmente.
+    const tenantId = payload.tenantId || null
     req.user = {
       userId: payload.sub || payload.id,
       correo: payload.email || payload.username,
