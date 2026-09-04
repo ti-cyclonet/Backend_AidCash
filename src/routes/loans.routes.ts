@@ -68,6 +68,12 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
         ...l,
         amount:          Number(l.amount),
         remainingAmount: Number(l.remainingAmount),
+        // tasaInteres/montoOriginal son Decimal — Prisma los serializa como
+        // STRING en JSON. Sin convertir, la UI de "el prestamista te ofrece
+        // X% de interés" (borrower-confirm) heredaría el mismo bug de
+        // concatenación de texto que ya se corrigió en /reports/balance.
+        tasaInteres:     l.tasaInteres != null ? Number(l.tasaInteres) : null,
+        montoOriginal:   l.montoOriginal != null ? Number(l.montoOriginal) : null,
         payments: l.payments.map(p => ({ ...p, monto: Number(p.monto) })),
       })),
     })
@@ -219,6 +225,10 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
           where: { id: lenderId },
           data: { cashBalance: { decrement: montoOriginal } },
         }),
+        prisma.user.update({
+          where: { id: loan.borrowerId },
+          data: { cashBalance: { increment: montoOriginal } },
+        }),
       ])
 
       // Guardar campos de interés con raw query (workaround si prisma client no está regenerado)
@@ -262,12 +272,25 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
     const borrower = await prisma.user.findUnique({ where: { id: borrowerId }, select: { nombre: true } })
 
     if (accept) {
-      // Borrower acepta → Activar préstamo y descontar del lender
+      // Borrower acepta → Activar préstamo, descontar del lender y entregar el
+      // principal (monto original, sin interés) al borrower
+      const disbursed = Number(loan.montoOriginal ?? loan.amount)
+
+      const lender = await prisma.user.findUnique({ where: { id: loan.lenderId }, select: { cashBalance: true } })
+      if (Number(lender?.cashBalance ?? 0) < disbursed) {
+        res.status(400).json({ error: 'El prestamista ya no tiene saldo suficiente para desembolsar este préstamo' })
+        return
+      }
+
       const [updated] = await prisma.$transaction([
         prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE' } }),
         prisma.user.update({
           where: { id: loan.lenderId },
-          data: { cashBalance: { decrement: Number(loan.montoOriginal ?? loan.amount) } },
+          data: { cashBalance: { decrement: disbursed } },
+        }),
+        prisma.user.update({
+          where: { id: borrowerId },
+          data: { cashBalance: { increment: disbursed } },
         }),
       ])
 
@@ -405,7 +428,14 @@ router.post('/payment', validate(paymentSchema), async (req: Request, res: Respo
     })
 
     if (isPartner) {
-      // Auto-confirmar: crear pago + descontar del remaining en una transacción
+      // Auto-confirmar: crear pago + descontar del remaining + mover el dinero
+      // real entre las billeteras de borrower y lender, todo en una transacción
+      const borrowerUser = await prisma.user.findUnique({ where: { id: borrowerId }, select: { cashBalance: true } })
+      if (Number(borrowerUser?.cashBalance ?? 0) < monto) {
+        res.status(400).json({ error: 'No tienes saldo suficiente para registrar este abono', disponible: Number(borrowerUser?.cashBalance ?? 0), requerido: monto })
+        return
+      }
+
       const newRemaining = Number(loan.remainingAmount) - monto
       const newLoanStatus = newRemaining <= 0 ? 'PAID' : 'ACTIVE'
 
@@ -416,6 +446,14 @@ router.post('/payment', validate(paymentSchema), async (req: Request, res: Respo
         prisma.loan.update({
           where: { id: loanId },
           data: { remainingAmount: Math.max(0, newRemaining), status: newLoanStatus },
+        }),
+        prisma.user.update({
+          where: { id: borrowerId },
+          data: { cashBalance: { decrement: monto } },
+        }),
+        prisma.user.update({
+          where: { id: loan.lenderId },
+          data: { cashBalance: { increment: monto } },
         }),
       ])
 
@@ -485,6 +523,12 @@ router.post('/payment/confirm', validate(confirmPaymentSchema), async (req: Requ
       return
     }
 
+    const borrowerUser = await prisma.user.findUnique({ where: { id: payment.userId }, select: { cashBalance: true } })
+    if (Number(borrowerUser?.cashBalance ?? 0) < Number(payment.monto)) {
+      res.status(400).json({ error: 'El prestatario ya no tiene saldo suficiente para confirmar este abono' })
+      return
+    }
+
     const newRemaining = Number(payment.loan.remainingAmount) - Number(payment.monto)
     const newLoanStatus = newRemaining <= 0 ? 'PAID' : 'ACTIVE'
 
@@ -499,6 +543,14 @@ router.post('/payment/confirm', validate(confirmPaymentSchema), async (req: Requ
           remainingAmount: Math.max(0, newRemaining),
           status: newLoanStatus,
         },
+      }),
+      prisma.user.update({
+        where: { id: payment.userId },
+        data: { cashBalance: { decrement: Number(payment.monto) } },
+      }),
+      prisma.user.update({
+        where: { id: lenderId },
+        data: { cashBalance: { increment: Number(payment.monto) } },
       }),
     ])
 

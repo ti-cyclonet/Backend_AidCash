@@ -7,6 +7,7 @@ import { validate } from '../middleware/validate.js'
 import { sendPushToUser } from '../lib/push.js'
 import { env } from '../config/env.js'
 import { recordOnboardingAction } from '../lib/missions.js'
+import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -63,6 +64,11 @@ const walletIncomeSchema = z.object({
 const walletDeductSchema = z.object({
   monto: z.number().min(0.01),
   bolsillo: z.enum(['obligaciones', 'libre', 'ahorro']),
+}).strict()
+
+const walletWithdrawSchema = z.object({
+  monto: z.number().min(0.01),
+  bolsillo: z.enum(['obligaciones', 'libre', 'ahorro', 'endeudamiento']),
 }).strict()
 
 // ─── PATCH /users/profile ─────────────────────────────────────────────────────
@@ -374,30 +380,26 @@ router.post('/wallet/deduct', walletLimiter, validate(walletDeductSchema), async
     const userId = req.user!.userId
     const { monto, bolsillo } = req.body as { monto: number; bolsillo: 'obligaciones' | 'libre' | 'ahorro' }
 
-    const field = bolsillo === 'obligaciones' ? 'walletObligaciones'
-                : bolsillo === 'ahorro' ? 'walletAhorro'
-                : 'walletLibre'
-
-    // Verificar que hay suficiente saldo antes de deducir
+    // Verificar que hay suficiente saldo REAL antes de deducir. Ojo: se valida
+    // contra cashBalance, no contra el bolsillo notional — este endpoint lo
+    // usan operaciones (aportar al fondo de emergencia, registrar un ahorro,
+    // un gasto hormiga) donde el dinero puede venir de cualquier parte de la
+    // billetera, no solo de lo que ya estaba etiquetado en ese bolsillo.
     const current = await prisma.user.findUnique({
       where: { id: userId },
-      select: { cashBalance: true, walletObligaciones: true, walletLibre: true, walletAhorro: true },
+      select: { cashBalance: true },
     })
     if (!current) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+    if (Number(current.cashBalance) < monto) {
+      res.status(400).json({ error: 'Saldo insuficiente', disponible: Number(current.cashBalance), requerido: monto })
+      return
+    }
 
-    const currentPocket = Number(current[field])
-    const currentCash = Number(current.cashBalance)
-
-    // No permitir deducir más de lo disponible en el bolsillo
-    const deductAmount = Math.min(monto, Math.max(0, currentPocket))
-    const deductCash = Math.min(monto, Math.max(0, currentCash))
-
+    // cashBalance y el bolsillo SIEMPRE se descuentan por el mismo monto real
+    // — nunca por dos topes distintos, que es lo que los desincronizaba antes.
     const user = await prisma.user.update({
       where: { id: userId },
-      data: {
-        cashBalance: { decrement: deductCash },
-        [field]: { decrement: deductAmount },
-      },
+      data: planPocketDeduction(bolsillo, monto),
       select: {
         cashBalance: true,
         walletAhorro: true,
@@ -419,6 +421,45 @@ router.post('/wallet/deduct', walletLimiter, validate(walletDeductSchema), async
   } catch (error) {
     console.error('[WalletDeduct]', error)
     res.status(500).json({ error: 'Error al deducir del bolsillo' })
+  }
+})
+
+// ─── POST /users/wallet/withdraw ──────────────────────────────────────────────
+// El espejo de /wallet/deduct: dinero que vuelve a estar disponible (retirar
+// de un bolsillo de ahorro, del fondo de emergencia, etc.) — antes este
+// endpoint no existía y el frontend lo llamaba igual, perdiendo el dinero
+// silenciosamente (404 nunca reportado al usuario).
+
+router.post('/wallet/withdraw', walletLimiter, validate(walletWithdrawSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { monto, bolsillo } = req.body as { monto: number; bolsillo: 'obligaciones' | 'libre' | 'ahorro' | 'endeudamiento' }
+
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: planPocketCredit(bolsillo, monto),
+      select: {
+        cashBalance: true,
+        walletAhorro: true,
+        walletObligaciones: true,
+        walletLibre: true,
+        walletEndeudamiento: true,
+      },
+    })
+
+    res.json({
+      withdrawn: monto,
+      wallet: {
+        cashBalance: Math.max(0, Number(user.cashBalance)),
+        ahorro: Math.max(0, Number(user.walletAhorro)),
+        obligaciones: Math.max(0, Number(user.walletObligaciones)),
+        libre: Math.max(0, Number(user.walletLibre)),
+        endeudamiento: Math.max(0, Number(user.walletEndeudamiento)),
+      },
+    })
+  } catch (error) {
+    console.error('[WalletWithdraw]', error)
+    res.status(500).json({ error: 'Error al acreditar el bolsillo' })
   }
 })
 

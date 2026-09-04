@@ -38,6 +38,7 @@ import budgetCategoriesRoutes from './routes/budget-categories.routes.js'
 import openBankingRoutes from './routes/open-banking.routes.js'
 import projectionsRoutes from './routes/projections.routes.js'
 import supportRoutes from './routes/support.routes.js'
+import notificationsRoutes from './routes/notifications.routes.js'
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -98,6 +99,7 @@ app.use('/api/reports', reportsRoutes)
 app.use('/api/connections', connectionsRoutes)
 app.use('/api/shared-pockets', sharedPocketsRoutes)
 app.use('/api/loans', loansRoutes)
+app.use('/api/notifications', notificationsRoutes)
 app.use('/api/home-budget', homeBudgetRoutes)
 app.use('/api/expenses/split', expenseSplitRoutes)
 app.use('/api/banks', banksRoutes)

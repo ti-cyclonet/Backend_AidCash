@@ -54,6 +54,7 @@ model User {
   impulseExpenses       ImpulseExpense[]
   emergencyFundHistory  EmergencyFundHistory[]
   badges                UserBadge[]
+  notifications         Notification[]
   missionProgress       MissionProgress[]
   rewardClaims          RewardClaim[]
   refreshTokens         RefreshToken[]
@@ -138,6 +139,10 @@ model Debt {
   payments         DebtPayment[]
   gastosVinculados FixedExpense[] @relation("TarjetaVinculada")
   cardInstallments DebtCardInstallment[] @relation("TarjetaInstallments")
+  // Pagos de OTRAS deudas/gastos fijos que se financiaron con ESTA tarjeta
+  // (pay-with-card o vínculo permanente) — necesario para poder revertirlos.
+  cardDebtPayments        DebtPayment[]         @relation("DebtPaymentCard")
+  cardFixedExpensePayments FixedExpensePayment[] @relation("FixedExpensePaymentCard")
 
   @@map("debts")
 }
@@ -159,6 +164,8 @@ model DebtCardInstallment {
   createdAt    DateTime @default(now()) @map("created_at")
 
   tarjeta Debt @relation("TarjetaInstallments", fields: [tarjetaId], references: [id], onDelete: Cascade)
+  debtPayments         DebtPayment[]
+  fixedExpensePayments FixedExpensePayment[]
 
   @@index([tarjetaId])
   @@map("debt_card_installments")
@@ -175,9 +182,16 @@ model DebtPayment {
   saldoAnterior  Decimal  @map("saldo_anterior") @db.Decimal(12, 2)
   saldoPosterior Decimal  @map("saldo_posterior") @db.Decimal(12, 2)
   periodo        String
+  // Si este pago se financió con una tarjeta de crédito (pay-with-card): cuál
+  // tarjeta y qué plan de cuotas generó — null significa que salió de
+  // cashBalance en efectivo. undo-pay usa esto para saber qué revertir.
+  tarjetaId      String?  @map("tarjeta_id")
+  installmentId  String?  @map("installment_id")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  debt Debt @relation(fields: [debtId], references: [id], onDelete: Cascade)
+  debt        Debt                 @relation(fields: [debtId], references: [id], onDelete: Cascade)
+  tarjeta     Debt?                @relation("DebtPaymentCard", fields: [tarjetaId], references: [id], onDelete: SetNull)
+  installment DebtCardInstallment? @relation(fields: [installmentId], references: [id], onDelete: SetNull)
 
   @@map("debt_payments")
 }
@@ -232,9 +246,16 @@ model FixedExpensePayment {
   fixedExpenseId String   @map("fixed_expense_id")
   montoPagado    Decimal  @map("monto_pagado") @db.Decimal(12, 2)
   periodo        String
+  // Mismo propósito que en DebtPayment: si se pagó con tarjeta (vínculo
+  // permanente o pay-with-card puntual) y con qué plan de cuotas, para que
+  // undo-pay sepa revertir la tarjeta en vez de acreditar cashBalance.
+  tarjetaId      String?  @map("tarjeta_id")
+  installmentId  String?  @map("installment_id")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  fixedExpense FixedExpense @relation(fields: [fixedExpenseId], references: [id], onDelete: Cascade)
+  fixedExpense FixedExpense         @relation(fields: [fixedExpenseId], references: [id], onDelete: Cascade)
+  tarjeta      Debt?                @relation("FixedExpensePaymentCard", fields: [tarjetaId], references: [id], onDelete: SetNull)
+  installment  DebtCardInstallment? @relation(fields: [installmentId], references: [id], onDelete: SetNull)
 
   @@index([fixedExpenseId, periodo])
   @@map("fixed_expense_payments")
@@ -318,6 +339,27 @@ model UserBadge {
 
   @@unique([userId, badgeId])
   @@map("user_badges")
+}
+
+// ─── Notificaciones (campana dentro de la app) ────────────────────────────────
+// Antes esto solo vivía en el estado de React de SocketProvider — un refresh
+// o cerrar/reabrir la pestaña las borraba para siempre, aunque el evento real
+// (una invitación, un préstamo, un depósito compartido) sí hubiera pasado.
+// `event`/`data` guardan la MISMA forma que ya espera el frontend (KiriNotification)
+// para no tener que reescribir cómo se arma el ícono/título de cada tipo.
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  event     String
+  data      Json
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("notifications")
 }
 
 // ─── Misiones diarias/semanales — progreso y reclamos de recompensa ──────────
@@ -451,15 +493,19 @@ model BelvoTransaction {
 // ─── Bolsillos de Ahorro Personales ───────────────────────────────────────────
 
 model SavingsPocket {
-  id           String   @id @default(uuid())
-  userId       String   @map("user_id")
-  nombre       String
-  meta         Decimal  @default(0) @db.Decimal(12, 2)
-  montoActual  Decimal  @default(0) @map("monto_actual") @db.Decimal(12, 2)
-  color        String   @default("#10B981")
-  icono        String   @default("piggy-bank")
-  createdAt    DateTime @default(now()) @map("created_at")
-  updatedAt    DateTime @updatedAt @map("updated_at")
+  id             String   @id @default(uuid())
+  userId         String   @map("user_id")
+  nombre         String
+  meta           Decimal  @default(0) @db.Decimal(12, 2)
+  montoActual    Decimal  @default(0) @map("monto_actual") @db.Decimal(12, 2)
+  color          String   @default("#10B981")
+  icono          String   @default("piggy-bank")
+  descripcion    String?
+  pagoAutomatico Boolean  @default(false) @map("pago_automatico")
+  tipoMeta       String   @default("libre") @map("tipo_meta")
+  fechaLimite    String?  @map("fecha_limite")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -500,6 +546,12 @@ model Connection {
   // PENDING | ACCEPTED | REJECTED
   status      String         @default("PENDING")
   role        ConnectionRole @default(FRIEND)
+  // Cambiar el rol de una conexión (ej. Amigo → Pareja) ya no es unilateral:
+  // el que propone queda en pendingRole/roleChangeRequestedBy hasta que la
+  // OTRA persona lo aprueba o lo rechaza — `role` solo se actualiza al
+  // aceptar. Null en ambos = no hay ninguna solicitud de cambio de rol activa.
+  pendingRole           ConnectionRole? @map("pending_role")
+  roleChangeRequestedBy String?         @map("role_change_requested_by")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
 
