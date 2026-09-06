@@ -30,3 +30,7 @@ jobs:
             echo "✅ Verifying..."
             sleep 3
             docker logs cyclonet-kiri-api --tail 5
+
+            echo "🧹 Limpiando imágenes y cache de Docker sin usar..."
+            docker image prune -af
+            docker builder prune -af
