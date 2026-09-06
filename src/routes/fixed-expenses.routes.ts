@@ -37,6 +37,15 @@ const createSchema = z.object({
   frecuencia: z.enum(['mensual', 'quincenal', 'semanal', 'anual']).optional(),
   metodoPago: z.string().optional(),
   renovacionAuto: z.boolean().optional(),
+  pagoAutomatico: z.boolean().optional(),
+  // Si el usuario confirma que la cuota de ESTE periodo ya la pagó (por fuera
+  // de Kiri, antes de registrar el gasto), sembramos un FixedExpensePayment
+  // marcador — mismo patrón que en debts.routes.ts POST /debts.
+  yaPagoEstePeriodo: z.boolean().optional(),
+  // Antes faltaba acá — el formulario de creación ya deja elegir tarjeta,
+  // pero el schema la descartaba silenciosamente y el gasto nacía sin vínculo.
+  tarjetaVinculadaId: z.string().nullable().optional(),
+  budgetCategoryId: z.string().uuid().nullable().optional(),
 })
 
 const updateSchema = z.object({
@@ -49,6 +58,7 @@ const updateSchema = z.object({
   renovacionAuto: z.boolean().optional(),
   tarjetaVinculadaId: z.string().nullable().optional(),
   pagoAutomatico: z.boolean().optional(),
+  budgetCategoryId: z.string().uuid().nullable().optional(),
 }).strict()
 
 // ─── GET /fixed-expenses ──────────────────────────────────────────────────────
@@ -97,21 +107,45 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createSchema), checkLimit('nGastosFijos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, monto, fechaCorte, categoria, frecuencia, metodoPago, renovacionAuto } = req.body
+    const { nombre, monto, fechaCorte, categoria, frecuencia, metodoPago, renovacionAuto, pagoAutomatico, yaPagoEstePeriodo, tarjetaVinculadaId, budgetCategoryId } = req.body
 
-    const expense = await prisma.fixedExpense.create({
-      data: {
-        userId, nombre, monto, fechaCorte,
-        categoria: categoria ?? 'otro',
-        frecuencia: frecuencia ?? 'mensual',
-        metodoPago: metodoPago ?? null,
-        renovacionAuto: renovacionAuto ?? false,
-      },
-    })
+    const expenseData = {
+      userId, nombre, monto, fechaCorte,
+      categoria: categoria ?? 'otro',
+      frecuencia: frecuencia ?? 'mensual',
+      metodoPago: metodoPago ?? null,
+      renovacionAuto: renovacionAuto ?? false,
+      pagoAutomatico: pagoAutomatico ?? false,
+      tarjetaVinculadaId: tarjetaVinculadaId || null,
+      budgetCategoryId: budgetCategoryId || null,
+    }
+
+    // Si ya pagó la cuota de este periodo, sembrar el pago marcador junto con
+    // la creación — sin esto, el gasto nace "vencido" con un día que en
+    // realidad ya está resuelto.
+    const expense = yaPagoEstePeriodo
+      ? await prisma.$transaction(async tx => {
+          const created = await tx.fixedExpense.create({ data: expenseData })
+          await tx.fixedExpensePayment.create({
+            data: {
+              fixedExpenseId: created.id,
+              montoPagado: monto,
+              periodo: fixedPeriodo(created),
+            },
+          })
+          return created
+        })
+      : await prisma.fixedExpense.create({ data: expenseData })
 
     await recordOnboardingAction(userId, 'registrar_obligacion')
 
-    res.status(201).json({ fixedExpense: { ...expense, pagadoEstePeriodo: false, montoPagadoEstePeriodo: null } })
+    res.status(201).json({
+      fixedExpense: {
+        ...expense,
+        pagadoEstePeriodo: !!yaPagoEstePeriodo,
+        montoPagadoEstePeriodo: yaPagoEstePeriodo ? Number(monto) : null,
+      },
+    })
   } catch (error) {
     console.error('[CreateFixed]', error)
     res.status(500).json({ error: 'Error al crear gasto fijo' })
