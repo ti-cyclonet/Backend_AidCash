@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { z } from 'zod'
+import { randomUUID } from 'crypto'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
@@ -29,6 +30,10 @@ const createSchema = z.object({
   nombre: z.string().min(1, 'El nombre es requerido'),
   monto: z.number().min(0),
   categoria: z.enum(['cafe', 'comida', 'transporte', 'antojo', 'salida', 'otro']).default('otro'),
+  // Si se paga con tarjeta de crédito: mismo mecanismo de cuotas que
+  // pay-with-card para deudas/gastos fijos (ver debts.routes.ts).
+  tarjetaId: z.string().uuid().optional(),
+  cuotas: z.number().int().min(1).max(48).optional(),
 })
 
 // ─── GET /impulse-expenses ────────────────────────────────────────────────────
@@ -123,13 +128,41 @@ router.get('/top-consumos', async (req: Request, res: Response): Promise<void> =
 router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, monto, categoria } = req.body
+    const { nombre, monto, categoria, tarjetaId, cuotas } = req.body
 
     const periodo = await currentUserPeriodo(userId)
 
-    const expense = await prisma.impulseExpense.create({
-      data: { userId, nombre, monto, categoria, periodo },
-    })
+    let expense
+    if (tarjetaId) {
+      const tarjeta = await prisma.debt.findFirst({ where: { id: tarjetaId, userId, estado: 'activa' } })
+      if (!tarjeta) {
+        res.status(404).json({ error: 'Tarjeta de crédito no encontrada' })
+        return
+      }
+      const numCuotas = cuotas ?? 1
+      const incrementoCuota = Math.round((monto / numCuotas) * 100) / 100
+      // Mismo orden que /debts/pay-with-card: el plan de cuotas se crea
+      // primero (con id pre-generado) para que el gasto pueda referenciarlo
+      // por FK dentro de la misma transacción.
+      const installmentId = randomUUID()
+      const [, createdExpense] = await prisma.$transaction([
+        prisma.debtCardInstallment.create({
+          data: { id: installmentId, tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: numCuotas, descripcion: nombre },
+        }),
+        prisma.impulseExpense.create({
+          data: { userId, nombre, monto, categoria, periodo, tarjetaId, installmentId },
+        }),
+        prisma.debt.update({
+          where: { id: tarjetaId },
+          data: { saldoRestante: { increment: monto }, saldoPrincipal: { increment: monto } },
+        }),
+      ])
+      expense = createdExpense
+    } else {
+      expense = await prisma.impulseExpense.create({
+        data: { userId, nombre, monto, categoria, periodo },
+      })
+    }
 
     await recordMissionAction(userId, 'gasto_hormiga')
 

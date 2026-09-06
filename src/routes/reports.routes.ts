@@ -90,6 +90,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       prisma.impulseExpense.findMany({
         where: { userId, createdAt: { gte: from, lte: to } },
         orderBy: { createdAt: 'desc' },
+        include: { tarjeta: { select: { nombre: true } } },
       }),
 
       // Historial de ahorro — filtrado por createdAt
@@ -134,7 +135,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
           debt: { userId },
           createdAt: { gte: from, lte: to },
         },
-        include: { debt: { select: { nombre: true, acreedor: true, tipoDeuda: true } } },
+        include: {
+          debt: { select: { nombre: true, acreedor: true, tipoDeuda: true } },
+          tarjeta: { select: { nombre: true } },
+        },
         orderBy: { createdAt: 'desc' },
       }),
     ])
@@ -147,7 +151,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // este ledger real acotado por from/to.
     const fixedExpensePayments = await prisma.fixedExpensePayment.findMany({
       where: { fixedExpense: { userId }, createdAt: { gte: from, lte: to } },
-      include: { fixedExpense: { select: { nombre: true } } },
+      include: {
+        fixedExpense: { select: { nombre: true } },
+        tarjeta: { select: { nombre: true } },
+      },
       orderBy: { createdAt: 'desc' },
     })
 
@@ -349,7 +356,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       monthlySeries,
 
       // Listas detalladas para la tabla y exportación
-      impulseExpenses:  impulseExpenses.map(e => ({ ...e, monto: Number(e.monto) })),
+      impulseExpenses:  impulseExpenses.map(e => ({ ...e, monto: Number(e.monto), tarjetaNombre: e.tarjeta?.nombre ?? null, tarjeta: undefined })),
       savingsHistory:   savingsHistory.map(e => ({ ...e, monto: Number(e.monto) })),
       extraIncomes:     extraIncomes.map(e => ({ ...e, monto: Number(e.monto) })),
       debts: debts.map(d => {
@@ -402,6 +409,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         saldoPosterior: Number(p.saldoPosterior),
         periodo: p.periodo,
         createdAt: p.createdAt,
+        tarjetaNombre: p.tarjeta?.nombre ?? null,
       })),
 
       // Ledger real de pagos de gastos fijos dentro del rango pedido — a
@@ -415,6 +423,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         montoPagado: Number(p.montoPagado),
         periodo: p.periodo,
         createdAt: p.createdAt,
+        tarjetaNombre: p.tarjeta?.nombre ?? null,
       })),
 
       // Ingresos registrados (sueldo + extras)

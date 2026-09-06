@@ -130,12 +130,16 @@ model Debt {
   bankEntityId      String?    @map("bank_entity_id")
   coOwnerId         String?    @map("co_owner_id")
   pagoAutomatico    Boolean    @default(false) @map("pago_automatico")
+  // Categoría de presupuesto a la que pertenece esta deuda — para que sus
+  // pagos cuenten como consumo de esa categoría (ver computeCategorySpend).
+  budgetCategoryId  String?    @map("budget_category_id")
   createdAt         DateTime   @default(now()) @map("created_at")
   updatedAt         DateTime   @updatedAt @map("updated_at")
 
   user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
   coOwner          User?         @relation("DebtCoOwner", fields: [coOwnerId], references: [id], onDelete: SetNull)
   bankEntity       BankEntity?   @relation(fields: [bankEntityId], references: [id], onDelete: SetNull)
+  budgetCategory   BudgetCategory? @relation(fields: [budgetCategoryId], references: [id], onDelete: SetNull)
   payments         DebtPayment[]
   gastosVinculados FixedExpense[] @relation("TarjetaVinculada")
   cardInstallments DebtCardInstallment[] @relation("TarjetaInstallments")
@@ -143,6 +147,7 @@ model Debt {
   // (pay-with-card o vínculo permanente) — necesario para poder revertirlos.
   cardDebtPayments        DebtPayment[]         @relation("DebtPaymentCard")
   cardFixedExpensePayments FixedExpensePayment[] @relation("FixedExpensePaymentCard")
+  cardImpulseExpenses     ImpulseExpense[]      @relation("ImpulseExpenseCard")
 
   @@map("debts")
 }
@@ -166,6 +171,7 @@ model DebtCardInstallment {
   tarjeta Debt @relation("TarjetaInstallments", fields: [tarjetaId], references: [id], onDelete: Cascade)
   debtPayments         DebtPayment[]
   fixedExpensePayments FixedExpensePayment[]
+  impulseExpenses      ImpulseExpense[]
 
   @@index([tarjetaId])
   @@map("debt_card_installments")
@@ -229,11 +235,16 @@ model FixedExpense {
   // Vinculación a tarjeta de crédito (al pagar, suma al saldo de la tarjeta)
   tarjetaVinculadaId String? @map("tarjeta_vinculada_id")
   pagoAutomatico    Boolean @default(false) @map("pago_automatico")
+  // Categoría de presupuesto a la que pertenece este gasto fijo — para que
+  // sus pagos cuenten como consumo de esa categoría (ver computeCategorySpend).
+  // Aditivo respecto al vínculo legacy BudgetCategory.linkedFixedExpenseIds.
+  budgetCategoryId  String? @map("budget_category_id")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
   user             User  @relation(fields: [userId], references: [id], onDelete: Cascade)
   tarjetaVinculada Debt? @relation("TarjetaVinculada", fields: [tarjetaVinculadaId], references: [id], onDelete: SetNull)
+  budgetCategory   BudgetCategory? @relation(fields: [budgetCategoryId], references: [id], onDelete: SetNull)
   payments         FixedExpensePayment[]
 
   @@map("fixed_expenses")
@@ -303,9 +314,16 @@ model ImpulseExpense {
   monto     Decimal  @db.Decimal(12, 2)
   categoria String   @default("otro") // cafe | comida | transporte | antojo | salida | otro
   periodo   String
+  // Si se pagó con tarjeta de crédito (consumo a cuotas, mismo mecanismo que
+  // pay-with-card para deudas/gastos fijos): referencia a la tarjeta y al plan
+  // de cuotas creado. Ambos null si se pagó con el disponible (caso normal).
+  tarjetaId     String?  @map("tarjeta_id")
+  installmentId String?  @map("installment_id")
   createdAt DateTime @default(now()) @map("created_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tarjeta     Debt?                @relation("ImpulseExpenseCard", fields: [tarjetaId], references: [id], onDelete: SetNull)
+  installment DebtCardInstallment? @relation(fields: [installmentId], references: [id], onDelete: SetNull)
 
   @@index([userId, periodo])
   @@map("impulse_expenses")
@@ -524,7 +542,9 @@ model BudgetCategory {
   montoLimite           Decimal  @default(0) @map("monto_limite") @db.Decimal(12, 2)
   linkedFixedExpenseIds String[] @default([]) @map("linked_fixed_expense_ids")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  debts          Debt[]
+  fixedExpenses  FixedExpense[]
 
   @@map("budget_categories")
 }

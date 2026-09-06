@@ -183,6 +183,18 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
           await prisma.user.update({ where: { id: user.id }, data: { isActive: true } }).catch(() => {})
           user.isActive = true
         }
+        // Authoriza respondió y NO tiene registro de este correo (p. ej. se
+        // borró/reseteó allá) — es la fuente de verdad, así que una fila vieja
+        // que sobrevivió en la base local de Kiri no debe poder autenticar.
+        if (!statusData.exists) {
+          await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
+          res.status(403).json({
+            error: 'Esta cuenta ya no está disponible. Regístrate de nuevo.',
+            code: 'ACCESS_DENIED',
+            reason: 'NOT_FOUND',
+          })
+          return
+        }
       }
     } catch (statusErr) {
       // If Authoriza is unreachable, fall back to local isActive check (fail-safe)
@@ -317,6 +329,7 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
         nombre: true,
         correo: true,
         username: true,
+        avatarUrl: true,
         ingresoBase: true,
         frecuenciaIngreso: true,
         diasPago: true,

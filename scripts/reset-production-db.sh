@@ -44,7 +44,7 @@ if [ "$CONFIRM" != "RESET" ]; then
 fi
 
 echo ""
-echo -e "${YELLOW}[1/4] Verificando que el contenedor esté corriendo...${NC}"
+echo -e "${YELLOW}[1/5] Verificando que el contenedor esté corriendo...${NC}"
 if ! docker ps --format '{{.Names}}' | grep -q "$CONTAINER_NAME"; then
   echo -e "${RED}Error: El contenedor '$CONTAINER_NAME' no está corriendo.${NC}"
   exit 1
@@ -52,15 +52,29 @@ fi
 echo -e "${GREEN}✓ Contenedor encontrado${NC}"
 
 echo ""
-echo -e "${YELLOW}[2/4] Ejecutando prisma migrate reset --force dentro del contenedor...${NC}"
+echo -e "${YELLOW}[2/5] Ejecutando prisma migrate reset --force dentro del contenedor...${NC}"
 docker exec "$CONTAINER_NAME" npx prisma migrate reset --force
 
 echo ""
-echo -e "${YELLOW}[3/4] Verificando que las migraciones se aplicaron correctamente...${NC}"
+echo -e "${YELLOW}[3/5] Verificando que las migraciones se aplicaron correctamente...${NC}"
 docker exec "$CONTAINER_NAME" npx prisma migrate status
 
 echo ""
-echo -e "${YELLOW}[4/4] Reiniciando el contenedor para limpiar caché en memoria...${NC}"
+echo -e "${YELLOW}[4/5] Verificando que la tabla de usuarios quedó realmente vacía...${NC}"
+USERS_AFTER=$(docker exec "$CONTAINER_NAME" node -e "
+const { PrismaClient } = require('@prisma/client');
+const p = new PrismaClient();
+p.user.count().then(c => { console.log(c); process.exit(0); }).catch(e => { console.error(e); process.exit(1); }).finally(() => p.\$disconnect());
+")
+if [ -z "$USERS_AFTER" ] || [ "$USERS_AFTER" != "0" ]; then
+  echo -e "${RED}✗ El reset NO se completó: la tabla 'User' todavía tiene ${USERS_AFTER:-'<sin dato>'} fila(s).${NC}"
+  echo -e "${RED}  No asumas que quedó limpio — revisa los logs de arriba y reintenta.${NC}"
+  exit 1
+fi
+echo -e "${GREEN}✓ Confirmado: 0 usuarios en la base de datos.${NC}"
+
+echo ""
+echo -e "${YELLOW}[5/5] Reiniciando el contenedor para limpiar caché en memoria...${NC}"
 docker restart "$CONTAINER_NAME"
 sleep 3
 

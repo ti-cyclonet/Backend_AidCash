@@ -102,6 +102,12 @@ const createDebtSchema = z.object({
   prioridad: z.enum(['alta', 'media', 'baja']).default('media'),
   bankEntityId: z.string().uuid().nullable().optional(),
   tipoDeuda: z.enum(['PRESTAMO', 'TARJETA_CREDITO']).default('PRESTAMO'),
+  // Si el usuario confirma que la cuota de ESTE periodo ya la pagó (por fuera
+  // de Kiri, antes de registrar la deuda), sembramos un DebtPayment marcador
+  // para que no salga "vencida" con una fecha que ya está resuelta — ver
+  // handler de POST / más abajo.
+  yaPagoEstePeriodo: z.boolean().optional(),
+  budgetCategoryId: z.string().uuid().nullable().optional(),
 })
 
 const updateDebtSchema = z.object({
@@ -116,6 +122,7 @@ const updateDebtSchema = z.object({
   prioridad: z.enum(['alta', 'media', 'baja']).optional(),
   estado: z.enum(['activa', 'saldada', 'vencida']).optional(),
   pagoAutomatico: z.boolean().optional(),
+  budgetCategoryId: z.string().uuid().nullable().optional(),
 }).strict()
 
 const payDebtSchema = z.object({
@@ -188,29 +195,52 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda } = req.body
+    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda, yaPagoEstePeriodo, budgetCategoryId } = req.body
 
-    const debt = await prisma.debt.create({
-      data: {
-        userId,
-        nombre,
-        tipoDeuda: tipoDeuda || 'PRESTAMO',
-        montoTotal,
-        // Si el usuario ingresó un saldo actual diferente (ya venía pagando), usarlo
-        saldoRestante: saldoRestante ?? montoTotal,
-        montoInicial: montoTotal,
-        cuotaPeriodo,
-        acreedor: acreedor || '',
-        frecuenciaPago: frecuenciaPago || 'mensual',
-        diasPago: diasPago || '1',
-        tasaInteres: tasaInteres ?? null,
-        tasaInteresAplicada: tasaInteres ?? null,
-        prioridad: prioridad || 'media',
-        estado: 'activa',
-        fechaInicio: new Date(),
-        bankEntityId: bankEntityId || null,
-      },
-    })
+    const debtData = {
+      userId,
+      nombre,
+      tipoDeuda: tipoDeuda || 'PRESTAMO',
+      montoTotal,
+      // Si el usuario ingresó un saldo actual diferente (ya venía pagando), usarlo
+      saldoRestante: saldoRestante ?? montoTotal,
+      montoInicial: montoTotal,
+      cuotaPeriodo,
+      acreedor: acreedor || '',
+      frecuenciaPago: frecuenciaPago || 'mensual',
+      diasPago: diasPago || '1',
+      tasaInteres: tasaInteres ?? null,
+      tasaInteresAplicada: tasaInteres ?? null,
+      prioridad: prioridad || 'media',
+      estado: 'activa' as const,
+      fechaInicio: new Date(),
+      bankEntityId: bankEntityId || null,
+      budgetCategoryId: budgetCategoryId || null,
+    }
+
+    // Si el usuario confirma que la cuota de este periodo ya está pagada (la
+    // pagó antes de registrar la deuda en Kiri), sembramos un DebtPayment
+    // marcador junto con la deuda para que el periodo actual no salga
+    // "vencido" — sin tocar el saldo (no es un pago real ocurriendo ahora,
+    // el `saldoRestante` de arriba ya refleja lo que el usuario debe hoy) ni
+    // descontar de la billetera (a diferencia de POST /:id/pay).
+    const debt = yaPagoEstePeriodo
+      ? await prisma.$transaction(async tx => {
+          const created = await tx.debt.create({ data: debtData })
+          await tx.debtPayment.create({
+            data: {
+              debtId: created.id,
+              montoPagado: cuotaPeriodo,
+              abonoCapital: 0,
+              pagoInteres: 0,
+              saldoAnterior: created.saldoRestante,
+              saldoPosterior: created.saldoRestante,
+              periodo: debtPeriodo(created),
+            },
+          })
+          return created
+        })
+      : await prisma.debt.create({ data: debtData })
 
     await recordOnboardingAction(userId, 'registrar_obligacion')
 
@@ -221,8 +251,8 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
         saldoRestante: Number(debt.saldoRestante),
         cuotaPeriodo: Number(debt.cuotaPeriodo),
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
-        pagadoEstePeriodo: false,
-        montoPagadoEstePeriodo: null,
+        pagadoEstePeriodo: !!yaPagoEstePeriodo,
+        montoPagadoEstePeriodo: yaPagoEstePeriodo ? Number(cuotaPeriodo) : null,
       },
     })
   } catch (error) {
