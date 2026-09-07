@@ -1,81 +1,71 @@
-# Reset completo de la base de datos — Kiri (backend AidCash)
+# Reset de la base de datos — Kiri (backend AidCash)
 
-Script para **resetear por completo** la base de datos de Kiri y reconstruirla
-con las migraciones de Prisma.
+Scripts para **resetear por completo** la base de datos de Kiri.
 
 > ⚠️ **Operación destructiva e irreversible.** Borra todos los usuarios, deudas,
-> ahorros, presupuestos, etc. En producción, idealmente con respaldo previo.
+> ahorros, presupuestos, conexiones sociales, préstamos e historial. En
+> producción, idealmente con respaldo previo.
 
 > ℹ️ Este backend es el de **AidCash**, desplegado como **Kiri**
-> (contenedor `cyclonet-kiri-api`, base `KiriDB`). Es **Express + Prisma**.
+> (contenedor `cyclonet-kiri-api`, base `KiriDB`). Es **Express + Prisma** con
+> migraciones (`prisma/migrations/`). No usa extensiones de Postgres (no postgis).
 
-## Cómo funciona
+## Scripts disponibles
 
-Kiri usa **Prisma con migraciones** (carpeta `prisma/migrations/`). El esquema
-**no** se recrea por `synchronize`; se reconstruye aplicando las migraciones con
-`prisma migrate deploy`. El contenedor ya corre `prisma migrate deploy` en su
-arranque (ver `Dockerfile`).
+| Script | Entorno | Qué hace |
+|---|---|---|
+| `reset-production-db.sh` | **Producción** | Corre dentro del contenedor de la EC2: `prisma migrate reset --force` (dropea + re-migra), verifica que la tabla de usuarios quedó en 0, reinicia el contenedor y hace health check. |
+| `reset-local-db.ts` | **Local / desarrollo** | `TRUNCATE` de todas las tablas de la app (con guarda: se niega a correr si `DATABASE_URL` no es localhost). |
 
-Kiri **no usa extensiones de Postgres** (no postgis), por lo que basta con
-`DROP SCHEMA public CASCADE; CREATE SCHEMA public;` — no hay que recrear
-extensiones.
+## Producción — `reset-production-db.sh`
 
-Reset de **2 pasos**: limpiar el esquema (SQL) y reconstruir con migraciones.
-
-## Archivos
-
-- `reset-database.sql` — `DROP SCHEMA public CASCADE; CREATE SCHEMA public;`
-  (borra tablas, enums e historial de migraciones).
-
-## Pasos
-
-### 1. Ejecutar el SQL (TablePlus o psql)
-
-Conéctate a la base de **Kiri** y **verifica primero**:
-
-```sql
-SELECT current_database();   -- debe decir KiriDB
-```
-
-Ejecuta el contenido de `reset-database.sql`.
-
-### 2. Reconstruir el esquema con las migraciones
-
-En el servidor (EC2), dentro del contenedor:
+Este script **no** se conecta por túnel desde tu máquina: te conectas por SSH al
+servidor y el script corre ahí, usando `docker exec` sobre el contenedor (que ya
+tiene el `DATABASE_URL` de `KiriDB`). Por eso no requiere credenciales locales.
 
 ```bash
-docker exec cyclonet-kiri-api npx prisma migrate deploy
-docker exec cyclonet-kiri-api npx prisma migrate status   # verificar
+# 1. Conéctate a la EC2
+ssh -i C:\Users\AlfredoMamby\cyclonet-ec2-key.pem ec2-user@3.95.90.144
+
+# 2. Ubícate en el backend y ejecuta el script
+cd /opt/cyclonet/AidCash/Backend_AidCash
+bash scripts/reset-production-db.sh
 ```
 
-> Alternativa "todo en uno": el contenedor aplica `migrate deploy` al arrancar,
-> así que también puedes reconstruir con solo reiniciarlo tras el DROP:
-> `docker restart cyclonet-kiri-api`.
+El script pide confirmación (hay que escribir `RESET`) y hace:
 
-### 3. (Opcional) Seed de datos demo
+1. Verifica que el contenedor `cyclonet-kiri-api` esté corriendo.
+2. `prisma migrate reset --force` dentro del contenedor (reconstruye el esquema).
+3. `prisma migrate status` para confirmar las migraciones.
+4. Verifica que la tabla `User` quedó en **0 filas** (aborta si no).
+5. Reinicia el contenedor y hace health check en `/api/health`.
 
-El seed (`prisma/seed.ts`, vía `tsx`) **solo crea datos de demostración**
-(usuario `demo@kiri.app`), **no** datos de catálogo necesarios. Además hoy está
-**desactualizado** respecto al esquema y fallaría. Por eso el seed es **opcional**
-y, de necesitarse, hay que actualizarlo primero. Para una base productiva limpia,
-**omite** este paso: los usuarios se registran desde cero.
+> El contenedor además aplica `prisma migrate deploy` en su arranque (ver
+> `Dockerfile`), así que el esquema siempre queda consistente al reiniciar.
 
-Si aún así quieres correrlo (tras actualizar `seed.ts`):
+### Seed
+
+El seed (`prisma/seed.ts`, vía `tsx`) solo crea **datos demo** y hoy está
+**desactualizado** respecto al esquema (fallaría). Por eso NO se ejecuta en el
+reset de producción: la base queda limpia y los usuarios se registran desde cero.
+
+## Local — `reset-local-db.ts`
+
+Para vaciar tu base de desarrollo (definida por `DATABASE_URL` en tu `.env`
+local). Tiene una guarda de seguridad: **solo corre si el host es `localhost` /
+`127.0.0.1`**, para no tocar remoto por accidente.
 
 ```bash
-docker exec cyclonet-kiri-api npx tsx prisma/seed.ts
+npx tsx scripts/reset-local-db.ts
 ```
 
-## Alternativa: `prisma migrate reset`
-
-Existe también `scripts/reset-production-db.sh` (previo) que hace lo mismo con
-`prisma migrate reset --force` (dropea + re-migra en un solo comando) más un
-health check. Cualquiera de los dos enfoques deja la base reconstruida; este SQL
-+ `migrate deploy` es el equivalente manual y explícito.
+Pide confirmación (`RESET`), hace `TRUNCATE ... RESTART IDENTITY CASCADE` de todas
+las tablas de la app (deja intacta `_prisma_migrations`) y reporta el conteo
+antes/después.
 
 ## Entornos
 
-| Entorno | Base de datos | Contenedor |
+| Entorno | Base de datos | Contenedor / ejecución |
 |---|---|---|
-| Producción | `KiriDB` | `cyclonet-kiri-api` |
-| Local/Dev | `kiri_finance` | (según docker-compose local) |
+| Producción | `KiriDB` | `cyclonet-kiri-api` (vía `reset-production-db.sh` en la EC2) |
+| Local/Dev | `kiri_finance` | `reset-local-db.ts` con `.env` local |
