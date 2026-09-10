@@ -12,6 +12,7 @@ import { initPaymentNotificationsCron } from './cron/payment-notifications.js'
 import { initBelvoSyncCron } from './cron/belvo-sync.js'
 import { initSpendingProjectionsCron } from './cron/spending-projections.js'
 import { initObligationDueDatesCron } from './cron/obligation-due-dates.js'
+import { initAutoPayCron } from './cron/auto-pay.js'
 
 // Routes
 import authRoutes from './routes/auth.routes.js'
@@ -132,6 +133,7 @@ async function bootstrap() {
   initBelvoSyncCron()
   initSpendingProjectionsCron()
   initObligationDueDatesCron()
+  initAutoPayCron()
 
   httpServer.listen(env.PORT, () => {
     console.log(`

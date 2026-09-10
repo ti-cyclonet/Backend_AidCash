@@ -12,11 +12,8 @@
 
 import cron from 'node-cron'
 import { prisma } from '../config/database.js'
-import { emitToUser } from '../lib/socket.js'
-import { sendPushToUser, pushKiriTip } from '../lib/push.js'
+import { pushKiriTip } from '../lib/push.js'
 import { daysUntilDayOfMonth } from '../lib/date-helpers.js'
-
-const SOCKET_EVENT = 'alert:payment_proximity'
 
 export function initPaymentNotificationsCron() {
   // Ejecutar todos los días a las 8:00 AM (hora del servidor)
@@ -62,15 +59,13 @@ export function initPaymentNotificationsCron() {
           }
 
           if (message && type) {
-            // Emitir via Socket.io (si está conectado)
-            emitToUser(user.id, SOCKET_EVENT, {
-              message,
-              type,
-              payday,
-              action: type === 'payday' ? 'register_income' : 'info',
-            })
-
-            // Enviar Push Notification (llega incluso con app cerrada)
+            // Push Notification — llega incluso con la app cerrada. El evento
+            // 'alert:payment_proximity' que esto emitía por Socket.io antes
+            // no tenía ningún listener registrado en el frontend (el array
+            // NOTIFICATION_EVENTS de socket-context.tsx no lo incluye), así
+            // que nunca llegaba a mostrarse; se quitó para no dejar código
+            // muerto. El frontend ya cubre el aviso en vivo con su propio
+            // cálculo local (ver useSmartAlerts).
             await pushKiriTip(user.id, message)
 
             notified++
@@ -105,7 +100,6 @@ export function initPaymentNotificationsCron() {
         }
 
         if (extraMsg) {
-          emitToUser(extra.userId, SOCKET_EVENT, { message: extraMsg, type: 'extra_income', action: 'info' })
           await pushKiriTip(extra.userId, extraMsg)
         }
       }

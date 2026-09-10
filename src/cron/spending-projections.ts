@@ -23,9 +23,6 @@
 import cron from 'node-cron'
 import { prisma } from '../config/database.js'
 import { sendPushToUser } from '../lib/push.js'
-import { emitToUser } from '../lib/socket.js'
-
-const SOCKET_EVENT = 'alert:spending_projection'
 
 // ─── Tipos internos ──────────────────────────────────────────────────────────
 
@@ -193,20 +190,10 @@ async function runSpendingProjections(): Promise<void> {
       const message = buildAlertMessage(projection)
       if (!message) continue
 
-      // Enviar via Socket.io (tiempo real si está conectado)
-      emitToUser(user.id, SOCKET_EVENT, {
-        message,
-        alertLevel,
-        projection: {
-          walletLibre,
-          gastoPromediodiario: Math.round(dailyAvg),
-          diasRestantes: Math.ceil(diasRestantes),
-          diasHastaPago,
-        },
-        action: 'review_spending',
-      })
-
-      // Enviar Push Notification
+      // Enviar Push Notification — el evento 'alert:spending_projection' que
+      // esto emitía por Socket.io antes no tiene ningún listener en el
+      // frontend (ningún nombre de evento registrado lo reconoce), así que
+      // nunca llegaba a mostrarse; se quitó para no dejar código muerto.
       await sendPushToUser(user.id, {
         title: alertLevel === 'urgent' ? '🔴 Alerta de fondos' : alertLevel === 'caution' ? '🟡 Precaución' : '📈 Patrón detectado',
         body: message,

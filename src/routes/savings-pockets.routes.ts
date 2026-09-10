@@ -4,9 +4,18 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
+import type { SavingsPocket } from '@prisma/client'
 
 const router = Router()
 router.use(authMiddleware)
+
+// `meta`/`montoActual` son Decimal de Prisma — serializan como STRING en JSON.
+// Sin este cast, sumar dos bolsillos en el frontend con `+` hace concatenación
+// de texto en vez de suma numérica (ver obligaciones/page.tsx, "Usar Ahorros"),
+// inflando cualquier total calculado del lado del cliente.
+function serializePocket(p: SavingsPocket) {
+  return { ...p, meta: Number(p.meta), montoActual: Number(p.montoActual) }
+}
 
 // ─── Schemas de validación ────────────────────────────────────────────────────
 
@@ -54,7 +63,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       orderBy: { createdAt: 'asc' },
     })
 
-    res.json({ pockets })
+    res.json({ pockets: pockets.map(serializePocket) })
   } catch (error) {
     console.error('[GetSavingsPockets]', error)
     res.status(500).json({ error: 'Error al obtener bolsillos de ahorro' })
@@ -72,7 +81,7 @@ router.post('/', validate(createPocketSchema), async (req: Request, res: Respons
       data: { userId, nombre, meta, montoActual, color, icono },
     })
 
-    res.status(201).json({ pocket })
+    res.status(201).json({ pocket: serializePocket(pocket) })
   } catch (error) {
     console.error('[CreateSavingsPocket]', error)
     res.status(500).json({ error: 'Error al crear bolsillo de ahorro' })
@@ -127,7 +136,7 @@ router.patch('/:id', validate(updatePocketSchema), async (req: Request, res: Res
       data: req.body,
     })
 
-    res.json({ pocket })
+    res.json({ pocket: serializePocket(pocket) })
   } catch (error) {
     console.error('[UpdateSavingsPocket]', error)
     res.status(500).json({ error: 'Error al actualizar bolsillo de ahorro' })
@@ -171,7 +180,7 @@ router.post('/:id/deposit', validate(pocketTxSchema), async (req: Request, res: 
       prisma.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'ahorro' } }),
     ])
 
-    res.json({ pocket: updatedPocket })
+    res.json({ pocket: serializePocket(updatedPocket) })
   } catch (error) {
     console.error('[DepositSavingsPocket]', error)
     res.status(500).json({ error: 'Error al aportar al bolsillo' })
@@ -207,7 +216,7 @@ router.post('/:id/withdraw', validate(pocketTxSchema), async (req: Request, res:
       prisma.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'retiro' } }),
     ])
 
-    res.json({ pocket: updatedPocket })
+    res.json({ pocket: serializePocket(updatedPocket) })
   } catch (error) {
     console.error('[WithdrawSavingsPocket]', error)
     res.status(500).json({ error: 'Error al retirar del bolsillo' })
