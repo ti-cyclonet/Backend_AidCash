@@ -6,6 +6,9 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { recordMissionAction } from '../lib/missions.js'
 import { getPeriodo } from '../lib/period.js'
+import { planPocketCredit } from '../lib/wallet.js'
+import { buildInstallmentRevertOps } from '../lib/installments.js'
+import type { Prisma } from '@prisma/client'
 
 const router = Router()
 router.use(authMiddleware)
@@ -186,7 +189,33 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
       return
     }
 
-    await prisma.impulseExpense.delete({ where: { id } })
+    // Revertir el gasto por completo, no solo borrar la fila — antes esto
+    // dejaba el saldo de la tarjeta (o el bolsillo "libre") desincronizado
+    // para siempre, sin ninguna forma de volver al estado previo.
+    const ops: Prisma.PrismaPromise<unknown>[] = [
+      prisma.impulseExpense.delete({ where: { id } }),
+    ]
+
+    if (existing.tarjetaId && existing.installmentId) {
+      // Se pagó con tarjeta: revertir el plan de cuotas que generó. Si ya se
+      // le habían hecho abonos reales a ESE plan (pagando la cuota de la
+      // tarjeta después de la compra), buildInstallmentRevertOps le devuelve
+      // esa plata a la billetera en vez de restarla dos veces del saldo —
+      // antes esto siempre restaba el monto ORIGINAL completo sin mirar si
+      // ya se había abonado algo, lo que dejaba el saldo de la tarjeta mal
+      // calculado en ese caso.
+      ops.push(...(await buildInstallmentRevertOps(userId, [existing.installmentId])))
+    } else {
+      // Se pagó en efectivo del bolsillo "libre" al crearlo (ver POST /,
+      // rama sin tarjetaId en el frontend) — devolver ese monto.
+      ops.push(prisma.user.update({
+        where: { id: userId },
+        data: planPocketCredit('libre', Number(existing.monto)),
+      }))
+    }
+
+    await prisma.$transaction(ops)
+
     res.json({ message: 'Gasto hormiga eliminado' })
   } catch (error) {
     console.error('[DeleteImpulse]', error)

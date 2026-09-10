@@ -34,6 +34,10 @@ model User {
   // Misiones — XP acumulado por misiones reclamadas, y boost temporal (x2 XP) activo
   xpFromMissions        Int      @default(0) @map("xp_from_missions")
   xpBoostExpiresAt      DateTime? @map("xp_boost_expires_at")
+  // XP acumulado por ser regado por amigos/pareja/familia (ver POST
+  // /connections/:id/water) — a diferencia de la salud (0-100%, un "mood"),
+  // esto suma directo al XP real del árbol (ver calculateGardenXP).
+  xpFromWatering        Int      @default(0) @map("xp_from_watering")
   cashBalance           Decimal  @default(0) @map("cash_balance") @db.Decimal(12, 2)
   // Wallet — saldo real distribuido en 4 bolsillos
   walletAhorro          Decimal  @default(0) @map("wallet_ahorro") @db.Decimal(12, 2)
@@ -133,6 +137,15 @@ model Debt {
   // Categoría de presupuesto a la que pertenece esta deuda — para que sus
   // pagos cuenten como consumo de esa categoría (ver computeCategorySpend).
   budgetCategoryId  String?    @map("budget_category_id")
+  // Deuda compartida (Social > Deudas, solo pareja/familia) — la deuda sigue
+  // perteneciendo por completo a `userId` (mismos pagos/undo-pay/amortización
+  // de siempre, sin tabla de conciliación ni aprobación). Estos campos son
+  // puramente informativos: se escriben una vez al crear y nunca se
+  // recalculan con los pagos posteriores.
+  esCompartida        Boolean  @default(false) @map("es_compartida")
+  connectionId        String?  @map("connection_id")
+  montoParticipanteA  Decimal? @map("monto_participante_a") @db.Decimal(12, 2)
+  montoParticipanteB  Decimal? @map("monto_participante_b") @db.Decimal(12, 2)
   createdAt         DateTime   @default(now()) @map("created_at")
   updatedAt         DateTime   @updatedAt @map("updated_at")
 
@@ -140,6 +153,7 @@ model Debt {
   coOwner          User?         @relation("DebtCoOwner", fields: [coOwnerId], references: [id], onDelete: SetNull)
   bankEntity       BankEntity?   @relation(fields: [bankEntityId], references: [id], onDelete: SetNull)
   budgetCategory   BudgetCategory? @relation(fields: [budgetCategoryId], references: [id], onDelete: SetNull)
+  connection       Connection?     @relation(fields: [connectionId], references: [id], onDelete: SetNull)
   payments         DebtPayment[]
   gastosVinculados FixedExpense[] @relation("TarjetaVinculada")
   cardInstallments DebtCardInstallment[] @relation("TarjetaInstallments")
@@ -155,16 +169,22 @@ model Debt {
 // ─── Planes de cuotas cargados a una tarjeta (pay-with-card) ──────────────────
 // Cada compra/pago diferido a cuotas queda como una fila acá en vez de mutar
 // Debt.cuotaPeriodo directamente. La cuota EFECTIVA de la tarjeta se calcula en
-// el momento (GET /debts) sumando solo los planes cuyos meses transcurridos
-// desde createdAt sean menores a cuotasTotal — mismo patrón "periodo, sin cron"
-// que el resto de la app: cuando un plan termina, deja de sumar solo, sin que
-// nada tenga que borrarlo ni resetearlo.
-
+// el momento (GET /debts) sumando solo los planes que TODAVÍA no se han pagado
+// por completo (montoAbonado < cuotaMensual * cuotasTotal) — antes este corte
+// era por tiempo transcurrido (meses desde createdAt), lo que hacía que una
+// compra a cuotas dejara de exigirse sola una vez pasaba su plazo nominal
+// AUNQUE el usuario nunca hubiera pagado nada de ella: el saldo real seguía
+// debiéndose (saldoRestante nunca miente) pero la cuota sugerida la "olvidaba"
+// en silencio. Ahora solo deja de sumar cuando de verdad está saldada.
 model DebtCardInstallment {
   id           String   @id @default(uuid())
   tarjetaId    String   @map("tarjeta_id")
   cuotaMensual Decimal  @map("cuota_mensual") @db.Decimal(12, 2)
   cuotasTotal  Int      @map("cuotas_total")
+  // Cuánto se ha abonado a ESTE plan específico via pagos reales a la tarjeta
+  // (ver allocateCardPayment en lib/installments.ts) — el plan deja de sumar
+  // a la cuota efectiva solo cuando este valor alcanza cuotaMensual * cuotasTotal.
+  montoAbonado Decimal  @default(0) @map("monto_abonado") @db.Decimal(12, 2)
   descripcion  String?
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -172,9 +192,31 @@ model DebtCardInstallment {
   debtPayments         DebtPayment[]
   fixedExpensePayments FixedExpensePayment[]
   impulseExpenses      ImpulseExpense[]
+  allocations          DebtPaymentAllocation[]
 
   @@index([tarjetaId])
   @@map("debt_card_installments")
+}
+
+// ─── Asignación de un pago de tarjeta a un plan de cuotas específico ─────────
+// Cuando se paga la cuota de la propia tarjeta, ese abono se reparte entre los
+// planes de cuotas vigentes (más antiguos primero) — esta tabla registra
+// exactamente cuánto de CADA pago fue a CADA plan, para poder revertirlo con
+// precisión si el pago se deshace (undo-pay) o si el plan se borra por
+// completo (se deshizo/eliminó la compra que lo originó).
+model DebtPaymentAllocation {
+  id            String   @id @default(uuid())
+  debtPaymentId String   @map("debt_payment_id")
+  installmentId String   @map("installment_id")
+  monto         Decimal  @db.Decimal(12, 2)
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  debtPayment DebtPayment         @relation(fields: [debtPaymentId], references: [id], onDelete: Cascade)
+  installment DebtCardInstallment @relation(fields: [installmentId], references: [id], onDelete: Cascade)
+
+  @@index([debtPaymentId])
+  @@index([installmentId])
+  @@map("debt_payment_allocations")
 }
 
 // ─── Historial de pagos de deuda (amortización) ───────────────────────────────
@@ -198,6 +240,7 @@ model DebtPayment {
   debt        Debt                 @relation(fields: [debtId], references: [id], onDelete: Cascade)
   tarjeta     Debt?                @relation("DebtPaymentCard", fields: [tarjetaId], references: [id], onDelete: SetNull)
   installment DebtCardInstallment? @relation(fields: [installmentId], references: [id], onDelete: SetNull)
+  allocations DebtPaymentAllocation[]
 
   @@map("debt_payments")
 }
@@ -577,6 +620,7 @@ model Connection {
 
   requester User @relation("ConnectionRequester", fields: [requesterId], references: [id], onDelete: Cascade)
   addressee User @relation("ConnectionAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
+  sharedDebts Debt[]
 
   @@unique([requesterId, addresseeId])
   @@map("connections")

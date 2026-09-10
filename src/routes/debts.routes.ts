@@ -3,87 +3,14 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
-import { sendPushToUser } from '../lib/push.js'
 import { checkLimit, attachUsageWarning } from '../middleware/limit-enforcement.js'
-import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
+import { recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
-import { planPocketDeduction } from '../lib/wallet.js'
+import { cuotaEfectivaTarjeta, reverseCardPaymentAllocations, buildInstallmentRevertOps } from '../lib/installments.js'
+import { debtPeriodo, computePeriodStatus, calcularPagoDeuda } from '../lib/debt-calc.js'
+import { payDebtServer } from '../lib/debt-payments.js'
 import { randomUUID } from 'crypto'
-import type { DebtPayment, DebtCardInstallment, Prisma } from '@prisma/client'
-
-// ─── Estado derivado por periodo ────────────────────────────────────────────────
-// pagadoEstePeriodo/montoPagadoEstePeriodo ya no son columnas: se calculan sumando
-// los DebtPayment cuyo `periodo` coincide con el periodo actual de la deuda. Así,
-// al cruzar a un periodo nuevo (quincena/mes siguiente) el monto vuelve a $0 solo,
-// sin necesitar un cron que resetee nada.
-//
-// La frontera Q1/Q2 de una deuda QUINCENAL usa sus PROPIOS `diasPago` (ej. "5,28"
-// — las dos fechas reales en que se cobra ESA deuda), no los días de pago del
-// sueldo del usuario: son dos ciclos distintos (cuándo te pagan a ti vs. cuándo
-// te cobran a ti esta deuda en particular) que pueden no coincidir en absoluto.
-function debtPeriodo(debt: { frecuenciaPago: string; diasPago: string }, now: Date = new Date()): string {
-  if (debt.frecuenciaPago !== 'quincenal') return getPeriodo('mensual', [], now)
-  return getPeriodo('quincenal', parseDiasPago(debt.diasPago), now)
-}
-
-interface DebtPeriodStatus {
-  periodo: string
-  montoPagadoEstePeriodo: number
-  interesPagadoEstePeriodo: number
-  /** Saldo justo antes del primer pago del periodo actual — base para calcular el interés del periodo completo */
-  saldoAlIniciarPeriodo: number
-}
-
-function computePeriodStatus(payments: DebtPayment[], periodo: string, saldoActualFallback: number): DebtPeriodStatus {
-  const own = payments.filter(p => p.periodo === periodo).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
-  const montoPagadoEstePeriodo = own.reduce((s, p) => s + Number(p.montoPagado), 0)
-  const interesPagadoEstePeriodo = own.reduce((s, p) => s + Number(p.pagoInteres), 0)
-  const saldoAlIniciarPeriodo = own.length > 0 ? Number(own[0].saldoAnterior) : saldoActualFallback
-  return { periodo, montoPagadoEstePeriodo, interesPagadoEstePeriodo, saldoAlIniciarPeriodo }
-}
-
-interface PagoDeudaResult {
-  pagoInteres: number
-  abonoCapital: number
-  nuevoSaldo: number
-  nuevoEstado: 'activa' | 'saldada'
-}
-
-/**
- * Calcula cómo se divide un pago de deuda entre interés y abono a capital —
- * usada tanto por /pay como por /pay-with-card, para que pagar con tarjeta NO
- * se salte el interés real de la deuda que se está pagando (el costo financiero
- * de esa deuda no depende de cómo se pagó, solo de su saldo y tasa).
- */
-function calcularPagoDeuda(currentSaldo: number, tasaMensual: number | null, status: DebtPeriodStatus, montoPago: number): PagoDeudaResult {
-  const interesTotalPeriodo = tasaMensual && tasaMensual > 0
-    ? Math.round(status.saldoAlIniciarPeriodo * (tasaMensual / 100) * 100) / 100
-    : 0
-  const interesRestante = Math.max(0, Math.round((interesTotalPeriodo - status.interesPagadoEstePeriodo) * 100) / 100)
-  // El interés de este pago nunca puede superar ni el efectivo pagado ni lo que falta del periodo.
-  const pagoInteres = Math.min(montoPago, interesRestante)
-  const abonoCapital = Math.round((montoPago - pagoInteres) * 100) / 100
-  const nuevoSaldo = Math.max(0, Math.round((currentSaldo - abonoCapital) * 100) / 100)
-  const nuevoEstado: 'activa' | 'saldada' = nuevoSaldo <= 0 ? 'saldada' : 'activa'
-  return { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado }
-}
-
-/** Meses de calendario completos entre dos fechas (ignora el día del mes). */
-function mesesTranscurridos(desde: Date, hasta: Date): number {
-  return (hasta.getFullYear() - desde.getFullYear()) * 12 + (hasta.getMonth() - desde.getMonth())
-}
-
-/**
- * Cuota efectiva de una tarjeta: la cuota base (la que el usuario definió al
- * crear/editar la tarjeta) más los planes de cuotas de pay-with-card que siguen
- * vigentes. Un plan deja de sumar solo, sin cron ni que nadie lo borre, cuando
- * ya pasaron sus `cuotasTotal` meses — mismo patrón "periodo" del resto de la app.
- */
-function cuotaEfectivaTarjeta(cuotaBase: number, installments: DebtCardInstallment[], now: Date = new Date()): number {
-  const activos = installments.filter(p => mesesTranscurridos(p.createdAt, now) < p.cuotasTotal)
-  const sumaActivos = activos.reduce((s, p) => s + Number(p.cuotaMensual), 0)
-  return Math.round((cuotaBase + sumaActivos) * 100) / 100
-}
+import type { DebtCardInstallment, DebtPayment, Prisma } from '@prisma/client'
 
 const router = Router()
 router.use(authMiddleware)
@@ -108,6 +35,13 @@ const createDebtSchema = z.object({
   // handler de POST / más abajo.
   yaPagoEstePeriodo: z.boolean().optional(),
   budgetCategoryId: z.string().uuid().nullable().optional(),
+  // Deuda compartida (Social > Deudas, solo pareja/familia) — validados abajo
+  // en el handler: si esCompartida es true, connectionId y los dos montos son
+  // requeridos y deben sumar exactamente montoTotal.
+  esCompartida: z.boolean().optional(),
+  connectionId: z.string().uuid().optional(),
+  montoParticipanteA: z.number().min(0).optional(),
+  montoParticipanteB: z.number().min(0).optional(),
 })
 
 const updateDebtSchema = z.object({
@@ -166,6 +100,24 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       installmentsByTarjeta.set(p.tarjetaId, arr)
     }
 
+    // Nombre del participante B para las deudas compartidas — normalmente muy
+    // pocas por usuario, se resuelve en una sola query aparte en vez de un
+    // include general en el findMany de arriba (que no lo necesita casi nunca).
+    const compartidaIds = debts.filter(d => d.esCompartida && d.connectionId).map(d => d.connectionId as string)
+    const connections = compartidaIds.length > 0
+      ? await prisma.connection.findMany({
+          where: { id: { in: compartidaIds } },
+          include: { requester: { select: { nombre: true } }, addressee: { select: { nombre: true } } },
+        })
+      : []
+    const peerNameByConnection = new Map<string, string>()
+    for (const c of connections) {
+      // El dueño de la deuda (userId) es siempre requester o addressee — el
+      // "participante B" es la otra persona de esa misma conexión.
+      const peerName = c.requesterId === userId ? c.addressee.nombre : c.requester.nombre
+      peerNameByConnection.set(c.id, peerName)
+    }
+
     res.json({
       debts: debts.map(d => {
         const periodo = debtPeriodo(d)
@@ -181,6 +133,9 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           tasaInteres: d.tasaInteres ? Number(d.tasaInteres) : null,
           pagadoEstePeriodo: status.montoPagadoEstePeriodo >= cuotaPeriodo,
           montoPagadoEstePeriodo: status.montoPagadoEstePeriodo > 0 ? status.montoPagadoEstePeriodo : null,
+          montoParticipanteA: d.montoParticipanteA ? Number(d.montoParticipanteA) : null,
+          montoParticipanteB: d.montoParticipanteB ? Number(d.montoParticipanteB) : null,
+          nombreParticipanteB: d.connectionId ? peerNameByConnection.get(d.connectionId) ?? null : null,
         }
       }),
     })
@@ -190,12 +145,108 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
+// ─── GET /debts/shared — Deudas compartidas visibles en Social > Deudas ───────
+// Visible para AMBOS lados de la conexión: el dueño (userId) y su pareja/
+// familiar — es solo informativa, ninguno de los dos paga desde acá.
+
+router.get('/shared', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+
+    const debts = await prisma.debt.findMany({
+      where: {
+        esCompartida: true,
+        OR: [
+          { userId },
+          { connection: { OR: [{ requesterId: userId }, { addresseeId: userId }] } },
+        ],
+      },
+      include: {
+        user: { select: { nombre: true } },
+        connection: {
+          select: {
+            role: true,
+            requesterId: true,
+            addresseeId: true,
+            requester: { select: { nombre: true } },
+            addressee: { select: { nombre: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    res.json({
+      debts: debts.filter(d => d.connection).map(d => {
+        const conn = d.connection!
+        const isOwner = d.userId === userId
+        const otherName = conn.requesterId === d.userId ? conn.addressee.nombre : conn.requester.nombre
+        return {
+          id: d.id,
+          nombre: d.nombre,
+          montoTotal: Number(d.montoTotal),
+          tipoDeuda: d.tipoDeuda,
+          tasaInteres: d.tasaInteres ? Number(d.tasaInteres) : null,
+          estado: d.estado,
+          connectionRole: conn.role,
+          isOwner,
+          ownerName: d.user.nombre,
+          peerName: otherName,
+          // Monto de cada uno, siempre relativo a quién es dueño de la deuda —
+          // montoParticipanteA es el del dueño, montoParticipanteB el del peer.
+          ownerShare: Number(d.montoParticipanteA ?? 0),
+          peerShare: Number(d.montoParticipanteB ?? 0),
+          myShare: isOwner ? Number(d.montoParticipanteA ?? 0) : Number(d.montoParticipanteB ?? 0),
+          createdAt: d.createdAt,
+        }
+      }),
+    })
+  } catch (error) {
+    console.error('[GetSharedDebts]', error)
+    res.status(500).json({ error: 'Error al obtener deudas compartidas' })
+  }
+})
+
 // ─── POST /debts ──────────────────────────────────────────────────────────────
 
 router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda, yaPagoEstePeriodo, budgetCategoryId } = req.body
+    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda, yaPagoEstePeriodo, budgetCategoryId, esCompartida, connectionId, montoParticipanteA, montoParticipanteB } = req.body
+
+    // Deuda compartida — la deuda sigue siendo 100% de `userId` (mismos pagos
+    // de siempre); connectionId + los dos montos son solo informativos para
+    // mostrar "compartida con X" en Obligaciones y en Social > Deudas.
+    let compartidaData: {
+      esCompartida: boolean
+      connectionId: string | null
+      montoParticipanteA: number | null
+      montoParticipanteB: number | null
+    } = { esCompartida: false, connectionId: null, montoParticipanteA: null, montoParticipanteB: null }
+
+    if (esCompartida) {
+      if (!connectionId || montoParticipanteA == null || montoParticipanteB == null) {
+        res.status(400).json({ error: 'Falta la conexión o los montos de cada participante' })
+        return
+      }
+      const conn = await prisma.connection.findFirst({
+        where: {
+          id: connectionId,
+          status: 'ACCEPTED',
+          role: { in: ['PARTNER', 'FAMILY'] },
+          OR: [{ requesterId: userId }, { addresseeId: userId }],
+        },
+      })
+      if (!conn) {
+        res.status(400).json({ error: 'La conexión debe ser una pareja o familiar aceptado' })
+        return
+      }
+      if (Math.abs(montoParticipanteA + montoParticipanteB - montoTotal) > 0.01) {
+        res.status(400).json({ error: 'La suma de los dos montos debe ser igual al monto total' })
+        return
+      }
+      compartidaData = { esCompartida: true, connectionId, montoParticipanteA, montoParticipanteB }
+    }
 
     const debtData = {
       userId,
@@ -216,6 +267,7 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
       fechaInicio: new Date(),
       bankEntityId: bankEntityId || null,
       budgetCategoryId: budgetCategoryId || null,
+      ...compartidaData,
     }
 
     // Si el usuario confirma que la cuota de este periodo ya está pagada (la
@@ -253,6 +305,8 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
         pagadoEstePeriodo: !!yaPagoEstePeriodo,
         montoPagadoEstePeriodo: yaPagoEstePeriodo ? Number(cuotaPeriodo) : null,
+        montoParticipanteA: debt.montoParticipanteA ? Number(debt.montoParticipanteA) : null,
+        montoParticipanteB: debt.montoParticipanteB ? Number(debt.montoParticipanteB) : null,
       },
     })
   } catch (error) {
@@ -272,92 +326,13 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
     const userId = req.user!.userId
     const id = req.params.id as string
 
-    const existing = await prisma.debt.findFirst({ where: { id, userId, estado: 'activa' } })
-    if (!existing) {
+    const result = await payDebtServer(userId, id, req.body.monto)
+    if (!result) {
       res.status(404).json({ error: 'Deuda activa no encontrada' })
       return
     }
 
-    const montoPago = req.body.monto ?? Number(existing.cuotaPeriodo)
-    const currentSaldo = Number(existing.saldoRestante)
-
-    // Obtener la tasa de interés aplicada (prioridad: tasaInteresAplicada > tasaInteres)
-    const tasaMensual = existing.tasaInteresAplicada
-      ? Number(existing.tasaInteresAplicada)
-      : existing.tasaInteres
-        ? Number(existing.tasaInteres)
-        : null
-
-    // Periodo actual de esta deuda + pagos ya registrados en ese periodo.
-    const periodo = debtPeriodo(existing)
-    const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId: id, periodo } })
-    const status = computePeriodStatus(paymentsThisPeriod, periodo, currentSaldo)
-
-    // Interés calculado UNA SOLA VEZ por periodo, sobre el saldo con que arrancó
-    // el periodo — así, partir un pago en abonos parciales no cuesta más interés
-    // total que pagarlo de una sola vez.
-    const { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaMensual, status, montoPago)
-
-    const totalPaidThisPeriod = status.montoPagadoEstePeriodo + montoPago
-    const cuotaCubierta = totalPaidThisPeriod >= Number(existing.cuotaPeriodo)
-
-    // El descuento de billetera va en la MISMA transacción que el pago — antes
-    // era una segunda llamada HTTP aparte (userApi.walletDeduct) que si fallaba
-    // dejaba la deuda "pagada" sin que el saldo disponible bajara.
-    const walletDeductionData = planPocketDeduction('obligaciones', montoPago)
-
-    const [debt, payment] = await prisma.$transaction([
-      prisma.debt.update({
-        where: { id },
-        data: { saldoRestante: nuevoSaldo, estado: nuevoEstado },
-      }),
-      prisma.debtPayment.create({
-        data: {
-          debtId: id,
-          montoPagado: montoPago,
-          abonoCapital,
-          pagoInteres,
-          saldoAnterior: currentSaldo,
-          saldoPosterior: nuevoSaldo,
-          periodo,
-        },
-      }),
-      prisma.user.update({ where: { id: userId }, data: walletDeductionData }),
-    ])
-
-    await recordMissionAction(userId, 'pagar_obligacion')
-
-    res.json({
-      debt: {
-        ...debt,
-        montoTotal: Number(debt.montoTotal),
-        saldoRestante: Number(debt.saldoRestante),
-        cuotaPeriodo: Number(debt.cuotaPeriodo),
-        pagadoEstePeriodo: cuotaCubierta,
-        montoPagadoEstePeriodo: totalPaidThisPeriod > 0 ? totalPaidThisPeriod : null,
-        tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
-      },
-      amortizacion: {
-        montoPagado: montoPago,
-        pagoInteres,
-        abonoCapital,
-      },
-      pagado: montoPago,
-      saldoAnterior: currentSaldo,
-      saldoNuevo: nuevoSaldo,
-      liquidada: nuevoEstado === 'saldada',
-    })
-
-    // Push notification de pago realizado
-    const debtName = existing.nombre
-    sendPushToUser(userId, {
-      title: nuevoEstado === 'saldada' ? '🎉 ¡Deuda liquidada!' : '✅ Pago registrado',
-      body: nuevoEstado === 'saldada'
-        ? `¡Felicidades! Terminaste de pagar "${debtName}".`
-        : `Pagaste $${montoPago.toLocaleString('es-CO')} de "${debtName}". Saldo restante: $${nuevoSaldo.toLocaleString('es-CO')}`,
-      tag: 'debt-payment',
-      url: '/obligaciones',
-    }).catch(() => {})
+    res.json(result)
   } catch (error) {
     console.error('[PayDebt]', error)
     res.status(500).json({ error: 'Error al registrar pago' })
@@ -406,10 +381,8 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
     const cardPayments = payments.filter(p => p.tarjetaId)
     const montoDevolver = cashPayments.reduce((sum, p) => sum + Number(p.montoPagado), 0)
 
-    const montoPorTarjeta = new Map<string, number>()
     const installmentIds = new Set<string>()
     for (const p of cardPayments) {
-      montoPorTarjeta.set(p.tarjetaId!, (montoPorTarjeta.get(p.tarjetaId!) ?? 0) + Number(p.montoPagado))
       if (p.installmentId) installmentIds.add(p.installmentId)
     }
 
@@ -431,17 +404,21 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
         },
       }))
     }
-    for (const [tarjetaId, monto] of montoPorTarjeta) {
-      ops.push(prisma.debt.update({
-        where: { id: tarjetaId },
-        data: {
-          saldoRestante: { decrement: monto },
-          saldoPrincipal: { decrement: monto },
-        },
-      }))
-    }
-    if (installmentIds.size > 0) {
-      ops.push(prisma.debtCardInstallment.deleteMany({ where: { id: { in: [...installmentIds] } } }))
+    // Los pagos de OTRA(s) tarjeta(s) que financiaron esta deuda se revierten
+    // por completo: le devuelven a esa tarjeta lo que aún no se había pagado
+    // de su plan y acreditan a la billetera lo que sí se había abonado ya
+    // (ver buildInstallmentRevertOps) — antes solo restaba `montoPagado` sin
+    // mirar si ya se le había abonado algo al plan, lo que podía dejar el
+    // saldo de esa tarjeta mal calculado.
+    ops.push(...(await buildInstallmentRevertOps(userId, [...installmentIds])))
+    // Si `existing` es la propia tarjeta, los pagos en efectivo que se están
+    // deshaciendo (cashPayments) son pagos que ELLA MISMA repartió entre sus
+    // planes de cuotas vigentes al registrarse — hay que devolverles ese
+    // montoAbonado antes de borrar los DebtPayment (una vez borrados, la
+    // asignación se va en cascada pero ya no se puede reconstruir cuánto
+    // corresponde a cada plan).
+    if (existing.tipoDeuda === 'TARJETA_CREDITO') {
+      ops.push(...(await reverseCardPaymentAllocations(cashPayments.map(p => p.id))))
     }
     // Eliminar registros de pago del periodo (historial de amortización)
     ops.push(prisma.debtPayment.deleteMany({ where: { debtId: id, periodo } }))
@@ -460,19 +437,31 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
       },
     })
 
+    // Si `existing` es una tarjeta, deshacer un pago pudo haber revivido
+    // planes de cuotas que ya estaban saldados (se les devolvió su
+    // montoAbonado) — recalcular la cuota efectiva para la respuesta, si no
+    // el frontend se queda mostrando la cuota vieja (más baja de lo real)
+    // hasta el próximo refetch completo.
+    const cuotaPeriodoRespuesta = debt.tipoDeuda === 'TARJETA_CREDITO'
+      ? cuotaEfectivaTarjeta(Number(debt.cuotaPeriodo), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: id } }))
+      : Number(debt.cuotaPeriodo)
+
     res.json({
       debt: {
         ...debt,
         montoTotal: Number(debt.montoTotal),
         saldoRestante: Number(debt.saldoRestante),
-        cuotaPeriodo: Number(debt.cuotaPeriodo),
+        cuotaPeriodo: cuotaPeriodoRespuesta,
         pagadoEstePeriodo: false,
         montoPagadoEstePeriodo: null,
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
       },
       montoDevuelto: montoDevolver,
-      revertidoDeTarjeta: montoPorTarjeta.size > 0
-        ? [...montoPorTarjeta.entries()].map(([tarjetaId, monto]) => ({ tarjetaId, monto }))
+      // El frontend solo usa esto como señal de "refresca todo" (la tarjeta
+      // que financió este pago quedó con su saldo/cuota desactualizados en su
+      // propia card hasta el próximo fetch) — no necesita el detalle exacto.
+      revertidoDeTarjeta: cardPayments.length > 0
+        ? [...new Set(cardPayments.map(p => p.tarjetaId!))].map(tarjetaId => ({ tarjetaId }))
         : null,
       wallet: {
         cashBalance: Number(user?.cashBalance ?? 0),

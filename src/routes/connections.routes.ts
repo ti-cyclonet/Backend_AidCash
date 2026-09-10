@@ -479,8 +479,9 @@ router.post('/:id/role-respond', validate(roleRespondSchema), async (req: Reques
 })
 
 // ─── GET /connections/friends-garden — Racha entre amigos + Jardines vecinos ──
-// Solo conexiones role=FRIEND (nunca PARTNER/FAMILY — regla de diseño: estas
-// secciones nunca muestran montos de dinero, solo racha y salud del jardín).
+// Cualquier conexión ACEPTADA (amigo, pareja o familia) — estas secciones
+// nunca muestran montos de dinero, solo racha y salud del jardín, así que no
+// hay razón para restringirlas por tipo de vínculo.
 
 router.get('/friends-garden', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -490,7 +491,6 @@ router.get('/friends-garden', async (req: Request, res: Response): Promise<void>
     const friendConnections = await prisma.connection.findMany({
       where: {
         status: 'ACCEPTED',
-        role: 'FRIEND',
         OR: [{ requesterId: userId }, { addresseeId: userId }],
       },
       include: {
@@ -545,9 +545,19 @@ router.get('/friends-garden', async (req: Request, res: Response): Promise<void>
   }
 })
 
-// ─── POST /connections/:id/water — Regar el jardín de un amigo ───────────────
+// ─── POST /connections/:id/water — Regar el jardín de un amigo/pareja/familia ─
 // Máximo 1 vez por conexión por día — validado acá, no solo deshabilitando el
-// botón en el cliente.
+// botón en el cliente. A diferencia de antes, esto ahora sí afecta el árbol
+// de verdad: suma un bono de XP real (no solo la animación de celebración).
+
+// 1 XP la mayoría de las veces, 2 seguido, 3 (el máximo) rara vez — "varía
+// pero el más fuerte es 3", como pidió el usuario.
+function randomWaterXp(): number {
+  const roll = Math.random() * 100
+  if (roll < 15) return 3
+  if (roll < 45) return 2
+  return 1
+}
 
 router.post('/:id/water', async (req: Request, res: Response): Promise<void> => {
   try {
@@ -555,10 +565,10 @@ router.post('/:id/water', async (req: Request, res: Response): Promise<void> => 
     const id = req.params.id as string
 
     const conn = await prisma.connection.findFirst({
-      where: { id, status: 'ACCEPTED', role: 'FRIEND', OR: [{ requesterId: userId }, { addresseeId: userId }] },
+      where: { id, status: 'ACCEPTED', OR: [{ requesterId: userId }, { addresseeId: userId }] },
     })
     if (!conn) {
-      res.status(404).json({ error: 'Conexión de amistad no encontrada' })
+      res.status(404).json({ error: 'Conexión no encontrada' })
       return
     }
 
@@ -573,13 +583,18 @@ router.post('/:id/water', async (req: Request, res: Response): Promise<void> => 
       return
     }
 
-    await prisma.gardenWatering.create({ data: { waterId: userId, targetUserId, periodo } })
+    const xpGiven = randomWaterXp()
 
-    const waterer = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
-    emitToUser(targetUserId, SOCKET_EVENTS.GARDEN_WATERED, { fromId: userId, fromName: waterer?.nombre ?? 'Un amigo' })
-    pushGardenWatered(targetUserId, waterer?.nombre ?? 'Un amigo')
+    const [, , waterer] = await prisma.$transaction([
+      prisma.gardenWatering.create({ data: { waterId: userId, targetUserId, periodo } }),
+      prisma.user.update({ where: { id: targetUserId }, data: { xpFromWatering: { increment: xpGiven } } }),
+      prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } }),
+    ])
 
-    res.status(201).json({ watered: true })
+    emitToUser(targetUserId, SOCKET_EVENTS.GARDEN_WATERED, { fromId: userId, fromName: waterer?.nombre ?? 'Alguien', xpGiven })
+    pushGardenWatered(targetUserId, waterer?.nombre ?? 'Alguien')
+
+    res.status(201).json({ watered: true, xpGiven })
   } catch (error) {
     console.error('[WaterGarden]', error)
     res.status(500).json({ error: 'Error al regar el jardín' })

@@ -31,6 +31,7 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
         streakMejor: true,
         streakUltimoCheck: true,
         xpFromMissions: true,
+        xpFromWatering: true,
       },
     })
 
@@ -47,6 +48,7 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
       },
       badges,
       xpFromMissions: user?.xpFromMissions ?? 0,
+      xpFromWatering: user?.xpFromWatering ?? 0,
     })
   } catch (error) {
     console.error('[GetGamification]', error)
