@@ -92,6 +92,32 @@ export function getPeriodo(frecuencia: string, diasPago: number[] = [], now: Dat
   }
 }
 
+/**
+ * Periodo INMEDIATAMENTE SIGUIENTE al de `now` — para una obligación recién
+ * creada que el usuario marca como "nueva, empieza el próximo periodo" (ver
+ * FixedExpense.activoDesdePeriodo). Avanza la fecha lo suficiente para caer
+ * con certeza en el siguiente periodo de esa frecuencia y calcula el string
+ * de periodo desde ahí, en vez de repetir a mano la lógica de cada caso.
+ */
+export function getNextPeriodo(frecuencia: string, diasPago: number[] = [], now: Date = new Date()): string {
+  switch (frecuencia) {
+    case 'quincenal': {
+      const advanced = new Date(now)
+      advanced.setDate(advanced.getDate() + 16)
+      return getPeriodoQuincenal(diasPago, advanced)
+    }
+    case 'semanal': {
+      const advanced = new Date(now)
+      advanced.setDate(advanced.getDate() + 7)
+      return getPeriodoSemanal(advanced)
+    }
+    case 'anual':
+      return getPeriodoAnual(new Date(now.getFullYear() + 1, now.getMonth(), 1))
+    default:
+      return getPeriodoMensual(new Date(now.getFullYear(), now.getMonth() + 1, 1))
+  }
+}
+
 /** Cuántas semanas (lunes) empiezan dentro del mes de `now` — normalmente 4, a veces 5. */
 export function semanasQueEmpiezanEsteMes(now: Date = new Date()): number {
   const year = now.getFullYear()
