@@ -137,6 +137,11 @@ model Debt {
   // Categoría de presupuesto a la que pertenece esta deuda — para que sus
   // pagos cuenten como consumo de esa categoría (ver computeCategorySpend).
   budgetCategoryId  String?    @map("budget_category_id")
+  // Misma idea que FixedExpense.activoDesdePeriodo: si el usuario marcó al
+  // crear la deuda que es nueva y su primer cobro real es el próximo
+  // periodo, acá se guarda ese periodo — mientras el actual sea anterior,
+  // la deuda se muestra "Pendiente" en vez de "Vencida".
+  activoDesdePeriodo String?   @map("activo_desde_periodo")
   // Deuda compartida (Social > Deudas, solo pareja/familia) — la deuda sigue
   // perteneciendo por completo a `userId` (mismos pagos/undo-pay/amortización
   // de siempre, sin tabla de conciliación ni aprobación). Estos campos son

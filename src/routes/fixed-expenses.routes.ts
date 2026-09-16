@@ -5,7 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
-import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
+import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { buildInstallmentRevertOps } from '../lib/installments.js'
 import { fixedPeriodo, payFixedExpenseServer } from '../lib/fixed-expense-payments.js'
 import type { FixedExpensePayment, Prisma } from '@prisma/client'
@@ -15,13 +15,6 @@ import type { FixedExpensePayment, Prisma } from '@prisma/client'
 function fixedStatus(payments: FixedExpensePayment[], periodo: string): { montoPagadoEstePeriodo: number } {
   const total = payments.filter(p => p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
   return { montoPagadoEstePeriodo: total }
-}
-
-// Comparación de strings de periodo ("2026-10" > "2026-09", "2026-09-Q2" >
-// "2026-09-Q1") — mismo formato en todos los casos de getPeriodo, así que un
-// simple ">" lexicográfico basta sin necesito parsear cada variante.
-function esPendienteProximoPeriodo(activoDesdePeriodo: string | null, periodoActual: string): boolean {
-  return !!activoDesdePeriodo && activoDesdePeriodo > periodoActual
 }
 
 const router = Router()

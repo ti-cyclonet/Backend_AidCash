@@ -99,6 +99,17 @@ export function getPeriodo(frecuencia: string, diasPago: number[] = [], now: Dat
  * con certeza en el siguiente periodo de esa frecuencia y calcula el string
  * de periodo desde ahí, en vez de repetir a mano la lógica de cada caso.
  */
+/**
+ * Comparación de strings de periodo ("2026-10" > "2026-09", "2026-09-Q2" >
+ * "2026-09-Q1") — mismo formato de ancho fijo en todos los casos de
+ * getPeriodo, así que un simple ">" lexicográfico basta sin parsear cada
+ * variante. Usado por deudas y gastos fijos para decidir si una obligación
+ * marcada "nueva, empieza el próximo periodo" ya le llegó su periodo o no.
+ */
+export function esPendienteProximoPeriodo(activoDesdePeriodo: string | null | undefined, periodoActual: string): boolean {
+  return !!activoDesdePeriodo && activoDesdePeriodo > periodoActual
+}
+
 export function getNextPeriodo(frecuencia: string, diasPago: number[] = [], now: Date = new Date()): string {
   switch (frecuencia) {
     case 'quincenal': {
