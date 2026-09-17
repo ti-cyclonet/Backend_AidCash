@@ -5,7 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { checkLimit, attachUsageWarning } from '../middleware/limit-enforcement.js'
 import { recordOnboardingAction } from '../lib/missions.js'
-import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
+import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { cuotaEfectivaTarjeta, reverseCardPaymentAllocations, buildInstallmentRevertOps } from '../lib/installments.js'
 import { debtPeriodo, computePeriodStatus, calcularPagoDeuda } from '../lib/debt-calc.js'
 import { payDebtServer } from '../lib/debt-payments.js'
@@ -34,6 +34,10 @@ const createDebtSchema = z.object({
   // para que no salga "vencida" con una fecha que ya está resuelta — ver
   // handler de POST / más abajo.
   yaPagoEstePeriodo: z.boolean().optional(),
+  // Tercera opción del mismo prompt (ver fixed-expenses.routes.ts): la deuda
+  // es NUEVA y su primer cobro real es el próximo periodo — no pagada, no
+  // vencida. Mutuamente excluyente con yaPagoEstePeriodo.
+  nuevaProximoPeriodo: z.boolean().optional(),
   budgetCategoryId: z.string().uuid().nullable().optional(),
   // Deuda compartida (Social > Deudas, solo pareja/familia) — validados abajo
   // en el handler: si esCompartida es true, connectionId y los dos montos son
@@ -136,6 +140,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           montoParticipanteA: d.montoParticipanteA ? Number(d.montoParticipanteA) : null,
           montoParticipanteB: d.montoParticipanteB ? Number(d.montoParticipanteB) : null,
           nombreParticipanteB: d.connectionId ? peerNameByConnection.get(d.connectionId) ?? null : null,
+          pendienteProximoPeriodo: esPendienteProximoPeriodo(d.activoDesdePeriodo, periodo),
         }
       }),
     })
@@ -212,7 +217,8 @@ router.get('/shared', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda, yaPagoEstePeriodo, budgetCategoryId, esCompartida, connectionId, montoParticipanteA, montoParticipanteB } = req.body
+    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda, yaPagoEstePeriodo, nuevaProximoPeriodo, budgetCategoryId, esCompartida, connectionId, montoParticipanteA, montoParticipanteB } = req.body
+    const frecuenciaFinal = frecuenciaPago || 'mensual'
 
     // Deuda compartida — la deuda sigue siendo 100% de `userId` (mismos pagos
     // de siempre); connectionId + los dos montos son solo informativos para
@@ -258,7 +264,7 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
       montoInicial: montoTotal,
       cuotaPeriodo,
       acreedor: acreedor || '',
-      frecuenciaPago: frecuenciaPago || 'mensual',
+      frecuenciaPago: frecuenciaFinal,
       diasPago: diasPago || '1',
       tasaInteres: tasaInteres ?? null,
       tasaInteresAplicada: tasaInteres ?? null,
@@ -267,6 +273,11 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
       fechaInicio: new Date(),
       bankEntityId: bankEntityId || null,
       budgetCategoryId: budgetCategoryId || null,
+      // "Es una obligación nueva, inicia el próximo periodo" — ver misma nota
+      // en fixed-expenses.routes.ts. Mutuamente excluyente con yaPagoEstePeriodo.
+      activoDesdePeriodo: (nuevaProximoPeriodo && !yaPagoEstePeriodo)
+        ? getNextPeriodo(frecuenciaFinal, parseDiasPago(diasPago || '1'))
+        : null,
       ...compartidaData,
     }
 
@@ -307,6 +318,7 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
         montoPagadoEstePeriodo: yaPagoEstePeriodo ? Number(cuotaPeriodo) : null,
         montoParticipanteA: debt.montoParticipanteA ? Number(debt.montoParticipanteA) : null,
         montoParticipanteB: debt.montoParticipanteB ? Number(debt.montoParticipanteB) : null,
+        pendienteProximoPeriodo: esPendienteProximoPeriodo(debt.activoDesdePeriodo, debtPeriodo(debt)),
       },
     })
   } catch (error) {
@@ -513,6 +525,7 @@ router.patch('/:id', validate(updateDebtSchema), async (req: Request, res: Respo
         tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
         pagadoEstePeriodo: status.montoPagadoEstePeriodo >= Number(debt.cuotaPeriodo),
         montoPagadoEstePeriodo: status.montoPagadoEstePeriodo > 0 ? status.montoPagadoEstePeriodo : null,
+        pendienteProximoPeriodo: esPendienteProximoPeriodo(debt.activoDesdePeriodo, periodo),
       },
     })
   } catch (error) {

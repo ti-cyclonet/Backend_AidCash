@@ -5,7 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
-import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
+import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { buildInstallmentRevertOps } from '../lib/installments.js'
 import { fixedPeriodo, payFixedExpenseServer } from '../lib/fixed-expense-payments.js'
 import type { FixedExpensePayment, Prisma } from '@prisma/client'
@@ -35,6 +35,11 @@ const createSchema = z.object({
   // de Kiri, antes de registrar el gasto), sembramos un FixedExpensePayment
   // marcador — mismo patrón que en debts.routes.ts POST /debts.
   yaPagoEstePeriodo: z.boolean().optional(),
+  // Tercera opción del mismo prompt: la obligación es NUEVA y su primer cobro
+  // real es el próximo periodo (ej. "día de pago: 4" creada el día 15) — no
+  // pagada, no vencida, simplemente no aplica todavía. Mutuamente excluyente
+  // con yaPagoEstePeriodo (ver handler).
+  nuevaProximoPeriodo: z.boolean().optional(),
   // Antes faltaba acá — el formulario de creación ya deja elegir tarjeta,
   // pero el schema la descartaba silenciosamente y el gasto nacía sin vínculo.
   tarjetaVinculadaId: z.string().nullable().optional(),
@@ -86,6 +91,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           ...f,
           pagadoEstePeriodo: montoPagadoEstePeriodo >= montoPorPeriodo,
           montoPagadoEstePeriodo: montoPagadoEstePeriodo > 0 ? montoPagadoEstePeriodo : null,
+          pendienteProximoPeriodo: esPendienteProximoPeriodo(f.activoDesdePeriodo, periodo),
         }
       }),
     })
@@ -100,17 +106,25 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createSchema), checkLimit('nGastosFijos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, monto, fechaCorte, categoria, frecuencia, metodoPago, renovacionAuto, pagoAutomatico, yaPagoEstePeriodo, tarjetaVinculadaId, budgetCategoryId } = req.body
+    const { nombre, monto, fechaCorte, categoria, frecuencia, metodoPago, renovacionAuto, pagoAutomatico, yaPagoEstePeriodo, nuevaProximoPeriodo, tarjetaVinculadaId, budgetCategoryId } = req.body
+    const frecuenciaFinal = frecuencia ?? 'mensual'
 
     const expenseData = {
       userId, nombre, monto, fechaCorte,
       categoria: categoria ?? 'otro',
-      frecuencia: frecuencia ?? 'mensual',
+      frecuencia: frecuenciaFinal,
       metodoPago: metodoPago ?? null,
       renovacionAuto: renovacionAuto ?? false,
       pagoAutomatico: pagoAutomatico ?? false,
       tarjetaVinculadaId: tarjetaVinculadaId || null,
       budgetCategoryId: budgetCategoryId || null,
+      // "Es una obligación nueva, inicia el próximo periodo" — no pagada, no
+      // vencida: se guarda el periodo desde el que sí aplica y el pago/vencido
+      // de HOY se ignora hasta llegar ahí (ver GET/PATCH más abajo). Mutuamente
+      // excluyente con yaPagoEstePeriodo (no tendría sentido marcar ambas).
+      activoDesdePeriodo: (nuevaProximoPeriodo && !yaPagoEstePeriodo)
+        ? getNextPeriodo(frecuenciaFinal, parseDiasPago(fechaCorte))
+        : null,
     }
 
     // Si ya pagó la cuota de este periodo, sembrar el pago marcador junto con
@@ -137,6 +151,7 @@ router.post('/', validate(createSchema), checkLimit('nGastosFijos'), async (req:
         ...expense,
         pagadoEstePeriodo: !!yaPagoEstePeriodo,
         montoPagadoEstePeriodo: yaPagoEstePeriodo ? Number(monto) : null,
+        pendienteProximoPeriodo: esPendienteProximoPeriodo(expense.activoDesdePeriodo, fixedPeriodo(expense)),
       },
     })
   } catch (error) {
@@ -177,6 +192,7 @@ router.patch('/:id', validate(updateSchema), async (req: Request, res: Response)
         ...expense,
         pagadoEstePeriodo: montoPagadoEstePeriodo >= montoPorPeriodo,
         montoPagadoEstePeriodo: montoPagadoEstePeriodo > 0 ? montoPagadoEstePeriodo : null,
+        pendienteProximoPeriodo: esPendienteProximoPeriodo(expense.activoDesdePeriodo, periodo),
       },
     })
   } catch (error) {

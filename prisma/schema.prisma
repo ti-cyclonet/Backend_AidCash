@@ -137,6 +137,11 @@ model Debt {
   // Categoría de presupuesto a la que pertenece esta deuda — para que sus
   // pagos cuenten como consumo de esa categoría (ver computeCategorySpend).
   budgetCategoryId  String?    @map("budget_category_id")
+  // Misma idea que FixedExpense.activoDesdePeriodo: si el usuario marcó al
+  // crear la deuda que es nueva y su primer cobro real es el próximo
+  // periodo, acá se guarda ese periodo — mientras el actual sea anterior,
+  // la deuda se muestra "Pendiente" en vez de "Vencida".
+  activoDesdePeriodo String?   @map("activo_desde_periodo")
   // Deuda compartida (Social > Deudas, solo pareja/familia) — la deuda sigue
   // perteneciendo por completo a `userId` (mismos pagos/undo-pay/amortización
   // de siempre, sin tabla de conciliación ni aprobación). Estos campos son
@@ -282,6 +287,14 @@ model FixedExpense {
   // sus pagos cuenten como consumo de esa categoría (ver computeCategorySpend).
   // Aditivo respecto al vínculo legacy BudgetCategory.linkedFixedExpenseIds.
   budgetCategoryId  String? @map("budget_category_id")
+  // Si el usuario marcó al crear que esta obligación es nueva y su primer
+  // cobro real es el próximo periodo (ej. "Día de pago: 4" pero hoy ya es 15),
+  // acá se guarda el string de periodo (mismo formato que FixedExpensePayment.periodo,
+  // ej. "2026-10") desde el cual SÍ aplica — mientras el periodo actual sea
+  // anterior a este valor, el gasto se muestra "Pendiente" con la fecha en ese
+  // mes futuro en vez de "Vencido". Sin esto no había forma de distinguir una
+  // obligación genuinamente nueva de una que ya debía haberse pagado este mes.
+  activoDesdePeriodo String? @map("activo_desde_periodo")
   createdAt         DateTime @default(now()) @map("created_at")
   updatedAt         DateTime @updatedAt @map("updated_at")
 
