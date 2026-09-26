@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import { authMiddleware } from '../middleware/auth.js'
+import { requireInternalKey } from '../middleware/internal-key.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 
@@ -302,9 +303,9 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
  * POST /api/plan/activate-user
  * Webhook called by Authoriza when a Kiri contract is activated.
  * Reactivates the local user so they can access the app again.
- * This is a server-to-server call (no auth required).
+ * Server-to-server: exige x-internal-key (INTERNAL_API_KEY).
  */
-router.post('/activate-user', async (req: Request, res: Response) => {
+router.post('/activate-user', requireInternalKey, async (req: Request, res: Response) => {
   try {
     const { email, contractId, planUpgraded, packageName } = req.body
 
@@ -390,10 +391,10 @@ router.get('/welcome', authMiddleware, async (req: Request, res: Response) => {
  * POST /api/plan/set-user-status
  * Webhook called by Authoriza when a user's status changes (block/unblock).
  * Authoriza is the source of truth for access control.
- * Server-to-server call (no auth required).
+ * Server-to-server: exige x-internal-key (INTERNAL_API_KEY).
  * Body: { email, allowed: boolean }
  */
-router.post('/set-user-status', async (req: Request, res: Response) => {
+router.post('/set-user-status', requireInternalKey, async (req: Request, res: Response) => {
   try {
     const { email, allowed } = req.body
 

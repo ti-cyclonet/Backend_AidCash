@@ -12,6 +12,9 @@ if (process.env.NODE_ENV === 'production') {
   if (!process.env.DATABASE_URL) {
     throw new Error('❌ DATABASE_URL no está configurado para producción.')
   }
+  if (!process.env.AUTHORIZA_JWT_SECRET) {
+    throw new Error('❌ AUTHORIZA_JWT_SECRET no está configurado para producción (debe ser el mismo JWT_SECRET de Authoriza).')
+  }
   if (!process.env.FRONTEND_URL) {
     throw new Error('❌ FRONTEND_URL no está configurado para producción.')
   }
@@ -30,7 +33,8 @@ export const env = {
   DISABLE_CORS: process.env.DISABLE_CORS === 'true',
 
   // ─── Cyclonet / Authoriza Integration ────────────────────────────────────────
-  AUTHORIZA_JWT_SECRET: process.env.AUTHORIZA_JWT_SECRET || 'wSddeEwq2e',
+  // Sin valor por defecto: vacío, los tokens de Authoriza simplemente no validan
+  AUTHORIZA_JWT_SECRET: process.env.AUTHORIZA_JWT_SECRET || '',
   AUTHORIZA_API_URL: process.env.AUTHORIZA_API_URL || 'http://localhost:3000',
 
   // ─── Belvo Open Banking ─────────────────────────────────────────────────────
