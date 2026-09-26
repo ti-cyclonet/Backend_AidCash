@@ -14,6 +14,7 @@
  */
 
 import { env } from '../config/env.js'
+import { reportPlatformUsage } from '../lib/platform-usage.js'
 
 // ─── Configuración base ───────────────────────────────────────────────────────
 
@@ -39,6 +40,7 @@ async function belvoRequest<T>(
   options: RequestInit = {}
 ): Promise<{ data: T | null; error: string | null }> {
   try {
+    reportPlatformUsage({ platform: 'BELVO', metric: 'api_calls', quantity: 1 })
     const res = await fetch(`${BELVO_BASE_URL}${endpoint}`, {
       ...options,
       headers: {
@@ -143,6 +145,7 @@ export const belvoService = {
    */
   async deleteLink(linkId: string) {
     try {
+      reportPlatformUsage({ platform: 'BELVO', metric: 'api_calls', quantity: 1 })
       const res = await fetch(`${BELVO_BASE_URL}/api/links/${linkId}/`, {
         method: 'DELETE',
         headers: { 'Authorization': getAuthHeader() },
