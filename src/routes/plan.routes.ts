@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import { authMiddleware } from '../middleware/auth.js'
+import { requireInternalKey } from '../middleware/internal-key.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 
@@ -252,12 +253,22 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
     const registerUrl = `${env.AUTHORIZA_API_URL}/api/auth/ensure-kiri-user`
     const registerRes = await fetch(registerUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // ensure-kiri-user exige la clave interna entre servicios
+      headers: { 'Content-Type': 'application/json', 'x-internal-key': process.env.INTERNAL_API_KEY || '' },
       body: JSON.stringify({ email, password, nombre: user.nombre }),
     })
 
+    // Cuenta CycloNet existente con otra contraseña: no se toca, se informa
+    if (registerRes.status === 409) {
+      const conflict = await registerRes.json().catch(() => ({})) as any
+      return res.status(409).json({
+        success: false,
+        error: conflict?.message || 'Ya tienes una cuenta CycloNet con este correo y otra contraseña.',
+      })
+    }
+
     // If user already exists in Authoriza or was just created, proceed with upgrade
-    if (registerRes.ok || registerRes.status === 409) {
+    if (registerRes.ok) {
       // Call upgrade-plan
       const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
       const upgradeRes = await fetch(upgradeUrl, {
@@ -292,9 +303,9 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
  * POST /api/plan/activate-user
  * Webhook called by Authoriza when a Kiri contract is activated.
  * Reactivates the local user so they can access the app again.
- * This is a server-to-server call (no auth required).
+ * Server-to-server: exige x-internal-key (INTERNAL_API_KEY).
  */
-router.post('/activate-user', async (req: Request, res: Response) => {
+router.post('/activate-user', requireInternalKey, async (req: Request, res: Response) => {
   try {
     const { email, contractId, planUpgraded, packageName } = req.body
 
@@ -380,10 +391,10 @@ router.get('/welcome', authMiddleware, async (req: Request, res: Response) => {
  * POST /api/plan/set-user-status
  * Webhook called by Authoriza when a user's status changes (block/unblock).
  * Authoriza is the source of truth for access control.
- * Server-to-server call (no auth required).
+ * Server-to-server: exige x-internal-key (INTERNAL_API_KEY).
  * Body: { email, allowed: boolean }
  */
-router.post('/set-user-status', async (req: Request, res: Response) => {
+router.post('/set-user-status', requireInternalKey, async (req: Request, res: Response) => {
   try {
     const { email, allowed } = req.body
 
