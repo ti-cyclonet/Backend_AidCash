@@ -32,6 +32,8 @@ import sharedPocketsRoutes from './routes/shared-pockets.routes.js'
 import loansRoutes from './routes/loans.routes.js'
 import externalLoansRoutes from './routes/external-loans.routes.js'
 import inviteLinksRoutes from './routes/invite-links.routes.js'
+import hogarRoutes from './routes/hogar.routes.js'
+import aiRoutes from './routes/ai.routes.js'
 import { initMissionRemindersCron } from './cron/mission-reminders.js'
 import homeBudgetRoutes from './routes/home-budget.routes.js'
 import expenseSplitRoutes from './routes/expense-split.routes.js'
@@ -106,6 +108,8 @@ app.use('/api/shared-pockets', sharedPocketsRoutes)
 app.use('/api/loans', loansRoutes)
 app.use('/api/external-loans', externalLoansRoutes)
 app.use('/api/invite-links', inviteLinksRoutes)
+app.use('/api/hogar', hogarRoutes)
+app.use('/api/ai', aiRoutes)
 app.use('/api/notifications', notificationsRoutes)
 app.use('/api/home-budget', homeBudgetRoutes)
 app.use('/api/expenses/split', expenseSplitRoutes)

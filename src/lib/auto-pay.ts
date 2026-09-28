@@ -32,7 +32,7 @@ import { cuotaEfectivaTarjeta } from './installments.js'
 import { cuotaBaseDelPeriodo, debtPeriodo } from './debt-calc.js'
 import { payDebtServer } from './debt-payments.js'
 import { payFixedExpenseServer } from './fixed-expense-payments.js'
-import { sendPushToUser } from './push.js'
+import { sendPushToUser, avisar } from './push.js'
 import type { Debt, FixedExpense } from '@prisma/client'
 
 export interface AutoPayRunSummary {
@@ -48,7 +48,7 @@ function isDueToday(today: number, days: number[]): boolean {
 }
 
 async function notifyAutoPaySkipped(userId: string, nombre: string, monto: number) {
-  await sendPushToUser(userId, {
+  await avisar(userId, {
     title: '⚠️ No se pudo cobrar automáticamente',
     body: `"${nombre}" vence hoy ($${monto.toLocaleString('es-CO')}) pero tu disponible no alcanza. Págala a mano cuando puedas.`,
     tag: 'auto-pay-skipped',

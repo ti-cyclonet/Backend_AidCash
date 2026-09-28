@@ -4,7 +4,7 @@ import rateLimit from 'express-rate-limit'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
-import { sendPushToUser } from '../lib/push.js'
+import { sendPushToUser, contarDispositivos } from '../lib/push.js'
 import { env } from '../config/env.js'
 import { recordOnboardingAction } from '../lib/missions.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
@@ -83,7 +83,8 @@ router.post('/guias', validate(guiaSchema), async (req: Request, res: Response):
     const { guia } = req.body as { guia: string }
     const u = await prisma.user.findUnique({ where: { id: userId }, select: { guiasVistas: true } })
     if (!u) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
-    if (!u.guiasVistas.includes(guia) && !u.guiasVistas.includes('*')) {
+    // "*" (todas vistas) solo cubre la primera versión; "social@2" se guarda aparte
+    if (!u.guiasVistas.includes(guia) && (guia.includes('@') || !u.guiasVistas.includes('*'))) {
       await prisma.user.update({ where: { id: userId }, data: { guiasVistas: { push: guia } } })
     }
     res.json({ ok: true })
@@ -594,6 +595,27 @@ router.get('/dashboard-summary', async (req: Request, res: Response): Promise<vo
   } catch (error) {
     console.error('[DashboardSummary]', error)
     res.status(500).json({ error: 'Error al obtener datos del dashboard' })
+  }
+})
+
+// ─── POST /users/push-test — "Enviar notificación de prueba" (Perfil) ─────────
+
+router.post('/push-test', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const dispositivos = await contarDispositivos(userId)
+    if (dispositivos > 0) {
+      await sendPushToUser(userId, {
+        title: '🔔 ¡Las notificaciones funcionan!',
+        body: 'Así te avisaremos de pagos, ingresos, misiones y Social.',
+        tag: 'push-test',
+        url: '/perfil',
+      })
+    }
+    res.json({ dispositivos })
+  } catch (error) {
+    console.error('[PushTest]', error)
+    res.status(500).json({ error: 'No se pudo enviar la prueba' })
   }
 })
 

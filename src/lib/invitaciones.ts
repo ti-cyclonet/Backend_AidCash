@@ -16,7 +16,7 @@ import { randomBytes } from 'crypto'
 import type { ConnectionRole } from '@prisma/client'
 import { prisma } from '../config/database.js'
 import { emitToUser, SOCKET_EVENTS } from './socket.js'
-import { pushReferralJoined } from './push.js'
+import { pushReferralJoined, pushInviteAccepted } from './push.js'
 import { recordOnboardingAction, recordReferral } from './missions.js'
 
 const ROLE_LABEL: Record<ConnectionRole, string> = { FRIEND: 'amigo', FAMILY: 'familia', PARTNER: 'pareja' }
@@ -128,6 +128,7 @@ export async function aceptarEnlaceExistente(code: string, userId: string): Prom
   const r = await conectar(code, userId)
   if (r.ok && !r.yaConectados) {
     const yo = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
+    pushInviteAccepted(r.inviter.id, yo?.nombre ?? 'Alguien').catch(() => {})
     emitToUser(r.inviter.id, SOCKET_EVENTS.INVITE_ACCEPTED, {
       by: { id: userId, nombre: yo?.nombre },
       role: r.role,

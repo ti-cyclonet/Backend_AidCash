@@ -417,9 +417,13 @@ model ImpulseExpense {
   tarjeta     Debt?                @relation("ImpulseExpenseCard", fields: [tarjetaId], references: [id], onDelete: SetNull)
   installment DebtCardInstallment? @relation(fields: [installmentId], references: [id], onDelete: SetNull)
   budgetCategory BudgetCategory?  @relation(fields: [budgetCategoryId], references: [id], onDelete: SetNull)
+  // Categoría del presupuesto del hogar (compartida con la pareja), opcional
+  sharedCategoryId String?  @map("shared_category_id")
+  sharedCategory SharedBudgetCategory? @relation(fields: [sharedCategoryId], references: [id], onDelete: SetNull)
 
   @@index([userId, periodo])
   @@index([budgetCategoryId])
+  @@index([sharedCategoryId])
   @@map("impulse_expenses")
 }
 
@@ -667,12 +671,16 @@ model Connection {
   // aceptar. Null en ambos = no hay ninguna solicitud de cambio de rol activa.
   pendingRole           ConnectionRole? @map("pending_role")
   roleChangeRequestedBy String?         @map("role_change_requested_by")
+  // Presupuesto del hogar (solo pareja): el tope de sus categorías es
+  // "mensual" o "quincenal" (1–15 y 16–fin de mes). Lo cambia cualquiera de los dos.
+  hogarPeriodo String @default("mensual") @map("hogar_periodo")
   createdAt   DateTime       @default(now()) @map("created_at")
   updatedAt   DateTime       @updatedAt @map("updated_at")
 
   requester User @relation("ConnectionRequester", fields: [requesterId], references: [id], onDelete: Cascade)
   addressee User @relation("ConnectionAddressee", fields: [addresseeId], references: [id], onDelete: Cascade)
   sharedDebts Debt[]
+  sharedCategories SharedBudgetCategory[]
 
   @@unique([requesterId, addresseeId])
   @@map("connections")
@@ -694,6 +702,27 @@ model InviteLink {
 
   @@unique([inviterId, role])
   @@map("invite_links")
+}
+
+// Categoría del presupuesto del hogar — la comparten los dos de una conexión
+// de pareja (ej. Comida $600.000/mes). Cada uno registra sus gastos en ella
+// y al otro le llega el aviso; el tope es mensual.
+model SharedBudgetCategory {
+  id           String   @id @default(uuid())
+  connectionId String   @map("connection_id")
+  nombre       String
+  icono        String   @default("🏠")
+  color        String   @default("#10b981")
+  montoLimite  Decimal  @map("monto_limite") @db.Decimal(12, 2)
+  createdById  String   @map("created_by_id")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  connection Connection       @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  expenses   ImpulseExpense[]
+
+  @@index([connectionId])
+  @@map("shared_budget_categories")
 }
 
 // Bolsillo de ahorro compartido (multiusuario — soporta pareja, familia, amigos)
@@ -750,6 +779,10 @@ model Loan {
   remainingAmount Decimal  @map("remaining_amount") @db.Decimal(12, 2)
   descripcion     String?
   dueDate         String?  @map("due_date")
+  // Fecha en que quien pide prestado se compromete a pagar (dispara
+  // recordatorios para los dos, ver cron/external-loans.ts). `dueDate` queda
+  // solo por compatibilidad con préstamos viejos (texto libre).
+  fechaCompromiso DateTime? @map("fecha_compromiso") @db.Date
   // PENDING_APPROVAL | PENDING_BORROWER_CONFIRMATION | ACTIVE | REJECTED | PAID
   status          String   @default("PENDING_APPROVAL")
   // Tasa de interés aplicada por el prestamista (0, 5, 10, etc.)

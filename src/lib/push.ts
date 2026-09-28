@@ -7,6 +7,7 @@
 
 import webpush from 'web-push'
 import { prisma } from '../config/database.js'
+import { emitToUser, SOCKET_EVENTS } from './socket.js'
 
 // ─── Configuración VAPID ──────────────────────────────────────────────────────
 
@@ -86,6 +87,27 @@ export async function sendPushToUser(userId: string, payload: PushPayload): Prom
   }
 }
 
+/**
+ * Aviso completo: llega al celular (push, barra de estado) Y queda en la
+ * campana de la app. Antes los recordatorios de pagos, día de pago y
+ * consejos eran solo push: si el dispositivo no estaba suscrito (o el
+ * usuario no tocó la notificación), no quedaba ningún rastro en la app.
+ */
+export async function avisar(userId: string, payload: PushPayload & { tipo?: string }): Promise<void> {
+  emitToUser(userId, SOCKET_EVENTS.AVISO, {
+    message: payload.title,
+    detalle: payload.body,
+    route: payload.url ?? '/dashboard',
+    tipo: payload.tipo ?? payload.tag ?? 'aviso',
+  })
+  await sendPushToUser(userId, payload)
+}
+
+/** Cuántos dispositivos tiene suscritos (para la prueba desde Perfil). */
+export async function contarDispositivos(userId: string): Promise<number> {
+  return prisma.pushSubscription.count({ where: { userId } })
+}
+
 // ─── Helpers de notificación predefinidos ──────────────────────────────────────
 
 export function pushSocialInvite(userId: string, fromName: string) {
@@ -116,7 +138,7 @@ export function pushPaymentReminder(userId: string, debtName: string, daysUntil:
 }
 
 export function pushKiriTip(userId: string, message: string) {
-  return sendPushToUser(userId, {
+  return avisar(userId, {
     title: '🌱 Consejo Kiri',
     body: message,
     tag: 'kiri-tip',
@@ -148,6 +170,24 @@ export function pushMissionReady(userId: string, missionTitle: string) {
     body: `"${missionTitle}" ya está lista — ve a reclamar tu recompensa.`,
     tag: 'mission-ready',
     url: '/misiones',
+  })
+}
+
+export function pushInviteAccepted(userId: string, nombre: string) {
+  return sendPushToUser(userId, {
+    title: '✅ Conexión aceptada',
+    body: `${nombre} aceptó tu invitación. Ya están conectados en Kiri.`,
+    tag: 'social-accepted',
+    url: '/social',
+  })
+}
+
+export function pushSplitRequested(userId: string, fromName: string, monto: number, gasto: string) {
+  return sendPushToUser(userId, {
+    title: '🧾 Te dividieron un gasto',
+    body: `${fromName} dividió "${gasto}" contigo: tu parte es $${Math.round(monto).toLocaleString('es-CO')}.`,
+    tag: 'split-requested',
+    url: '/social',
   })
 }
 
@@ -248,7 +288,7 @@ export function pushObligationDue(userId: string, nombre: string, diasRestantes:
   const body = diasRestantes === 0
     ? `"${nombre}" vence hoy. No olvides pagarlo.`
     : `"${nombre}" vence en ${diasRestantes} día${diasRestantes > 1 ? 's' : ''}.`
-  return sendPushToUser(userId, {
+  return avisar(userId, {
     title: diasRestantes === 0 ? '⏰ Vence hoy' : '📅 Pago próximo a vencer',
     body,
     tag: 'obligation-due',
@@ -257,7 +297,7 @@ export function pushObligationDue(userId: string, nombre: string, diasRestantes:
 }
 
 export function pushObligationOverdue(userId: string, nombre: string) {
-  return sendPushToUser(userId, {
+  return avisar(userId, {
     title: '🚨 Pago vencido',
     body: `"${nombre}" ya venció y sigue sin pagarse.`,
     tag: 'obligation-overdue',

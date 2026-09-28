@@ -7,7 +7,7 @@ import { planPocketCredit, planPocketDeduction } from '../lib/wallet.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
-import { pushLoanPayment, pushLoanRequested, pushLoanApproved, pushLoanRejected, pushLoanCancelled, pushLoanPaymentStatus } from '../lib/push.js'
+import { pushLoanPayment, pushLoanRequested, pushLoanApproved, pushLoanRejected, pushLoanCancelled, pushLoanPaymentStatus, avisar } from '../lib/push.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { requireConnection } from '../lib/connections.js'
 
@@ -16,12 +16,32 @@ router.use(authMiddleware)
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
+const fechaISO = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida')
+
 const requestLoanSchema = z.object({
   lenderId:    z.string().min(1),
   amount:      z.number().min(0.01),
   descripcion: z.string().optional(),
   dueDate:     z.string().optional(),
+  // Cuándo se compromete a pagar (YYYY-MM-DD) — dispara recordatorios
+  fechaCompromiso: fechaISO.nullable().optional(),
 })
+
+const fechaSchema = z.object({ fechaCompromiso: fechaISO.nullable() })
+
+/** "2026-10-15" → Date a medianoche UTC (columna DATE). */
+const aFecha = (f: string | null | undefined) => (f ? new Date(`${f}T00:00:00.000Z`) : null)
+
+/** Días entre hoy (local) y una fecha DATE (medianoche UTC). */
+function diasHasta(fecha: Date | null): number | null {
+  if (!fecha) return null
+  const objetivo = new Date(fecha.getUTCFullYear(), fecha.getUTCMonth(), fecha.getUTCDate())
+  const hoy = new Date()
+  const base = new Date(hoy.getFullYear(), hoy.getMonth(), hoy.getDate())
+  return Math.round((objetivo.getTime() - base.getTime()) / 86_400_000)
+}
+
+const fmtFecha = (d: Date) => d.toLocaleDateString('es-CO', { day: 'numeric', month: 'long', timeZone: 'UTC' })
 
 const respondLoanSchema = z.object({
   loanId: z.string().min(1),
@@ -78,11 +98,51 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
         tasaInteres:     l.tasaInteres != null ? Number(l.tasaInteres) : null,
         montoOriginal:   l.montoOriginal != null ? Number(l.montoOriginal) : null,
         payments: l.payments.map(p => ({ ...p, monto: Number(p.monto) })),
+        fechaCompromiso: l.fechaCompromiso ? l.fechaCompromiso.toISOString().slice(0, 10) : null,
+        diasParaCompromiso: diasHasta(l.fechaCompromiso),
       })),
     })
   } catch (error) {
     console.error('[GetLoans]', error)
     res.status(500).json({ error: 'Error al obtener préstamos' })
+  }
+})
+
+// ─── PATCH /loans/:id/fecha — cambiar la fecha en que se paga ─────────────────
+// Cualquiera de los dos (quien presta o quien debe) puede moverla; al otro le
+// llega el aviso (campana + celular) para que quede enterado del nuevo plazo.
+
+router.patch('/:id/fecha', validate(fechaSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { fechaCompromiso } = req.body as { fechaCompromiso: string | null }
+    const loan = await prisma.loan.findFirst({
+      where: { id: String(req.params.id), OR: [{ lenderId: userId }, { borrowerId: userId }], status: { in: ['PENDING_APPROVAL', 'PENDING_BORROWER_CONFIRMATION', 'ACTIVE'] } },
+      include: { lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } },
+    })
+    if (!loan) { res.status(404).json({ error: 'Préstamo no encontrado' }); return }
+
+    const nueva = aFecha(fechaCompromiso)
+    await prisma.loan.update({ where: { id: loan.id }, data: { fechaCompromiso: nueva, dueDate: fechaCompromiso } })
+
+    const soyLender = loan.lenderId === userId
+    const otroId = soyLender ? loan.borrowerId : loan.lenderId
+    const yo = (soyLender ? loan.lender.nombre : loan.borrower.nombre).split(' ')[0]
+    const monto = `$${Math.round(Number(loan.remainingAmount)).toLocaleString('es-CO')}`
+    await avisar(otroId, {
+      title: '📅 Cambió la fecha de un préstamo',
+      body: nueva
+        ? `${yo} movió la fecha del préstamo de ${monto} para el ${fmtFecha(nueva)}.`
+        : `${yo} quitó la fecha del préstamo de ${monto}.`,
+      tag: `loan-fecha-${loan.id}`,
+      tipo: 'prestamo-fecha',
+      url: '/social',
+    }).catch(() => {})
+
+    res.json({ fechaCompromiso, diasParaCompromiso: diasHasta(nueva) })
+  } catch (error) {
+    console.error('[LoanFecha]', error)
+    res.status(500).json({ error: 'Error al cambiar la fecha' })
   }
 })
 
@@ -92,9 +152,10 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/request', validate(requestLoanSchema), checkLimit('nPrestamos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const borrowerId = req.user!.userId
-    const { lenderId, amount, descripcion, dueDate } = req.body as {
-      lenderId: string; amount: number; descripcion?: string; dueDate?: string
+    const { lenderId, amount, descripcion, fechaCompromiso } = req.body as {
+      lenderId: string; amount: number; descripcion?: string; dueDate?: string; fechaCompromiso?: string | null
     }
+    const dueDate = fechaCompromiso ?? (req.body as { dueDate?: string }).dueDate
 
     if (borrowerId === lenderId) {
       res.status(400).json({ error: 'No puedes solicitarte un préstamo a ti mismo' })
@@ -120,6 +181,7 @@ router.post('/request', validate(requestLoanSchema), checkLimit('nPrestamos'), a
         remainingAmount: amount,
         descripcion,
         dueDate,
+        fechaCompromiso: aFecha(fechaCompromiso ?? (dueDate && /^\d{4}-\d{2}-\d{2}$/.test(dueDate) ? dueDate : null)),
         status: 'PENDING_APPROVAL',
       },
     })

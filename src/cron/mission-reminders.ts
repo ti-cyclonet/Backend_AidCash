@@ -13,7 +13,7 @@
 import cron from 'node-cron'
 import { prisma } from '../config/database.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
-import { pushMissionReminder } from '../lib/push.js'
+import { pushMissionReminder, avisar } from '../lib/push.js'
 import { MISSION_CATALOG, todayPeriodo } from '../lib/missions.js'
 
 type Momento = 'manana' | 'tarde'
@@ -38,12 +38,32 @@ async function estadoDelDia(userIds: string[], periodo: string): Promise<Map<str
   return mapa
 }
 
-export async function runMissionReminders(momento: Momento, now: Date = new Date()): Promise<number> {
+/** `soloUsuarios`: limita a esos ids (pruebas) — sin él, a todos los activos. */
+export async function runMissionReminders(momento: Momento, now: Date = new Date(), soloUsuarios?: string[]): Promise<number> {
   const desde = new Date(now.getTime() - 30 * DIA)
-  const usuarios = await prisma.user.findMany({
-    where: { isActive: true, onboardingDone: true, OR: [{ streakUltimoCheck: { gte: desde } }, { createdAt: { gte: desde } }] },
+  const candidatos = await prisma.user.findMany({
+    where: {
+      isActive: true, onboardingDone: true,
+      OR: [{ streakUltimoCheck: { gte: desde } }, { createdAt: { gte: desde } }],
+      ...(soloUsuarios ? { id: { in: soloUsuarios } } : {}),
+    },
     select: { id: true, nombre: true, streakActual: true, streakUltimoCheck: true },
   })
+  if (candidatos.length === 0) return 0
+
+  // Nunca dos recordatorios del mismo momento el mismo día (si el cron corre
+  // de nuevo por un reinicio, o hay varias instancias del servidor).
+  const inicioDia = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const yaAvisados = new Set((await prisma.notification.findMany({
+    where: {
+      userId: { in: candidatos.map((u) => u.id) },
+      event: SOCKET_EVENTS.MISSION_REMINDER,
+      createdAt: { gte: inicioDia },
+      data: { path: ['momento'], equals: momento },
+    },
+    select: { userId: true },
+  })).map((n) => n.userId))
+  const usuarios = candidatos.filter((u) => !yaAvisados.has(u.id))
   if (usuarios.length === 0) return 0
 
   const periodo = todayPeriodo(now)
@@ -76,8 +96,48 @@ export async function runMissionReminders(momento: Momento, now: Date = new Date
     }
 
     if (!aviso) continue
-    emitToUser(u.id, SOCKET_EVENTS.MISSION_REMINDER, { message: aviso.title, detalle: aviso.body, route: '/misiones' })
+    emitToUser(u.id, SOCKET_EVENTS.MISSION_REMINDER, { message: aviso.title, detalle: aviso.body, route: '/misiones', momento })
     await pushMissionReminder(u.id, aviso.title, aviso.body).catch(() => {})
+    enviados++
+  }
+  return enviados
+}
+
+/**
+ * 8:00 PM — "¿Registraste tus gastos de hoy?" solo a quien hoy no ha anotado
+ * ningún gasto (activos en los últimos 30 días), una vez por día.
+ */
+export async function runExpenseReminders(now: Date = new Date(), soloUsuarios?: string[]): Promise<number> {
+  const desde = new Date(now.getTime() - 30 * DIA)
+  const inicioDia = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const candidatos = await prisma.user.findMany({
+    where: {
+      isActive: true, onboardingDone: true,
+      OR: [{ streakUltimoCheck: { gte: desde } }, { createdAt: { gte: desde } }],
+      ...(soloUsuarios ? { id: { in: soloUsuarios } } : {}),
+    },
+    select: { id: true, nombre: true },
+  })
+  if (candidatos.length === 0) return 0
+  const ids = candidatos.map((u) => u.id)
+  const [conGastos, yaAvisados] = await Promise.all([
+    prisma.impulseExpense.findMany({ where: { userId: { in: ids }, createdAt: { gte: inicioDia } }, select: { userId: true }, distinct: ['userId'] }),
+    prisma.notification.findMany({
+      where: { userId: { in: ids }, event: SOCKET_EVENTS.AVISO, createdAt: { gte: inicioDia }, data: { path: ['tipo'], equals: 'registrar-gastos' } },
+      select: { userId: true },
+    }),
+  ])
+  const excluir = new Set([...conGastos, ...yaAvisados].map((x) => x.userId))
+  let enviados = 0
+  for (const u of candidatos) {
+    if (excluir.has(u.id)) continue
+    await avisar(u.id, {
+      title: '📝 ¿Registraste tus gastos de hoy?',
+      body: `${u.nombre.split(' ')[0]}, anota lo que gastaste hoy aunque sea poco: así tu presupuesto y tu jardín muestran la realidad.`,
+      tag: 'registrar-gastos',
+      tipo: 'registrar-gastos',
+      url: '/gestion?tab=presupuesto',
+    }).catch(() => {})
     enviados++
   }
   return enviados
@@ -96,5 +156,13 @@ export function initMissionRemindersCron() {
 
   programar('30 10 * * *', 'manana')
   programar('30 18 * * *', 'tarde')
-  console.log('[Cron] Recordatorios de misiones programados (10:30 AM y 6:30 PM)')
+  cron.schedule('0 20 * * *', async () => {
+    try {
+      const n = await runExpenseReminders()
+      console.log(`[Cron] Recordatorios de registrar gastos enviados: ${n}`)
+    } catch (error) {
+      console.error('[Cron] Error en recordatorio de gastos:', error)
+    }
+  }, { timezone: 'America/Bogota' })
+  console.log('[Cron] Recordatorios de misiones programados (10:30 AM y 6:30 PM) y de gastos (8:00 PM)')
 }

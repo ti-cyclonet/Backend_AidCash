@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import { z } from 'zod'
 import { randomUUID } from 'crypto'
 import { prisma } from '../config/database.js'
+import { categoriaDelUsuario as categoriaHogarDelUsuario, avisarGastoHogar } from '../lib/hogar.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { recordMissionAction } from '../lib/missions.js'
@@ -46,6 +47,8 @@ const createSchema = z.object({
   // Categoría de presupuesto: omitida = Kiri la sugiere (historial del
   // usuario o palabras clave); null explícito = "sin categoría".
   budgetCategoryId: z.string().uuid().nullable().optional(),
+  // Categoría del presupuesto del hogar (compartida con la pareja)
+  sharedCategoryId: z.string().uuid().nullable().optional(),
   // Clientes nuevos piden que el descuento de la billetera ocurra ACÁ, en la
   // misma transacción que el gasto — antes el frontend lo hacía en una
   // segunda llamada y, si fallaba, quedaba el gasto sin descontar. Los
@@ -163,6 +166,12 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
   try {
     const userId = req.user!.userId
     const { monto, categoria, tarjetaId, cuotas, descontarBilletera } = req.body
+    // Categoría del hogar: solo si es de la pareja de este usuario
+    const sharedCategoryId: string | null = req.body.sharedCategoryId ?? null
+    if (sharedCategoryId && !(await categoriaHogarDelUsuario(userId, sharedCategoryId))) {
+      res.status(400).json({ error: 'Esa categoría del hogar no es tuya' })
+      return
+    }
     let nombre: string = req.body.nombre
     const esHormiga: boolean = req.body.esHormiga ?? esGastoHormiga(nombreBaseGasto(nombre), monto)
 
@@ -204,7 +213,7 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
           data: { id: installmentId, tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: numCuotas, descripcion: nombre },
         }),
         prisma.impulseExpense.create({
-          data: { userId, nombre, monto, categoria, periodo, esHormiga, budgetCategoryId, tarjetaId, installmentId },
+          data: { userId, nombre, monto, categoria, periodo, esHormiga, budgetCategoryId, sharedCategoryId, tarjetaId, installmentId },
         }),
         prisma.debt.update({
           where: { id: tarjetaId },
@@ -214,7 +223,7 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
       expense = createdExpense
     } else {
       const crear = prisma.impulseExpense.create({
-        data: { userId, nombre, monto, categoria, periodo, esHormiga, budgetCategoryId },
+        data: { userId, nombre, monto, categoria, periodo, esHormiga, budgetCategoryId, sharedCategoryId },
       })
       expense = descontarBilletera
         ? (await prisma.$transaction([crear, prisma.user.update({ where: { id: userId }, data: planPocketDeduction('libre', monto) })]))[0]
@@ -234,7 +243,10 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
       }).catch(() => {})
     }
 
-    res.status(201).json({ expense, categoriaAutomatica, alertaCategoria, billeteraDescontada: !!descontarBilletera && !tarjetaId })
+    // Hogar: aviso a la pareja (y a los dos si se cruza el 80% / 100%)
+    const hogar = sharedCategoryId ? await avisarGastoHogar(userId, sharedCategoryId, monto, nombre) : null
+
+    res.status(201).json({ expense, categoriaAutomatica, alertaCategoria, hogar, billeteraDescontada: !!descontarBilletera && !tarjetaId })
   } catch (error) {
     console.error('[CreateImpulse]', error)
     res.status(500).json({ error: 'Error al registrar gasto hormiga' })

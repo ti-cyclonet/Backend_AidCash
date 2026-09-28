@@ -151,4 +151,34 @@ router.get('/spending', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
+// ─── GET /projections/movimientos — base de la pestaña Proyecciones ──────────
+// Gastos (sin los pagados con tarjeta: ya están en su cuota) y ahorros de los
+// últimos ~4 meses, para que el frontend saque promedios mensuales REALES.
+// (La lista de /impulse-expenses solo trae el periodo actual — con ella el
+// promedio de gasto variable salía casi en cero.)
+
+router.get('/movimientos', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const desde = new Date(Date.now() - 120 * 86400000)
+    const [gastos, ahorros] = await Promise.all([
+      prisma.impulseExpense.findMany({
+        where: { userId, tarjetaId: null, createdAt: { gte: desde } },
+        select: { monto: true, createdAt: true, esHormiga: true },
+      }),
+      prisma.savingsHistory.findMany({
+        where: { userId, tipo: 'ahorro', createdAt: { gte: desde } },
+        select: { monto: true, createdAt: true },
+      }),
+    ])
+    res.json({
+      gastos: gastos.map(g => ({ monto: Number(g.monto), fecha: g.createdAt, hormiga: g.esHormiga })),
+      ahorros: ahorros.map(a => ({ monto: Number(a.monto), fecha: a.createdAt })),
+    })
+  } catch (error) {
+    console.error('[ProjectionsMovimientos]', error)
+    res.status(500).json({ error: 'Error al cargar los movimientos' })
+  }
+})
+
 export default router

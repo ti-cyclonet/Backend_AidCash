@@ -31,9 +31,14 @@ export const SOCKET_EVENTS = {
   GARDEN_WATERED:    'social:garden_watered',
   // Alguien se registró con tu enlace de invitación
   REFERRAL_JOINED:   'social:referral_joined',
+  // Presupuesto del hogar: gasto/categoría de la pareja, alertas 80/100%
+  HOGAR_GASTO:       'social:hogar_gasto',
 
   // Recordatorio de misiones del día (cron 10 AM / 6:30 PM)
   MISSION_REMINDER:  'mission:daily_reminder',
+  // Aviso general que también va a la campana: pagos por vencer/vencidos,
+  // día de pago, consejos, recordatorio de registrar gastos…
+  AVISO:             'kiri:aviso',
 
   // Préstamos
   LOAN_REQUESTED:    'loan:requested',
@@ -142,7 +147,9 @@ const PERSISTED_EVENTS = new Set<string>([
   // campana de notificaciones, que es justo el empujón para que vuelva.
   'social:garden_watered',
   'social:referral_joined',
+  'social:hogar_gasto',
   'mission:daily_reminder',
+  'kiri:aviso',
 ])
 
 /** Emite un evento a la sala privada de un usuario específico, y si es de los
