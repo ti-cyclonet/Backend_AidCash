@@ -802,6 +802,8 @@ model Loan {
   sinDesembolso   Boolean  @default(false) @map("sin_desembolso")
   // Quién lo registró (el otro es quien confirma)
   creadoPorId     String?  @map("creado_por_id")
+  // Cuándo quedó activo (se movió la plata o se confirmó uno previo) — Balance
+  activadoEn      DateTime? @map("activado_en")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

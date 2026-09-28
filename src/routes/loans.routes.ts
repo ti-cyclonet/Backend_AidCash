@@ -304,7 +304,7 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
     // Préstamo que ya existía: confirmar el registro, sin intereses nuevos ni
     // mover plata (esa plata se entregó hace tiempo).
     if (loan.sinDesembolso) {
-      const updated = await prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE' } })
+      const updated = await prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE', activadoEn: new Date() } })
       emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_APPROVED, { loanId, amount: Number(loan.amount), existente: true, requiresConfirmation: false })
       avisar(loan.borrowerId, {
         title: `✅ ${lender?.nombre.split(' ')[0] ?? 'Tu contacto'} confirmó el préstamo`,
@@ -367,7 +367,7 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
       const [updated] = await prisma.$transaction([
         prisma.loan.update({
           where: { id: loanId },
-          data: { status: 'ACTIVE' },
+          data: { status: 'ACTIVE', activadoEn: new Date() },
         }),
         prisma.user.update({
           where: { id: lenderId },
@@ -421,7 +421,7 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
 
     // Préstamo que ya existía (lo registró quien prestó): confirmar o no, sin mover plata
     if (loan.sinDesembolso) {
-      const updated = await prisma.loan.update({ where: { id: loanId }, data: { status: accept ? 'ACTIVE' : 'REJECTED' } })
+      const updated = await prisma.loan.update({ where: { id: loanId }, data: { status: accept ? 'ACTIVE' : 'REJECTED', ...(accept ? { activadoEn: new Date() } : {}) } })
       const quien = borrower?.nombre.split(' ')[0] ?? 'Tu contacto'
       emitToUser(loan.lenderId, accept ? SOCKET_EVENTS.LOAN_APPROVED : SOCKET_EVENTS.LOAN_REJECTED, { loanId, existente: true, borrowerAccepted: accept })
       avisar(loan.lenderId, {
@@ -447,7 +447,7 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
       }
 
       const [updated] = await prisma.$transaction([
-        prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE' } }),
+        prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE', activadoEn: new Date() } }),
         prisma.user.update({
           where: { id: loan.lenderId },
           data: planPocketDeduction('libre', disbursed),

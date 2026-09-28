@@ -266,12 +266,13 @@ router.post('/:id/deposit/:depositId/approve', async (req: Request, res: Respons
     const pocketId = req.params.id as string
     const depositId = req.params.depositId as string
 
-    // Verificar que el usuario es el OWNER del bolsillo
+    // Aprueba OTRO miembro del bolsillo (antes solo el creador, y como nadie
+    // aprueba lo suyo, un retiro pedido por el creador quedaba bloqueado).
     const membership = await prisma.sharedPocketMember.findFirst({
-      where: { sharedPocketId: pocketId, userId, role: 'owner' },
+      where: { sharedPocketId: pocketId, userId },
     })
     if (!membership) {
-      res.status(403).json({ error: 'Solo el creador del ahorro puede aprobar movimientos' })
+      res.status(403).json({ error: 'No eres miembro de este ahorro' })
       return
     }
 

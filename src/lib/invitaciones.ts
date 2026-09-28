@@ -96,30 +96,52 @@ async function conectar(code: string, userId: string): Promise<ResultadoConexion
 }
 
 /**
- * Registro con enlace: conecta en Social, marca quién lo invitó, suma el uso
- * y avanza las misiones de quien invitó. Nunca hace fallar el registro.
+ * Registro con enlace (solo cuentas NUEVAS): conecta en Social, marca quién lo
+ * invitó y suma el uso. La misión de invitar y el aviso a quien invitó se
+ * acreditan cuando la cuenta queda activa (correo verificado) — así no cuenta
+ * un registro a medias ni uno que nunca se verificó. Nunca hace fallar el registro.
  */
-export async function aplicarInvitacionAlRegistro(code: string, nuevoUsuarioId: string, nombreNuevo: string): Promise<void> {
+export async function aplicarInvitacionAlRegistro(code: string, nuevoUsuarioId: string, _nombreNuevo: string): Promise<void> {
   try {
     const r = await conectar(code, nuevoUsuarioId)
     if (!r.ok) return
-    const inviterId = r.inviter.id
     await prisma.$transaction([
-      prisma.user.update({ where: { id: nuevoUsuarioId }, data: { invitedById: inviterId } }),
+      prisma.user.update({ where: { id: nuevoUsuarioId }, data: { invitedById: r.inviter.id } }),
       prisma.inviteLink.update({ where: { code: code.trim().toLowerCase() }, data: { usos: { increment: 1 } } }),
     ])
-    await recordOnboardingAction(inviterId, 'invitar_amigo')
-    await recordReferral(inviterId)
-
-    emitToUser(inviterId, SOCKET_EVENTS.REFERRAL_JOINED, {
-      nombre: nombreNuevo,
-      role: r.role,
-      message: `${nombreNuevo} se unió a Kiri con tu enlace y ya está en tus conexiones como ${ROLE_LABEL[r.role]}.`,
-      route: '/misiones',
-    })
-    pushReferralJoined(inviterId, nombreNuevo, ROLE_LABEL[r.role]).catch(() => {})
+    const nuevo = await prisma.user.findUnique({ where: { id: nuevoUsuarioId }, select: { isActive: true } })
+    if (nuevo?.isActive) await acreditarReferido(nuevoUsuarioId)
   } catch (error) {
     console.error('[Invitacion] Error al aplicar enlace en registro:', error)
+  }
+}
+
+/**
+ * La persona invitada ya tiene su cuenta activa: avanza la misión de invitar
+ * de quien la invitó y le avisa. Es idempotente para la misión (se cuenta con
+ * los referidos activos reales).
+ */
+export async function acreditarReferido(nuevoUsuarioId: string): Promise<void> {
+  try {
+    const nuevo = await prisma.user.findUnique({ where: { id: nuevoUsuarioId }, select: { nombre: true, invitedById: true, isActive: true } })
+    if (!nuevo?.invitedById || !nuevo.isActive) return
+    const inviterId = nuevo.invitedById
+    const conn = await prisma.connection.findFirst({
+      where: { OR: [{ requesterId: inviterId, addresseeId: nuevoUsuarioId }, { requesterId: nuevoUsuarioId, addresseeId: inviterId }] },
+      select: { role: true },
+    })
+    const role = conn?.role ?? 'FRIEND'
+    await recordOnboardingAction(inviterId, 'invitar_amigo')
+    await recordReferral(inviterId)
+    emitToUser(inviterId, SOCKET_EVENTS.REFERRAL_JOINED, {
+      nombre: nuevo.nombre,
+      role,
+      message: `${nuevo.nombre} se unió a Kiri con tu enlace y ya está en tus conexiones como ${ROLE_LABEL[role]}.`,
+      route: '/misiones',
+    })
+    pushReferralJoined(inviterId, nuevo.nombre, ROLE_LABEL[role]).catch(() => {})
+  } catch (error) {
+    console.error('[Invitacion] Error al acreditar referido:', error)
   }
 }
 
@@ -138,5 +160,5 @@ export async function aceptarEnlaceExistente(code: string, userId: string): Prom
 }
 
 export async function contarReferidos(userId: string): Promise<number> {
-  return prisma.user.count({ where: { invitedById: userId } })
+  return prisma.user.count({ where: { invitedById: userId, isActive: true } })
 }

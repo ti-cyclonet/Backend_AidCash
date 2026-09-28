@@ -279,7 +279,8 @@ export async function recordOnboardingAction(userId: string, missionKey: Onboard
  */
 export async function recordReferral(inviterId: string): Promise<void> {
   try {
-    const total = await prisma.user.count({ where: { invitedById: inviterId } })
+    // Solo cuentan las cuentas nuevas ya activas (correo verificado)
+    const total = await prisma.user.count({ where: { invitedById: inviterId, isActive: true } })
     for (const m of REFERRAL_CATALOG) {
       const row = await getOrCreateProgress(inviterId, m.key, REFERRAL_PERIODO, m.target)
       const nuevo = Math.min(total, m.target)
@@ -294,7 +295,7 @@ export async function recordReferral(inviterId: string): Promise<void> {
 
 /** Misiones de referidos, listas para el frontend (progreso = conteo real). */
 export async function getReferralMissionsForUser(userId: string): Promise<{ misiones: MissionView[]; referidos: number }> {
-  const total = await prisma.user.count({ where: { invitedById: userId } })
+  const total = await prisma.user.count({ where: { invitedById: userId, isActive: true } })
   const misiones = await Promise.all(
     REFERRAL_CATALOG.map(async (m) => {
       let row = await getOrCreateProgress(userId, m.key, REFERRAL_PERIODO, m.target)

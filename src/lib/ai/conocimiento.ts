@@ -29,8 +29,8 @@ con sus días de pago; se cambia en Perfil).
 
 ## ÁRBOL KIRI (Jardín) — ruta /jardin
 - Es el punto de partida. Muestra el árbol, su nivel y su salud.
-- XP y niveles: Semilla → … → Jardín próspero. Niveles en 0, 1.000, 2.500, 5.000, 9.000 y 15.000 XP
-  (cada nivel pide más). XP sale de misiones, rachas (40 XP), insignias (50 XP), que te rieguen
+- XP y niveles: Semilla → … → Jardín próspero. Niveles en 0, 850, 1.850, 4.350, 8.350 y 14.350 XP
+  (el 2 pide 850, el 3 mil más, y cada nivel siguiente pide más). XP sale de misiones, rachas (40 XP), insignias (50 XP), que te rieguen
   amigos y de invitar gente.
 - Salud (0-100%): sube si registras ingresos, ahorras, controlas deudas y estás al día.
 - Clima: ahorrar → llueve; registrar un ingreso → sale el sol y caen monedas; un pago por vencer
@@ -45,8 +45,9 @@ con sus días de pago; se cambia en Perfil).
 
 ## MISIONES — ruta /misiones
 - Misiones diarias (5, 10 o 20 XP), una semanal (60 XP), cofres para reclamar y racha de días.
-- Misiones de invitar: invitar 1, 2 y 3 personas (25, 50 y 75 XP). Cuentan cuando la persona se
-  registra con tu enlace; quedan conectados automáticamente en Social.
+- Misiones de invitar: invitar 1, 2 y 3 personas (25, 50 y 75 XP). Solo cuentan personas NUEVAS que
+  se registran con tu enlace y verifican su correo; quedan conectados automáticamente en Social.
+  Alguien que ya tenía cuenta y abre el enlace queda conectado, pero no cuenta para la misión.
 - Recordatorios de misiones pendientes a las 10:30 y 18:30, y a las 20:00 "¿Registraste tus gastos
   de hoy?".
 
@@ -112,6 +113,9 @@ con sus días de pago; se cambia en Perfil).
 - Botón Historial: movimientos con buscador y filtros; "Elegir mes" para meses anteriores (en
   quincenal separados en Periodo 1 y 2). Un gasto registrado por error se elimina desde el
   historial: la plata vuelve a tu disponible (o a la tarjeta).
+- El historial también muestra lo de Social: préstamos entre usuarios (dados, recibidos y previos),
+  sus abonos y los aportes/retiros de ahorros compartidos. Los préstamos y abonos no cuentan como
+  ingreso ni gasto (como "Me deben"); los aportes a ahorros compartidos sí suman al ahorro.
 - Exportar a PDF (eliges el mes).
 
 ## AHORRO — ruta /ahorro
@@ -130,6 +134,7 @@ con sus días de pago; se cambia en Perfil).
   pasarse. Se registra con el botón "Gasto" de la categoría o eligiendo "Del hogar" al registrar
   un gasto.
 - Bolsillos compartidos: metas de ahorro en grupo con calculadora para aportar según ingresos.
+  "Retirar" pide un retiro que aprueba la otra persona del bolsillo (nadie aprueba lo suyo).
   Al crearlo se puede marcar "Ya tenemos algo ahorrado para esto" y, al aportar, "Esta plata ya la
   tenía ahorrada": suma al bolsillo SIN descontarla de la billetera (para lo que ya tenían guardado).
 - Préstamos entre usuarios de Kiri: pides prestado con fecha de pago (1 semana, 15 días, fin de
