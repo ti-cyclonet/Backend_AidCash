@@ -6,6 +6,7 @@ import { verifyCredentials } from '../lib/authoriza-auth.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
+import { acreditarReferido } from '../lib/invitaciones.js'
 
 const router = Router()
 
@@ -340,6 +341,13 @@ router.post('/activate-user', requireInternalKey, async (req: Request, res: Resp
     })
 
     console.log(`[Plan] User ${user.correo} activated (contract ${contractId || 'N/A'})${planUpgraded ? ' — plan upgraded to ' + welcomeFlag : ''}`)
+
+    // Authoriza llama aquí cuando la persona verifica su correo: si llegó con
+    // un enlace de invitación, ahora sí cuenta para la misión de quien la
+    // invitó (solo al activarse por primera vez, antes de su primer login).
+    if (!user.isActive && user.invitedById && (await prisma.refreshToken.count({ where: { userId: user.id } })) === 0) {
+      acreditarReferido(user.id).catch(() => {})
+    }
 
     return res.json({ success: true, message: 'User activated successfully.' })
   } catch (error: any) {
