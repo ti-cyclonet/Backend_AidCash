@@ -112,7 +112,9 @@ con sus días de pago; se cambia en Perfil).
   egresos y gasto por categoría.
 - Botón Historial: movimientos con buscador y filtros; "Elegir mes" para meses anteriores (en
   quincenal separados en Periodo 1 y 2). Un gasto registrado por error se elimina desde el
-  historial: la plata vuelve a tu disponible (o a la tarjeta).
+  historial: la plata vuelve a tu disponible (o a la tarjeta). Un ingreso registrado por error también
+  se elimina desde el historial (botón Eliminar): se descuenta del disponible y de los bolsillos de la
+  billetera como si nunca se hubiera registrado; los pagos hechos con esa plata siguen registrados.
 - El historial también muestra lo de Social: préstamos entre usuarios (dados, recibidos y previos),
   sus abonos y los aportes/retiros de ahorros compartidos. Los préstamos y abonos no cuentan como
   ingreso ni gasto (como "Me deben"); los aportes a ahorros compartidos sí suman al ahorro.
