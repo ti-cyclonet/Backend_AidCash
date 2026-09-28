@@ -17,13 +17,21 @@ const createSchema = z.object({
   partnerIds: z.array(z.string().min(1)).min(1), // Ahora soporta múltiples miembros
   nombre: z.string().min(1),
   meta: z.number().min(0).optional(),
+  // Ahorro que ya tenían antes de Kiri (queda como aporte de quien lo crea,
+  // sin descontarlo de su billetera)
+  montoInicial: z.number().min(0).optional(),
 })
 
 const depositSchema = z.object({
   monto: z.number().min(0.01),
   nota: z.string().optional(),
   tipo: z.enum(['aporte', 'retiro']).default('aporte'),
+  // "Esta plata ya la tenía ahorrada": suma al bolsillo SIN descontar de la billetera
+  yaAhorrado: z.boolean().optional(),
 })
+
+// Marca en la nota de un aporte de plata que ya estaba ahorrada (no salió de la billetera)
+const TAG_PREVIO = '[APORTE_PREVIO]'
 
 const respondSchema = z.object({
   depositId: z.string().min(1),
@@ -87,7 +95,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createSchema), checkLimit('nBolsillosCompartidos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { partnerIds, nombre, meta = 0 } = req.body as { partnerIds: string[]; nombre: string; meta?: number }
+    const { partnerIds, nombre, meta = 0, montoInicial = 0 } = req.body as { partnerIds: string[]; nombre: string; meta?: number; montoInicial?: number }
 
     // Verificar que no se incluya a sí mismo
     const uniquePartners = partnerIds.filter(id => id !== userId)
@@ -110,7 +118,8 @@ router.post('/', validate(createSchema), checkLimit('nBolsillosCompartidos'), as
       data: {
         nombre,
         meta,
-        balance: 0,
+        balance: montoInicial,
+        ...(montoInicial > 0 ? { deposits: { create: [{ userId, monto: montoInicial, nota: `${TAG_PREVIO} Lo que ya tenían ahorrado` }] } } : {}),
         members: {
           create: [
             { userId, role: 'owner' },
@@ -151,7 +160,8 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
   try {
     const userId = req.user!.userId
     const pocketId = req.params.id as string
-    const { monto, nota, tipo = 'aporte' } = req.body as { monto: number; nota?: string; tipo?: 'aporte' | 'retiro' }
+    const { monto, nota, tipo = 'aporte', yaAhorrado = false } = req.body as { monto: number; nota?: string; tipo?: 'aporte' | 'retiro'; yaAhorrado?: boolean }
+    const previo = tipo === 'aporte' && yaAhorrado
 
     // Verificar que el usuario es miembro del bolsillo
     const membership = await prisma.sharedPocketMember.findFirst({
@@ -162,7 +172,10 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
       return
     }
 
-    if (tipo === 'aporte') {
+    if (previo) {
+      // Plata que ya estaba ahorrada por fuera de Kiri: solo suma al bolsillo
+      await prisma.sharedPocket.update({ where: { id: pocketId }, data: { balance: { increment: monto } } })
+    } else if (tipo === 'aporte') {
       // Verificar que el usuario tiene saldo suficiente en su wallet
       const user = await prisma.user.findUnique({ where: { id: userId }, select: { cashBalance: true } })
       if (!user || Number(user.cashBalance) < monto) {
@@ -203,7 +216,7 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
         sharedPocketId: pocketId,
         userId,
         monto: tipo === 'retiro' ? -monto : monto,
-        nota: nota ? `[${tipo === 'retiro' ? 'RETIRO_PENDIENTE' : 'APORTE'}] ${nota}` : `[${tipo === 'retiro' ? 'RETIRO_PENDIENTE' : 'APORTE'}]`,
+        nota: `${previo ? TAG_PREVIO : `[${tipo === 'retiro' ? 'RETIRO_PENDIENTE' : 'APORTE'}]`}${nota ? ` ${nota}` : ''}`,
       },
     })
 

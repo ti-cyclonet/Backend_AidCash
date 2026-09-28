@@ -178,6 +178,12 @@ router.get('/shared', async (req: Request, res: Response): Promise<void> => {
           id: d.id,
           nombre: d.nombre,
           montoTotal: Number(d.montoTotal),
+          // Lo que falta y la cuota — una deuda antigua se registra con lo que
+          // ya habían pagado, así los dos ven el avance real
+          saldoRestante: Number(d.saldoRestante),
+          cuotaPeriodo: Number(d.cuotaPeriodo),
+          frecuenciaPago: d.frecuenciaPago,
+          diasPago: d.diasPago,
           tipoDeuda: d.tipoDeuda,
           tasaInteres: d.tasaInteres ? Number(d.tasaInteres) : null,
           estado: d.estado,

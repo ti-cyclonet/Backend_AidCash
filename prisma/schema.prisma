@@ -796,6 +796,12 @@ model Loan {
   montoOriginal   Decimal? @map("monto_original") @db.Decimal(12, 2)
   // Referencia al gasto hormiga que originó el split (opcional)
   sourceExpenseId String?  @map("source_expense_id")
+  // Préstamo que YA existía antes de Kiri (la plata se entregó hace tiempo, tal
+  // vez ya se gastó): al confirmarlo NO se mueve plata de ninguna billetera,
+  // solo queda el registro para que ambos lleven el control de los abonos.
+  sinDesembolso   Boolean  @default(false) @map("sin_desembolso")
+  // Quién lo registró (el otro es quien confirma)
+  creadoPorId     String?  @map("creado_por_id")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

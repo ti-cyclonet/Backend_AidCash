@@ -130,10 +130,22 @@ con sus días de pago; se cambia en Perfil).
   pasarse. Se registra con el botón "Gasto" de la categoría o eligiendo "Del hogar" al registrar
   un gasto.
 - Bolsillos compartidos: metas de ahorro en grupo con calculadora para aportar según ingresos.
+  Al crearlo se puede marcar "Ya tenemos algo ahorrado para esto" y, al aportar, "Esta plata ya la
+  tenía ahorrada": suma al bolsillo SIN descontarla de la billetera (para lo que ya tenían guardado).
 - Préstamos entre usuarios de Kiri: pides prestado con fecha de pago (1 semana, 15 días, fin de
   mes, 1 mes u otra); el otro aprueba; abonos confirmados por ambos; cualquiera cambia la fecha;
-  recordatorios el día antes, el día y si hay atraso.
-- Deudas compartidas (pareja/familia): informativas, con la parte de cada uno.
+  recordatorios el día antes, el día y si hay atraso. Un préstamo NUEVO mueve plata: sale de la
+  billetera de quien presta y entra a la de quien recibe.
+- "Ya nos prestamos antes": registrar un préstamo que ya existía (aunque esa plata ya se gastó).
+  Se elige "Yo le presté" o "Me prestó", cuánto se prestó y cuánto falta si ya hubo abonos. NO mueve
+  plata de ninguna billetera; la otra persona lo confirma ("Sí, es correcto" / "No es así") y desde
+  ahí llevan juntos los abonos (esos sí mueven plata). Quien lo registró lo puede retirar mientras
+  no esté confirmado. Aparece con la etiqueta "Previo".
+- Deudas compartidas (pareja/familia): informativas, con la parte de cada uno, cuota, día de pago y
+  % pagado. Si es una deuda que ya venían pagando, se marca y se escribe cuánto falta hoy (y si ya
+  pagaron la cuota de este mes), así los dos ven el avance real.
+- La tarjeta de perfil de cada conexión (al tocar a la persona) muestra rol, ahorros y préstamos
+  entre ustedes; la de la pareja va en rosa.
 
 ## PERFIL — ruta /perfil
 - Foto (se guarda en la cuenta), datos, frecuencia de ingreso, "Notificaciones del celular"
