@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { requireFeature } from '../middleware/limit-enforcement.js'
 import { belvoService } from '../services/belvo.service.js'
 
 const router = Router()
@@ -55,6 +56,9 @@ router.get('/status', async (_req: Request, res: Response): Promise<void> => {
 })
 
 // ─── GET /open-banking/widget-token — Token para el Connect Widget ────────────
+
+// Todo lo demás es de KIRI PRO
+router.use(requireFeature('openBanking'))
 
 router.get('/widget-token', async (req: Request, res: Response): Promise<void> => {
   try {

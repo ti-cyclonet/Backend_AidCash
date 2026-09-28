@@ -157,7 +157,7 @@ router.post('/invite', validate(inviteSchema), checkLimit('nConexiones'), async 
 
 // ─── POST /connections/accept ─────────────────────────────────────────────────
 
-router.post('/accept', validate(respondSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/accept', validate(respondSchema), checkLimit('nConexiones'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { connectionId } = req.body as { connectionId: string }

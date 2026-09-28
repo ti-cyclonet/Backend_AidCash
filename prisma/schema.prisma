@@ -57,11 +57,15 @@ model User {
   facturaPendiente      Json?    @map("factura_pendiente")
   // Cambio de plan pedido desde Kiri y aún no activado (contrato por firmar/pagar)
   cambioPlan            Json?    @map("cambio_plan")
+  // Prueba de KIRI PLUS: 14 días al registrarse, +7 por cada amigo invitado
+  pruebaPlusHasta       DateTime? @map("prueba_plus_hasta")
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
   // Relaciones existentes
   debts                 Debt[]
+  aiUsos                AiUso[]
+  escenariosProyeccion  ProyeccionEscenario[]
   fixedExpenses         FixedExpense[]
   savingsHistory        SavingsHistory[]
   extraIncomes          ExtraIncome[]
@@ -902,4 +906,36 @@ model ExternalLoanPayment {
 
   @@index([loanId])
   @@map("external_loan_payments")
+}
+
+// Uso mensual de la IA por usuario (Kiri Coach, dictado, escáner) — para los
+// topes de cada plan. periodo = "YYYY-MM" (hora local del servidor).
+model AiUso {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  periodo   String
+  tipo      String   // coach | dictado | escaneo
+  cantidad  Int      @default(0)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodo, tipo])
+  @@map("ai_uso")
+}
+
+// Escenarios guardados de Proyecciones (KIRI PRO)
+model ProyeccionEscenario {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  nombre          String
+  aporteExtra     Decimal  @map("aporte_extra") @db.Decimal(12, 2)
+  recortarHormiga Boolean  @default(false) @map("recortar_hormiga")
+  meses           Int      @default(12)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("proyeccion_escenarios")
 }

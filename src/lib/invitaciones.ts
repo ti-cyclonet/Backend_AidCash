@@ -18,6 +18,7 @@ import { prisma } from '../config/database.js'
 import { emitToUser, SOCKET_EVENTS } from './socket.js'
 import { pushReferralJoined, pushInviteAccepted } from './push.js'
 import { recordOnboardingAction, recordReferral } from './missions.js'
+import { resolverPlan, invalidarPlan, DIAS_PRUEBA_POR_INVITADO } from './planes.js'
 
 const ROLE_LABEL: Record<ConnectionRole, string> = { FRIEND: 'amigo', FAMILY: 'familia', PARTNER: 'pareja' }
 
@@ -133,10 +134,21 @@ export async function acreditarReferido(nuevoUsuarioId: string): Promise<void> {
     const role = conn?.role ?? 'FRIEND'
     await recordOnboardingAction(inviterId, 'invitar_amigo')
     await recordReferral(inviterId)
+
+    // Recompensa: 7 días de KIRI PLUS a quien invitó, si está en el plan gratis
+    let premio = ''
+    const planInvitador = await resolverPlan(inviterId)
+    if (planInvitador.tier === 'FREE' || planInvitador.fuente === 'prueba') {
+      const inv = await prisma.user.findUnique({ where: { id: inviterId }, select: { pruebaPlusHasta: true } })
+      const desde = inv?.pruebaPlusHasta && inv.pruebaPlusHasta > new Date() ? inv.pruebaPlusHasta : new Date()
+      await prisma.user.update({ where: { id: inviterId }, data: { pruebaPlusHasta: new Date(desde.getTime() + DIAS_PRUEBA_POR_INVITADO * 86400000) } })
+      invalidarPlan(inviterId)
+      premio = ` ¡Ganaste ${DIAS_PRUEBA_POR_INVITADO} días de KIRI PLUS!`
+    }
     emitToUser(inviterId, SOCKET_EVENTS.REFERRAL_JOINED, {
       nombre: nuevo.nombre,
       role,
-      message: `${nuevo.nombre} se unió a Kiri con tu enlace y ya está en tus conexiones como ${ROLE_LABEL[role]}.`,
+      message: `${nuevo.nombre} se unió a Kiri con tu enlace y ya está en tus conexiones como ${ROLE_LABEL[role]}.${premio}`,
       route: '/misiones',
     })
     pushReferralJoined(inviterId, nuevo.nombre, ROLE_LABEL[role]).catch(() => {})

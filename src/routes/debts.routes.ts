@@ -3,7 +3,8 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
-import { checkLimit, attachUsageWarning } from '../middleware/limit-enforcement.js'
+import { checkLimit, attachUsageWarning, respuestaFuncion } from '../middleware/limit-enforcement.js'
+import { resolverPlan } from '../lib/planes.js'
 import { recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { cuotaEfectivaTarjeta, reverseCardPaymentAllocations, buildInstallmentRevertOps } from '../lib/installments.js'
@@ -225,6 +226,11 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
     } = { esCompartida: false, connectionId: null, montoParticipanteA: null, montoParticipanteB: null }
 
     if (esCompartida) {
+      const plan = await resolverPlan(req.user!.userId)
+      if (!plan.features.sharedDebts && plan.fuente !== 'sin_conexion') {
+        res.status(403).json(respuestaFuncion(plan, 'sharedDebts'))
+        return
+      }
       if (!connectionId || montoParticipanteA == null || montoParticipanteB == null) {
         res.status(400).json({ error: 'Falta la conexión o los montos de cada participante' })
         return

@@ -19,6 +19,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { checkLimit } from '../middleware/limit-enforcement.js'
 import { planPocketCredit, planPocketDeduction, planDeduccionEnCascada } from '../lib/wallet.js'
 import type { ExternalLoan, ExternalLoanPayment, Prisma } from '@prisma/client'
 
@@ -145,7 +146,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /external-loans — Registrar un préstamo ─────────────────────────────
 
-router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/', validate(createSchema), checkLimit('nMeDeben'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const body = req.body as z.infer<typeof createSchema>

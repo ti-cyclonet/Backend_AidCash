@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { checkLimit } from '../middleware/limit-enforcement.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
 import type { SavingsPocket } from '@prisma/client'
 
@@ -72,7 +73,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /savings-pockets — Crear un bolsillo ───────────────────────────────
 
-router.post('/', validate(createPocketSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/', validate(createPocketSchema), checkLimit('nBolsillos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     // Antes solo se guardaban nombre/meta/color/ícono: la fecha límite, la

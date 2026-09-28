@@ -3,6 +3,8 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { resolverPlan } from '../lib/planes.js'
+import { respuestaFuncion } from '../middleware/limit-enforcement.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -107,6 +109,12 @@ router.post('/badges', validate(addBadgeSchema), async (req: Request, res: Respo
   try {
     const userId = req.user!.userId
     const { badgeId } = req.body
+
+    // Las insignias "pro_" son exclusivas de KIRI PRO
+    if (String(badgeId).startsWith('pro_')) {
+      const plan = await resolverPlan(userId)
+      if (!plan.features.exclusiveBadges) { res.status(403).json(respuestaFuncion(plan, 'exclusiveBadges')); return }
+    }
 
     // Upsert — no falla si ya existe
     const badge = await prisma.userBadge.upsert({

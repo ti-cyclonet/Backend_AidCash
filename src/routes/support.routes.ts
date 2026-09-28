@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { sendMail } from '../lib/mail.js'
 import { env } from '../config/env.js'
+import { resolverPlan } from '../lib/planes.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -39,8 +40,13 @@ router.post('/', validate(createSupportSchema), async (req: Request, res: Respon
       select: { nombre: true, correo: true },
     })
 
+    // KIRI PRO: soporte prioritario (se marca en el asunto y arriba del correo)
+    const plan = await resolverPlan(userId)
+    const prioritario = plan.features.prioritySupport === true
     const html = `
+      ${prioritario ? '<p style="background:#fef3c7;padding:8px 12px;border-radius:8px"><strong>⭐ Cliente KIRI PRO — atención prioritaria</strong></p>' : ''}
       <h2>Nuevo ticket de soporte — Kiri Finance</h2>
+      <p><strong>Plan:</strong> ${plan.planName}</p>
       <p><strong>De:</strong> ${user?.nombre ?? 'Usuario'} (${user?.correo ?? 'sin correo'})</p>
       <p><strong>Título:</strong> ${titulo}</p>
       <p><strong>Descripción:</strong></p>
@@ -50,7 +56,7 @@ router.post('/', validate(createSupportSchema), async (req: Request, res: Respon
 
     const sent = await sendMail({
       to: env.SUPPORT_EMAIL_TO,
-      subject: `Soporte Kiri Finance — ${titulo}`,
+      subject: `${prioritario ? '[PRO · Prioritario] ' : ''}Soporte Kiri Finance — ${titulo}`,
       html,
       replyTo: user?.correo,
       attachments: imagenes.length > 0
@@ -63,7 +69,7 @@ router.post('/', validate(createSupportSchema), async (req: Request, res: Respon
       return
     }
 
-    res.status(201).json({ message: 'Ticket enviado' })
+    res.status(201).json({ message: 'Ticket enviado', prioritario })
   } catch (error) {
     console.error('[CreateSupport]', error)
     res.status(500).json({ error: 'Error al enviar el ticket de soporte' })

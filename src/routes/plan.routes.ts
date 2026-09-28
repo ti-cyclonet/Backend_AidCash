@@ -7,6 +7,7 @@ import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
 import { acreditarReferido } from '../lib/invitaciones.js'
+import { resolverPlan, invalidarPlan, otorgarInsigniaPro } from '../lib/planes.js'
 import { avisar } from '../lib/push.js'
 import { z } from 'zod'
 import { Prisma } from '@prisma/client'
@@ -31,112 +32,30 @@ interface TenantLimitsResponse {
 }
 
 /**
- * GET /api/plan
- * Returns the current user's plan features from Authoriza.
+ * GET /api/plan — el plan EFECTIVO del usuario (lib/planes.ts):
+ * su contrato en Authoriza, la prueba de 14 días de PLUS, el PLUS que da una
+ * pareja PRO o el acceso completo de QA. Incluye funciones (features) y topes
+ * (limits) con los que el frontend muestra lo que tiene y lo que desbloquea.
  */
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const userEmail = (req as any).user?.correo
-
-    // ═══ BYPASS: cuentas con acceso completo a todos los módulos (ver lib/acceso-completo.ts) ═══
-    if (tieneAccesoCompleto(userEmail)) {
-      return res.json({
-        planName: 'KIRI PRO (Test)',
-        features: {
-          budgetManagement: true,
-          debtsTracking: true,
-          fixedExpenses: true,
-          savingsPockets: true,
-          basicReports: true,
-          impulseExpenses: true,
-          extraIncomes: true,
-          emergencyFund: true,
-          gamification: true,
-          aiCoach: true,
-          advancedReports: true,
-          debtStrategies: true,
-          socialConnections: true,
-          sharedPockets: true,
-          p2pLoans: true,
-        },
-        limits: {},
-        hasPlan: true,
-      })
-    }
-
-    if (!userEmail) {
-      return res.json({ planName: 'Sin plan', features: {}, limits: {}, hasPlan: false })
-    }
-
-    // First, find the user in Authoriza by email to get their Authoriza userId
-    const checkUrl = `${env.AUTHORIZA_API_URL}/api/auth/check-email`
-    const checkRes = await fetch(checkUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: userEmail }),
-    })
-
-    if (!checkRes.ok) {
-      return res.json({ planName: 'Sin plan', features: {}, limits: {}, hasPlan: false })
-    }
-
-    const checkData = await checkRes.json() as any
-    if (!checkData.exists || !checkData.userId) {
-      return res.json({ planName: 'Sin plan', features: {}, limits: {}, hasPlan: false })
-    }
-
-    const authorizaUserId = checkData.userId
-    const url = `${env.AUTHORIZA_API_URL}/api/contracts/tenant/${authorizaUserId}/limits?application=Kiri`
-    const response = await fetch(url)
-
-    if (!response.ok) {
-      // If no contract found, return a "no plan" response
-      if (response.status === 404) {
-        return res.json({
-          planName: 'Sin plan',
-          features: {},
-          limits: {},
-          hasPlan: false,
-        })
-      }
-      throw new Error(`Authoriza responded with status ${response.status}`)
-    }
-
-    const data = await response.json() as TenantLimitsResponse
-
-    // Filter only Kiri limits
-    const kiriLimits = data.limits.filter(
-      (l) => l.targetApplication.toLowerCase() === 'kiri'
-    )
-
-    // Separate features from quantity limits
-    const features: Record<string, boolean> = {}
-    const quantityLimits: Record<string, { displayName: string; maxValue: number }> = {}
-
-    for (const limit of kiriLimits) {
-      if (limit.limitType === 'feature') {
-        features[limit.variableName] = limit.maxValue === 1
-      } else {
-        quantityLimits[limit.variableName] = {
-          displayName: limit.displayName,
-          maxValue: limit.maxValue,
-        }
-      }
-    }
-
+    const plan = await resolverPlan(req.user!.userId)
+    if (plan.features.exclusiveBadges) otorgarInsigniaPro(req.user!.userId, 'pro_jardin_dorado')
     return res.json({
-      planName: data.packageName,
-      contractId: data.contractId,
-      isBillable: data.isBillable,
-      features,
-      limits: quantityLimits,
+      planName: plan.planName,
+      tier: plan.tier,
+      fuente: plan.fuente,
+      contractId: plan.contractId,
+      isBillable: plan.isBillable ?? false,
+      features: plan.features,
+      limits: plan.limites,
       hasPlan: true,
+      pruebaHasta: plan.pruebaHasta ?? null,
+      parejaNombre: plan.parejaNombre ?? null,
     })
   } catch (error: any) {
     console.error('[Plan] Error fetching plan:', error.message)
-    return res.status(503).json({
-      error: 'No se pudo obtener la información del plan. Intente más tarde.',
-    })
+    return res.status(503).json({ error: 'No se pudo obtener la información del plan. Intente más tarde.' })
   }
 })
 
@@ -172,7 +91,7 @@ router.get('/available', authMiddleware, async (_req: Request, res: Response) =>
 router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userEmail = (req as any).user?.correo
-    const { packageId, password, packageName, acceptTerms, acceptHabeasData } = req.body
+    const { packageId, password, packageName, acceptTerms, acceptHabeasData, billingCycle } = req.body
 
     if (!packageId || !password) {
       return res.status(400).json({
@@ -200,6 +119,8 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
         // Aceptación de términos y tratamiento de datos al contratar (Authoriza la registra)
         ...(acceptTerms ? { acceptTerms: true } : {}),
         ...(acceptHabeasData ? { acceptHabeasData: true } : {}),
+        // Mensual o anual (el anual es una sola factura por el año, con descuento)
+        billingCycle: billingCycle === 'annual' ? 'annual' : 'monthly',
       }),
     })
 
@@ -220,7 +141,7 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
     // Recordarlo para mostrar en Mi plan "tu contrato está listo en FactoNet"
     await prisma.user.update({
       where: { id: (req as any).user.userId },
-      data: { cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, fecha: new Date().toISOString() } },
+      data: { cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString() } },
     }).catch(() => {})
 
     return res.json({
@@ -353,6 +274,7 @@ router.post('/activate-user', requireInternalKey, async (req: Request, res: Resp
     })
 
     console.log(`[Plan] User ${user.correo} activated (contract ${contractId || 'N/A'})${planUpgraded ? ' — plan upgraded to ' + welcomeFlag : ''}`)
+    invalidarPlan(user.id, user.correo)
 
     // Authoriza llama aquí cuando la persona verifica su correo: si llegó con
     // un enlace de invitación, ahora sí cuenta para la misión de quien la
@@ -448,6 +370,7 @@ router.post('/set-user-status', requireInternalKey, async (req: Request, res: Re
     }
 
     console.log(`[Plan] User ${user.correo} status updated: isActive=${allowed}`)
+    invalidarPlan(user.id, user.correo)
     return res.json({ success: true, message: `User access ${allowed ? 'enabled' : 'disabled'}.` })
   } catch (error: any) {
     console.error('[Plan] Error setting user status:', error.message)
@@ -590,6 +513,7 @@ router.post('/factura-evento', requireInternalKey, async (req: Request, res: Res
       },
     })
 
+    invalidarPlan(user.id, email)
     const { title, body } = avisos[evento]
     await avisar(user.id, { title, body, url: '/mi-plan#factonet', tag: `factura-${factura.codigo}`, tipo: 'factura' })
     return res.json({ success: true })

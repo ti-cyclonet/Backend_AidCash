@@ -5,6 +5,8 @@ import { prisma } from '../config/database.js'
 import { categoriaDelUsuario as categoriaHogarDelUsuario, avisarGastoHogar } from '../lib/hogar.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { hogarHabilitado, resolverPlan } from '../lib/planes.js'
+import { respuestaFuncion } from '../middleware/limit-enforcement.js'
 import { recordMissionAction } from '../lib/missions.js'
 import { getPeriodo } from '../lib/period.js'
 import { planPocketCredit, planPocketDeduction } from '../lib/wallet.js'
@@ -170,6 +172,10 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
     const sharedCategoryId: string | null = req.body.sharedCategoryId ?? null
     if (sharedCategoryId && !(await categoriaHogarDelUsuario(userId, sharedCategoryId))) {
       res.status(400).json({ error: 'Esa categoría del hogar no es tuya' })
+      return
+    }
+    if (sharedCategoryId && !(await hogarHabilitado(userId))) {
+      res.status(403).json(respuestaFuncion(await resolverPlan(userId), 'householdBudget'))
       return
     }
     let nombre: string = req.body.nombre

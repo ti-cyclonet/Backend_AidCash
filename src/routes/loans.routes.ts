@@ -8,7 +8,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { pushLoanPayment, pushLoanRequested, pushLoanApproved, pushLoanRejected, pushLoanCancelled, pushLoanPaymentStatus, avisar } from '../lib/push.js'
-import { checkLimit } from '../middleware/limit-enforcement.js'
+import { checkLimit, requireFeature } from '../middleware/limit-enforcement.js'
 import { requireConnection } from '../lib/connections.js'
 
 const router = Router()
@@ -151,7 +151,7 @@ router.patch('/:id/fecha', validate(fechaSchema), async (req: Request, res: Resp
 // ─── POST /loans/request ──────────────────────────────────────────────────────
 // Borrower solicita préstamo a Lender
 
-router.post('/request', validate(requestLoanSchema), checkLimit('nPrestamos'), async (req: Request, res: Response): Promise<void> => {
+router.post('/request', validate(requestLoanSchema), requireFeature('p2pLoans'), checkLimit('nPrestamos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const borrowerId = req.user!.userId
     const { lenderId, amount, descripcion, fechaCompromiso } = req.body as {
@@ -223,7 +223,7 @@ const existenteSchema = z.object({
   fechaCompromiso: fechaISO.nullable().optional(),
 }).strict()
 
-router.post('/existente', validate(existenteSchema), checkLimit('nPrestamos'), async (req: Request, res: Response): Promise<void> => {
+router.post('/existente', validate(existenteSchema), requireFeature('p2pLoans'), checkLimit('nPrestamos'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { otroId, rol, monto, pendiente, descripcion, fechaCompromiso } = req.body as z.infer<typeof existenteSchema>

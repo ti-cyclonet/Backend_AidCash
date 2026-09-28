@@ -15,9 +15,11 @@ import { cargarContextoDeudas, serializarDeuda } from '../debt-view.js'
 import { fixedPeriodo } from '../fixed-expense-payments.js'
 import { getMontoPorPeriodo } from '../period.js'
 import { resumenHogar } from '../hogar.js'
+import { resolverPlan } from '../planes.js'
 
 export interface ContextoIA {
   hoy: string
+  plan: { nombre: string; fuente: string; pruebaHasta: string | null; limites: string } | null
   usuario: { nombre: string; frecuencia: string; ingresoBase: number; disponible: number; ahorroTotal: number }
   categorias: { id: string; nombre: string; limite: number; gastado: number; disponible: number; estado: string }[]
   deudas: { id: string; nombre: string; tipo: string; saldo: number; cuota: number; tasaMensual: number | null; frecuencia: string; diasPago: string; pagadaEstePeriodo: boolean; atrasado: number }[]
@@ -49,6 +51,15 @@ export async function construirContexto(userId: string, now: Date = new Date()):
     prisma.fixedExpensePayment.findMany({ where: { fixedExpense: { userId }, createdAt: { gte: hace3 }, esMarcador: false }, orderBy: { createdAt: 'desc' }, select: { montoPagado: true, createdAt: true, fixedExpense: { select: { nombre: true } } } }),
     prisma.savingsHistory.findMany({ where: { userId, tipo: 'ahorro' }, orderBy: { createdAt: 'desc' }, select: { monto: true, createdAt: true } }),
   ])
+
+  // Plan y límites (para que el coach sepa qué puede crear y no prometa lo que el plan no tiene)
+  const plan = await resolverPlan(userId).catch(() => null)
+  const lim = (v: string) => { const m = plan?.limites[v]?.maxValue; return m == null ? '?' : m >= 999999 ? '∞' : String(m) }
+  const planCtx = plan ? {
+    nombre: plan.planName, fuente: plan.fuente,
+    pruebaHasta: plan.pruebaHasta ? dia(new Date(plan.pruebaHasta)) : null,
+    limites: `categorías ${lim('nCategorias')}, deudas ${lim('nDeudas')}, gastos fijos ${lim('nGastosFijos')}, bolsillos ${lim('nBolsillos')}, me deben ${lim('nMeDeben')}, ingresos extra ${lim('nIngresosExtra')}, conexiones ${lim('nConexiones')}; préstamos/deudas compartidas ${plan.features.p2pLoans ? 'sí' : 'no'}; hogar ${plan.features.householdBudget ? 'sí' : 'no'}`,
+  } : null
 
   const ctxDeudas = await cargarContextoDeudas(debtsRaw)
   const deudas = debtsRaw.map(d => {
@@ -94,6 +105,7 @@ export async function construirContexto(userId: string, now: Date = new Date()):
 
   return {
     hoy: now.toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
+    plan: planCtx,
     usuario: {
       nombre: user.nombre.split(' ')[0],
       frecuencia: user.frecuenciaIngreso,
@@ -122,6 +134,7 @@ export function contextoComoTexto(c: ContextoIA): string {
   const u = c.usuario
   const lineas: string[] = []
   lineas.push(`Hoy: ${c.hoy}`)
+  if (c.plan) lineas.push(`Plan: ${c.plan.nombre}${c.plan.fuente === 'prueba' && c.plan.pruebaHasta ? ` (prueba gratis hasta ${c.plan.pruebaHasta})` : c.plan.fuente === 'pareja' ? ' (gracias al KIRI PRO de su pareja)' : ''} · límites: ${c.plan.limites}. Si una acción supera el plan, avísale y sugiérele Mi plan.`)
   lineas.push(`Usuario: ${u.nombre} · cobra ${u.frecuencia} · sueldo base por periodo ${$(u.ingresoBase)} · disponible hoy ${$(u.disponible)} · ahorrado en total ${$(u.ahorroTotal)}`)
   lineas.push('\nCATEGORÍAS DE PRESUPUESTO (este periodo) [id | nombre | límite | gastado | disponible | estado]:')
   lineas.push(c.categorias.length ? c.categorias.map(x => `- ${x.id} | ${x.nombre} | ${$(x.limite)} | ${$(x.gastado)} | ${$(x.disponible)} | ${x.estado}`).join('\n') : '- (no tiene categorías)')
