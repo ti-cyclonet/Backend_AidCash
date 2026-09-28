@@ -2,12 +2,17 @@ import { Router, Request, Response } from 'express'
 import { z } from 'zod'
 import { randomUUID } from 'crypto'
 import { prisma } from '../config/database.js'
+import { categoriaDelUsuario as categoriaHogarDelUsuario, avisarGastoHogar } from '../lib/hogar.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { recordMissionAction } from '../lib/missions.js'
 import { getPeriodo } from '../lib/period.js'
-import { planPocketCredit } from '../lib/wallet.js'
+import { planPocketCredit, planPocketDeduction } from '../lib/wallet.js'
+import { sugerirCategoria, extraerEtiquetaCategoria } from '../lib/categorias.js'
+import { alertaTrasGasto } from '../lib/category-summary.js'
+import { sendPushToUser } from '../lib/push.js'
 import { buildInstallmentRevertOps } from '../lib/installments.js'
+import { esGastoHormiga, nombreBaseGasto } from '../lib/hormiga.js'
 import type { Prisma } from '@prisma/client'
 
 const router = Router()
@@ -37,7 +42,30 @@ const createSchema = z.object({
   // pay-with-card para deudas/gastos fijos (ver debts.routes.ts).
   tarjetaId: z.string().uuid().optional(),
   cuotas: z.number().int().min(1).max(48).optional(),
+  // Si no viene, se clasifica solo (ver lib/hormiga.ts).
+  esHormiga: z.boolean().optional(),
+  // Categoría de presupuesto: omitida = Kiri la sugiere (historial del
+  // usuario o palabras clave); null explícito = "sin categoría".
+  budgetCategoryId: z.string().uuid().nullable().optional(),
+  // Categoría del presupuesto del hogar (compartida con la pareja)
+  sharedCategoryId: z.string().uuid().nullable().optional(),
+  // Clientes nuevos piden que el descuento de la billetera ocurra ACÁ, en la
+  // misma transacción que el gasto — antes el frontend lo hacía en una
+  // segunda llamada y, si fallaba, quedaba el gasto sin descontar. Los
+  // clientes viejos (PWA en caché) no lo mandan y siguen descontando ellos.
+  descontarBilletera: z.boolean().optional(),
 })
+
+const updateSchema = z.object({
+  esHormiga: z.boolean().optional(),
+  categoria: z.enum(['cafe', 'comida', 'transporte', 'antojo', 'salida', 'otro']).optional(),
+  budgetCategoryId: z.string().uuid().nullable().optional(),
+}).strict()
+
+async function categoriaDelUsuario(userId: string, id: string | null | undefined): Promise<boolean> {
+  if (!id) return true
+  return !!(await prisma.budgetCategory.findFirst({ where: { id, userId }, select: { id: true } }))
+}
 
 // ─── GET /impulse-expenses ────────────────────────────────────────────────────
 
@@ -75,6 +103,8 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── GET /impulse-expenses/top-consumos ───────────────────────────────────────
 // Agrupa gastos por nombre, suma montos, ordena desc. Soporta filtro por categoría.
+// `alcance=mes` mira el mes calendario completo en vez del periodo de ingreso
+// (para un usuario quincenal, el periodo es solo media quincena de gastos).
 // IMPORTANTE: Esta ruta DEBE estar antes de /:id para que Express no la confunda.
 
 router.get('/top-consumos', async (req: Request, res: Response): Promise<void> => {
@@ -83,42 +113,46 @@ router.get('/top-consumos', async (req: Request, res: Response): Promise<void> =
     const categoria = req.query.categoria as string | undefined
     const limit = parseInt(req.query.limit as string) || 10
     const periodo = (req.query.periodo as string | undefined) ?? await currentUserPeriodo(userId)
+    const alcanceMes = req.query.alcance === 'mes'
 
-    // Filtro base
-    const where: Record<string, unknown> = { userId, periodo }
+    const now = new Date()
+    const where: Prisma.ImpulseExpenseWhereInput = alcanceMes
+      ? { userId, createdAt: { gte: new Date(now.getFullYear(), now.getMonth(), 1), lt: new Date(now.getFullYear(), now.getMonth() + 1, 1) } }
+      : { userId, periodo }
     if (categoria) where.categoria = categoria
+    if (req.query.soloHormiga === 'true') where.esHormiga = true
 
-    // Agrupar por nombre y sumar montos
-    const grouped = await prisma.impulseExpense.groupBy({
-      by: ['nombre'],
-      where,
-      _sum: { monto: true },
-      _count: { nombre: true },
-      orderBy: { _sum: { monto: 'desc' } },
-      take: limit,
-    })
+    // Se agrupa en memoria por nombre NORMALIZADO, no con groupBy de Prisma
+    // por el nombre crudo: el mismo consumo se guardaba con variantes
+    // ("InDriver", "InDriver [Transporte]", "🐜 indriver") y cada una salía
+    // como un ítem aparte — el top mostraba $50.000 en InDriver cuando la
+    // suma real de todas sus variantes era mucho mayor.
+    const expenses = await prisma.impulseExpense.findMany({ where, select: { nombre: true, monto: true } })
+    const totalGastado = expenses.reduce((s, e) => s + Number(e.monto), 0)
 
-    // Total general del periodo (para calcular porcentajes)
-    const totalResult = await prisma.impulseExpense.aggregate({
-      where,
-      _sum: { monto: true },
-    })
-    const totalGastado = Number(totalResult._sum.monto ?? 0)
+    const grupos = new Map<string, { nombre: string; totalGastado: number; cantidad: number }>()
+    for (const e of expenses) {
+      const nombre = nombreBaseGasto(e.nombre) || e.nombre
+      const key = nombre.toLowerCase()
+      const g = grupos.get(key) ?? { nombre, totalGastado: 0, cantidad: 0 }
+      g.totalGastado = Math.round((g.totalGastado + Number(e.monto)) * 100) / 100
+      g.cantidad++
+      grupos.set(key, g)
+    }
 
-    const items = grouped.map(g => {
-      const totalItem = Number(g._sum.monto ?? 0)
-      return {
-        nombre: g.nombre,
-        totalGastado: totalItem,
-        cantidad: g._count.nombre,
-        porcentaje: totalGastado > 0 ? Math.round((totalItem / totalGastado) * 1000) / 10 : 0,
-      }
-    })
+    const items = [...grupos.values()]
+      .sort((a, b) => b.totalGastado - a.totalGastado)
+      .slice(0, limit)
+      .map(g => ({
+        ...g,
+        porcentaje: totalGastado > 0 ? Math.round((g.totalGastado / totalGastado) * 1000) / 10 : 0,
+      }))
 
     res.json({
       items,
       totalGastado,
       periodo,
+      alcance: alcanceMes ? 'mes' : 'periodo',
     })
   } catch (error) {
     console.error('[TopConsumos]', error)
@@ -131,7 +165,33 @@ router.get('/top-consumos', async (req: Request, res: Response): Promise<void> =
 router.post('/', validate(createSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, monto, categoria, tarjetaId, cuotas } = req.body
+    const { monto, categoria, tarjetaId, cuotas, descontarBilletera } = req.body
+    // Categoría del hogar: solo si es de la pareja de este usuario
+    const sharedCategoryId: string | null = req.body.sharedCategoryId ?? null
+    if (sharedCategoryId && !(await categoriaHogarDelUsuario(userId, sharedCategoryId))) {
+      res.status(400).json({ error: 'Esa categoría del hogar no es tuya' })
+      return
+    }
+    let nombre: string = req.body.nombre
+    const esHormiga: boolean = req.body.esHormiga ?? esGastoHormiga(nombreBaseGasto(nombre), monto)
+
+    // Categoría: explícita → etiqueta legacy en el nombre → sugerencia de Kiri.
+    let budgetCategoryId: string | null | undefined = req.body.budgetCategoryId
+    let categoriaAutomatica: string | null = null
+    if (budgetCategoryId === undefined) {
+      const etiqueta = await extraerEtiquetaCategoria(userId, nombre)
+      if (etiqueta.categoryId) {
+        nombre = etiqueta.nombre
+        budgetCategoryId = etiqueta.categoryId
+      } else {
+        const sugerencia = await sugerirCategoria(userId, nombre)
+        budgetCategoryId = sugerencia?.categoryId ?? null
+        categoriaAutomatica = sugerencia?.fuente ?? null
+      }
+    } else if (!(await categoriaDelUsuario(userId, budgetCategoryId))) {
+      res.status(400).json({ error: 'Categoría no válida' })
+      return
+    }
 
     const periodo = await currentUserPeriodo(userId)
 
@@ -153,7 +213,7 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
           data: { id: installmentId, tarjetaId, cuotaMensual: incrementoCuota, cuotasTotal: numCuotas, descripcion: nombre },
         }),
         prisma.impulseExpense.create({
-          data: { userId, nombre, monto, categoria, periodo, tarjetaId, installmentId },
+          data: { userId, nombre, monto, categoria, periodo, esHormiga, budgetCategoryId, sharedCategoryId, tarjetaId, installmentId },
         }),
         prisma.debt.update({
           where: { id: tarjetaId },
@@ -162,17 +222,63 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
       ])
       expense = createdExpense
     } else {
-      expense = await prisma.impulseExpense.create({
-        data: { userId, nombre, monto, categoria, periodo },
+      const crear = prisma.impulseExpense.create({
+        data: { userId, nombre, monto, categoria, periodo, esHormiga, budgetCategoryId, sharedCategoryId },
       })
+      expense = descontarBilletera
+        ? (await prisma.$transaction([crear, prisma.user.update({ where: { id: userId }, data: planPocketDeduction('libre', monto) })]))[0]
+        : await crear
     }
 
     await recordMissionAction(userId, 'gasto_hormiga')
 
-    res.status(201).json({ expense })
+    // ¿Este gasto hizo cruzar el 80% o el 100% del límite de su categoría?
+    const alertaCategoria = budgetCategoryId ? await alertaTrasGasto(userId, budgetCategoryId, monto) : null
+    if (alertaCategoria) {
+      sendPushToUser(userId, {
+        title: alertaCategoria.nivel === 'excedido' ? `🚨 Te pasaste en ${alertaCategoria.categoria}` : `⚠️ Vas en el ${alertaCategoria.porcentaje}% de ${alertaCategoria.categoria}`,
+        body: `Llevas $${Math.round(alertaCategoria.gastado).toLocaleString('es-CO')} de $${Math.round(alertaCategoria.limite).toLocaleString('es-CO')} en este periodo.`,
+        tag: `categoria-${alertaCategoria.categoryId}`,
+        url: '/gestion',
+      }).catch(() => {})
+    }
+
+    // Hogar: aviso a la pareja (y a los dos si se cruza el 80% / 100%)
+    const hogar = sharedCategoryId ? await avisarGastoHogar(userId, sharedCategoryId, monto, nombre) : null
+
+    res.status(201).json({ expense, categoriaAutomatica, alertaCategoria, hogar, billeteraDescontada: !!descontarBilletera && !tarjetaId })
   } catch (error) {
     console.error('[CreateImpulse]', error)
     res.status(500).json({ error: 'Error al registrar gasto hormiga' })
+  }
+})
+
+// ─── PATCH /impulse-expenses/:id ──────────────────────────────────────────────
+// Corregir la clasificación automática (hormiga sí/no) o la categoría. El
+// monto no se edita acá: ya se descontó de la billetera o de una tarjeta al
+// crearlo — para cambiarlo se elimina (que revierte todo) y se registra de nuevo.
+
+router.patch('/:id', validate(updateSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+
+    const existing = await prisma.impulseExpense.findFirst({ where: { id, userId } })
+    if (!existing) {
+      res.status(404).json({ error: 'Gasto no encontrado' })
+      return
+    }
+
+    if (!(await categoriaDelUsuario(userId, req.body.budgetCategoryId))) {
+      res.status(400).json({ error: 'Categoría no válida' })
+      return
+    }
+
+    const expense = await prisma.impulseExpense.update({ where: { id }, data: req.body })
+    res.json({ expense })
+  } catch (error) {
+    console.error('[UpdateImpulse]', error)
+    res.status(500).json({ error: 'Error al actualizar el gasto' })
   }
 })
 
@@ -183,9 +289,18 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.userId
     const id = req.params.id as string
 
-    const existing = await prisma.impulseExpense.findFirst({ where: { id, userId } })
+    const existing = await prisma.impulseExpense.findFirst({ where: { id, userId }, include: { tarjeta: { select: { nombre: true } } } })
     if (!existing) {
       res.status(404).json({ error: 'Gasto hormiga no encontrado' })
+      return
+    }
+
+    // Si el gasto se dividió con amigos (Social), ya generó préstamos a su
+    // nombre: borrarlo acá dejaría esas deudas apuntando a un gasto que no
+    // existe. Primero hay que resolver/cancelar esos préstamos.
+    const prestamosVivos = await prisma.loan.count({ where: { sourceExpenseId: id, status: { notIn: ['REJECTED', 'PAID'] } } })
+    if (prestamosVivos > 0) {
+      res.status(409).json({ error: 'Este gasto está dividido con amigos en Social. Cancela o termina esos préstamos antes de eliminarlo.' })
       return
     }
 
@@ -216,7 +331,13 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
 
     await prisma.$transaction(ops)
 
-    res.json({ message: 'Gasto hormiga eliminado' })
+    // Qué se revirtió, para que el frontend lo diga tal cual.
+    res.json({
+      message: 'Gasto eliminado',
+      reversion: existing.tarjetaId
+        ? { tipo: 'tarjeta', monto: Number(existing.monto), tarjetaNombre: existing.tarjeta?.nombre ?? null }
+        : { tipo: 'billetera', monto: Number(existing.monto) },
+    })
   } catch (error) {
     console.error('[DeleteImpulse]', error)
     res.status(500).json({ error: 'Error al eliminar gasto hormiga' })

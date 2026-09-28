@@ -4,6 +4,42 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { recordMissionAction } from '../lib/missions.js'
+import { resumenCategorias } from '../lib/category-summary.js'
+import { sugerirCategoria } from '../lib/categorias.js'
+import type { BudgetCategory } from '@prisma/client'
+
+/**
+ * Los gastos fijos de una categoría se guardan en la FK del propio gasto fijo
+ * (FixedExpense.budgetCategoryId). El array legacy `linkedFixedExpenseIds` se
+ * sigue aceptando/devolviendo para no romper el formulario, pero se traduce a
+ * esa FK — antes convivían los dos mecanismos y un mismo gasto podía contar en
+ * dos categorías a la vez.
+ */
+async function sincronizarFijos(userId: string, categoryId: string, fixedIds: string[]) {
+  await prisma.$transaction([
+    prisma.fixedExpense.updateMany({
+      where: { userId, budgetCategoryId: categoryId, id: { notIn: fixedIds } },
+      data: { budgetCategoryId: null },
+    }),
+    prisma.fixedExpense.updateMany({
+      where: { userId, id: { in: fixedIds } },
+      data: { budgetCategoryId: categoryId },
+    }),
+    prisma.budgetCategory.update({ where: { id: categoryId }, data: { linkedFixedExpenseIds: fixedIds } }),
+  ])
+}
+
+async function conFijosVinculados(userId: string, categories: BudgetCategory[]) {
+  const fijos = await prisma.fixedExpense.findMany({
+    where: { userId, budgetCategoryId: { in: categories.map(c => c.id) } },
+    select: { id: true, budgetCategoryId: true },
+  })
+  return categories.map(c => ({
+    ...c,
+    montoLimite: Number(c.montoLimite),
+    linkedFixedExpenseIds: fijos.filter(f => f.budgetCategoryId === c.id).map(f => f.id),
+  }))
+}
 
 const router = Router()
 router.use(authMiddleware)
@@ -49,10 +85,35 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       orderBy: { nombre: 'asc' },
     })
 
-    res.json({ categories: categories.map(c => ({ ...c, montoLimite: Number(c.montoLimite) })) })
+    res.json({ categories: await conFijosVinculados(userId, categories) })
   } catch (error) {
     console.error('[GetBudgetCategories]', error)
     res.status(500).json({ error: 'Error al obtener categorías de presupuesto' })
+  }
+})
+
+// ─── GET /budget-categories/resumen — Gasto por categoría (fuente única) ──────
+// ?alcance=periodo (default, periodo de ingreso actual) | mes (mes calendario)
+
+router.get('/resumen', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const alcance = req.query.alcance === 'mes' ? 'mes' : 'periodo'
+    res.json(await resumenCategorias(req.user!.userId, alcance))
+  } catch (error) {
+    console.error('[ResumenCategorias]', error)
+    res.status(500).json({ error: 'Error al calcular el resumen de categorías' })
+  }
+})
+
+// ─── GET /budget-categories/sugerir?nombre= — Categoría sugerida para un gasto ─
+
+router.get('/sugerir', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const nombre = String(req.query.nombre ?? '').slice(0, 120)
+    res.json({ sugerencia: nombre ? await sugerirCategoria(req.user!.userId, nombre) : null })
+  } catch (error) {
+    console.error('[SugerirCategoria]', error)
+    res.status(500).json({ error: 'Error al sugerir categoría' })
   }
 })
 
@@ -64,12 +125,14 @@ router.post('/', validate(createCategorySchema), async (req: Request, res: Respo
     const { nombre, icono, color, tipo, montoLimite, linkedFixedExpenseIds } = req.body
 
     const category = await prisma.budgetCategory.create({
-      data: { userId, nombre, icono, color, tipo, montoLimite, linkedFixedExpenseIds },
+      data: { userId, nombre, icono, color, tipo, montoLimite },
     })
+    if (linkedFixedExpenseIds.length > 0) await sincronizarFijos(userId, category.id, linkedFixedExpenseIds)
 
     await recordMissionAction(userId, 'categorizar')
 
-    res.status(201).json({ category: { ...category, montoLimite: Number(category.montoLimite) } })
+    const [out] = await conFijosVinculados(userId, [category])
+    res.status(201).json({ category: out })
   } catch (error) {
     console.error('[CreateBudgetCategory]', error)
     res.status(500).json({ error: 'Error al crear categoría de presupuesto' })
@@ -113,12 +176,12 @@ router.patch('/:id', validate(updateCategorySchema), async (req: Request, res: R
       return
     }
 
-    const category = await prisma.budgetCategory.update({
-      where: { id },
-      data: req.body,
-    })
+    const { linkedFixedExpenseIds, ...fields } = req.body as z.infer<typeof updateCategorySchema>
+    const category = await prisma.budgetCategory.update({ where: { id }, data: fields })
+    if (linkedFixedExpenseIds) await sincronizarFijos(userId, id, linkedFixedExpenseIds)
 
-    res.json({ category: { ...category, montoLimite: Number(category.montoLimite) } })
+    const [out] = await conFijosVinculados(userId, [category])
+    res.json({ category: out })
   } catch (error) {
     console.error('[UpdateBudgetCategory]', error)
     res.status(500).json({ error: 'Error al actualizar categoría' })

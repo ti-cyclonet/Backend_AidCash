@@ -1,0 +1,147 @@
+/**
+ * ═══════════════════════════════════════════════════════════════════════════════
+ * Kiri Finance — Contexto financiero REAL del usuario para la IA
+ * ═══════════════════════════════════════════════════════════════════════════════
+ *
+ * Antes el coach recibía un historial de 3 meses armado en el navegador con
+ * Math.random() ("variaciones simuladas") y ninguna categoría, bolsillo ni
+ * obligación con su id: no podía ubicar nada ni dar cifras ciertas. Aquí se
+ * arma todo desde la base de datos, con los ids reales que la IA usa para
+ * proponer acciones (ver acciones.ts, que valida cada id contra esto).
+ */
+import { prisma } from '../../config/database.js'
+import { resumenCategorias } from '../category-summary.js'
+import { cargarContextoDeudas, serializarDeuda } from '../debt-view.js'
+import { fixedPeriodo } from '../fixed-expense-payments.js'
+import { getMontoPorPeriodo } from '../period.js'
+import { resumenHogar } from '../hogar.js'
+
+export interface ContextoIA {
+  hoy: string
+  usuario: { nombre: string; frecuencia: string; ingresoBase: number; disponible: number; ahorroTotal: number }
+  categorias: { id: string; nombre: string; limite: number; gastado: number; disponible: number; estado: string }[]
+  deudas: { id: string; nombre: string; tipo: string; saldo: number; cuota: number; tasaMensual: number | null; frecuencia: string; diasPago: string; pagadaEstePeriodo: boolean; atrasado: number }[]
+  fijos: { id: string; nombre: string; monto: number; frecuencia: string; pagadoEstePeriodo: boolean }[]
+  bolsillos: { id: string; nombre: string; meta: number; actual: number }[]
+  meDeben: { id: string; persona: string; saldo: number; fechaCompromiso: string | null }[]
+  hogar: { pareja: string; periodo: string; categorias: { id: string; nombre: string; limite: number; gastado: number; disponible: number }[] } | null
+  movimientos: { fecha: string; tipo: string; nombre: string; monto: number }[]
+  historial: { mes: string; ingresos: number; gastos: number; pagosObligaciones: number; ahorro: number }[]
+}
+
+const r = (n: unknown) => Math.round(Number(n ?? 0))
+const dia = (d: Date) => d.toISOString().slice(0, 10)
+
+export async function construirContexto(userId: string, now: Date = new Date()): Promise<ContextoIA> {
+  const hace3 = new Date(now.getFullYear(), now.getMonth() - 2, 1)
+
+  const [user, resumen, debtsRaw, fijosRaw, bolsillos, loans, hogar, gastos, ingresos, pagosDeuda, pagosFijo, ahorros] = await Promise.all([
+    prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { nombre: true, frecuenciaIngreso: true, ingresoBase: true, cashBalance: true } }),
+    resumenCategorias(userId, 'periodo', now).catch(() => null),
+    prisma.debt.findMany({ where: { userId, estado: 'activa' }, orderBy: { createdAt: 'asc' } }),
+    prisma.fixedExpense.findMany({ where: { userId }, orderBy: { createdAt: 'asc' } }),
+    prisma.savingsPocket.findMany({ where: { userId }, orderBy: { createdAt: 'asc' } }),
+    prisma.externalLoan.findMany({ where: { userId, estado: 'activo' }, orderBy: { createdAt: 'asc' } }),
+    resumenHogar(userId).catch(() => null),
+    prisma.impulseExpense.findMany({ where: { userId, createdAt: { gte: hace3 } }, orderBy: { createdAt: 'desc' }, select: { nombre: true, monto: true, createdAt: true, esHormiga: true } }),
+    prisma.incomeRecord.findMany({ where: { userId, createdAt: { gte: hace3 } }, orderBy: { createdAt: 'desc' }, select: { monto: true, tipo: true, createdAt: true } }),
+    prisma.debtPayment.findMany({ where: { debt: { userId }, createdAt: { gte: hace3 }, esMarcador: false }, orderBy: { createdAt: 'desc' }, select: { montoPagado: true, createdAt: true, debt: { select: { nombre: true } } } }),
+    prisma.fixedExpensePayment.findMany({ where: { fixedExpense: { userId }, createdAt: { gte: hace3 }, esMarcador: false }, orderBy: { createdAt: 'desc' }, select: { montoPagado: true, createdAt: true, fixedExpense: { select: { nombre: true } } } }),
+    prisma.savingsHistory.findMany({ where: { userId, tipo: 'ahorro' }, orderBy: { createdAt: 'desc' }, select: { monto: true, createdAt: true } }),
+  ])
+
+  const ctxDeudas = await cargarContextoDeudas(debtsRaw)
+  const deudas = debtsRaw.map(d => {
+    const s = serializarDeuda(d, ctxDeudas) as { cuotaPeriodo: number; pagadoEstePeriodo: boolean; montoAtrasado: number; tasaInteres: number | null }
+    return {
+      id: d.id, nombre: d.nombre, tipo: d.tipoDeuda === 'TARJETA_CREDITO' ? 'tarjeta' : 'préstamo',
+      saldo: r(d.saldoRestante), cuota: r(s.cuotaPeriodo), tasaMensual: s.tasaInteres,
+      frecuencia: d.frecuenciaPago, diasPago: d.diasPago, pagadaEstePeriodo: s.pagadoEstePeriodo, atrasado: r(s.montoAtrasado),
+    }
+  })
+
+  const pagosFijosPeriodo = fijosRaw.length
+    ? await prisma.fixedExpensePayment.findMany({ where: { fixedExpenseId: { in: fijosRaw.map(f => f.id) } }, select: { fixedExpenseId: true, periodo: true, montoPagado: true } })
+    : []
+  const fijos = fijosRaw.map(f => {
+    const periodo = fixedPeriodo(f, now)
+    const pagado = pagosFijosPeriodo.filter(p => p.fixedExpenseId === f.id && p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
+    return { id: f.id, nombre: f.nombre, monto: r(f.monto), frecuencia: f.frecuencia, pagadoEstePeriodo: pagado >= getMontoPorPeriodo(Number(f.monto), f.frecuencia, now) }
+  })
+
+  // Movimientos recientes (para "¿por qué bajó mi saldo?", "explícame este movimiento")
+  const movimientos = [
+    ...gastos.map(g => ({ fecha: g.createdAt, tipo: g.esHormiga ? 'gasto hormiga' : 'gasto', nombre: g.nombre, monto: -r(g.monto) })),
+    ...ingresos.map(i => ({ fecha: i.createdAt, tipo: i.tipo === 'salario' ? 'ingreso (salario)' : 'ingreso extra', nombre: 'Ingreso', monto: r(i.monto) })),
+    ...pagosDeuda.map(p => ({ fecha: p.createdAt, tipo: 'pago de deuda', nombre: p.debt.nombre, monto: -r(p.montoPagado) })),
+    ...pagosFijo.map(p => ({ fecha: p.createdAt, tipo: 'pago de gasto fijo', nombre: p.fixedExpense.nombre, monto: -r(p.montoPagado) })),
+    ...ahorros.filter(a => a.createdAt >= hace3).map(a => ({ fecha: a.createdAt, tipo: 'ahorro', nombre: 'Depósito a ahorro', monto: -r(a.monto) })),
+  ].sort((a, b) => b.fecha.getTime() - a.fecha.getTime()).slice(0, 20).map(m => ({ ...m, fecha: dia(m.fecha) }))
+
+  // Historial REAL de los últimos 3 meses (mes en curso incluido)
+  const historial = [2, 1, 0].map(i => {
+    const desde = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    const hasta = new Date(now.getFullYear(), now.getMonth() - i + 1, 1)
+    const en = (d: Date) => d >= desde && d < hasta
+    return {
+      mes: desde.toLocaleDateString('es-CO', { month: 'long', year: 'numeric' }) + (i === 0 ? ' (en curso)' : ''),
+      ingresos: r(ingresos.filter(x => en(x.createdAt)).reduce((s, x) => s + Number(x.monto), 0)),
+      gastos: r(gastos.filter(x => en(x.createdAt)).reduce((s, x) => s + Number(x.monto), 0)),
+      pagosObligaciones: r([...pagosDeuda, ...pagosFijo].filter(x => en(x.createdAt)).reduce((s, x) => s + Number(x.montoPagado), 0)),
+      ahorro: r(ahorros.filter(x => en(x.createdAt)).reduce((s, x) => s + Number(x.monto), 0)),
+    }
+  })
+
+  return {
+    hoy: now.toLocaleDateString('es-CO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }),
+    usuario: {
+      nombre: user.nombre.split(' ')[0],
+      frecuencia: user.frecuenciaIngreso,
+      ingresoBase: r(user.ingresoBase),
+      disponible: r(user.cashBalance),
+      ahorroTotal: r(ahorros.reduce((s, a) => s + Number(a.monto), 0)),
+    },
+    categorias: (resumen?.categorias ?? []).map(c => ({ id: c.id, nombre: c.nombre, limite: r(c.limite), gastado: r(c.gastado), disponible: r(c.disponible), estado: c.estado })),
+    deudas,
+    fijos,
+    bolsillos: bolsillos.map(b => ({ id: b.id, nombre: b.nombre, meta: r(b.meta), actual: r(b.montoActual) })),
+    meDeben: loans.map(l => ({ id: l.id, persona: l.persona, saldo: r(l.saldoPendiente), fechaCompromiso: l.fechaCompromiso ? dia(l.fechaCompromiso) : null })),
+    hogar: hogar ? {
+      pareja: hogar.pareja.nombre.split(' ')[0], periodo: hogar.periodo,
+      categorias: hogar.categorias.map(c => ({ id: c.id, nombre: c.nombre, limite: r(c.montoLimite), gastado: r(c.gastado), disponible: r(c.disponible) })),
+    } : null,
+    movimientos,
+    historial,
+  }
+}
+
+const $ = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
+
+/** El contexto en texto compacto para el prompt (con los ids que la IA debe usar). */
+export function contextoComoTexto(c: ContextoIA): string {
+  const u = c.usuario
+  const lineas: string[] = []
+  lineas.push(`Hoy: ${c.hoy}`)
+  lineas.push(`Usuario: ${u.nombre} · cobra ${u.frecuencia} · sueldo base por periodo ${$(u.ingresoBase)} · disponible hoy ${$(u.disponible)} · ahorrado en total ${$(u.ahorroTotal)}`)
+  lineas.push('\nCATEGORÍAS DE PRESUPUESTO (este periodo) [id | nombre | límite | gastado | disponible | estado]:')
+  lineas.push(c.categorias.length ? c.categorias.map(x => `- ${x.id} | ${x.nombre} | ${$(x.limite)} | ${$(x.gastado)} | ${$(x.disponible)} | ${x.estado}`).join('\n') : '- (no tiene categorías)')
+  lineas.push('\nDEUDAS ACTIVAS [id | nombre | tipo | saldo | cuota | tasa mensual | frecuencia | días de pago | pagada este periodo | atrasado]:')
+  lineas.push(c.deudas.length ? c.deudas.map(d => `- ${d.id} | ${d.nombre} | ${d.tipo} | ${$(d.saldo)} | ${$(d.cuota)} | ${d.tasaMensual != null ? d.tasaMensual + '%' : 'sin tasa'} | ${d.frecuencia} | ${d.diasPago} | ${d.pagadaEstePeriodo ? 'sí' : 'no'} | ${$(d.atrasado)}`).join('\n') : '- (sin deudas)')
+  lineas.push('\nGASTOS FIJOS [id | nombre | monto | frecuencia | pagado este periodo]:')
+  lineas.push(c.fijos.length ? c.fijos.map(f => `- ${f.id} | ${f.nombre} | ${$(f.monto)} | ${f.frecuencia} | ${f.pagadoEstePeriodo ? 'sí' : 'no'}`).join('\n') : '- (sin gastos fijos)')
+  lineas.push('\nBOLSILLOS DE AHORRO [id | nombre | meta | ahorrado]:')
+  lineas.push(c.bolsillos.length ? c.bolsillos.map(b => `- ${b.id} | ${b.nombre} | ${$(b.meta)} | ${$(b.actual)}`).join('\n') : '- (sin bolsillos)')
+  lineas.push('\nME DEBEN [id | persona | saldo pendiente | fecha prometida]:')
+  lineas.push(c.meDeben.length ? c.meDeben.map(l => `- ${l.id} | ${l.persona} | ${$(l.saldo)} | ${l.fechaCompromiso ?? 'sin fecha'}`).join('\n') : '- (nadie)')
+  if (c.hogar) {
+    lineas.push(`\nPRESUPUESTO DEL HOGAR con ${c.hogar.pareja} (${c.hogar.periodo}) [id | categoría | tope | gastado | disponible]:`)
+    lineas.push(c.hogar.categorias.length ? c.hogar.categorias.map(h => `- ${h.id} | ${h.nombre} | ${$(h.limite)} | ${$(h.gastado)} | ${$(h.disponible)}`).join('\n') : '- (sin categorías del hogar)')
+  } else {
+    lineas.push('\nPRESUPUESTO DEL HOGAR: no tiene pareja conectada.')
+  }
+  lineas.push('\nHISTORIAL REAL (por mes):')
+  lineas.push(c.historial.map(h => `- ${h.mes}: ingresos ${$(h.ingresos)} · gastos ${$(h.gastos)} · pagos de obligaciones ${$(h.pagosObligaciones)} · ahorro ${$(h.ahorro)}`).join('\n'))
+  lineas.push('\nÚLTIMOS MOVIMIENTOS:')
+  lineas.push(c.movimientos.length ? c.movimientos.map(m => `- ${m.fecha} · ${m.tipo} · ${m.nombre} · ${m.monto >= 0 ? '+' : '-'}${$(Math.abs(m.monto))}`).join('\n') : '- (sin movimientos todavía)')
+  return lineas.join('\n')
+}

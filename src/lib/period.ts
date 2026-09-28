@@ -110,13 +110,46 @@ export function esPendienteProximoPeriodo(activoDesdePeriodo: string | null | un
   return !!activoDesdePeriodo && activoDesdePeriodo > periodoActual
 }
 
+/**
+ * Primer periodo distinto de `periodoDe(now)` avanzando día a día. Sirve para
+ * cualquier frontera (antes quincenal sumaba +16 días a ciegas, y con días de
+ * cobro como [1, 20] — una "quincena" de 19 días — seguía cayendo en el mismo
+ * periodo).
+ */
+export function periodoSiguienteDe(periodoDe: (d: Date) => string, now: Date = new Date()): string {
+  const actual = periodoDe(now)
+  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  for (let i = 0; i < 400; i++) {
+    d.setDate(d.getDate() + 1)
+    const p = periodoDe(d)
+    if (p !== actual) return p
+  }
+  return actual
+}
+
+/**
+ * Periodos COMPLETOS ya cerrados entre `desde` y el periodo de `now`
+ * (excluido), del más antiguo al más reciente — para detectar cuotas atrasadas.
+ * Se recorre día a día con la misma función que etiqueta los pagos, así nunca
+ * puede haber desacuerdo sobre qué periodo es cuál.
+ */
+export function periodosAnteriores(periodoDe: (d: Date) => string, desde: Date, now: Date = new Date()): string[] {
+  const actual = periodoDe(now)
+  const out: string[] = []
+  const d = new Date(desde.getFullYear(), desde.getMonth(), desde.getDate())
+  const fin = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  while (d < fin) {
+    const p = periodoDe(d)
+    if (p !== actual && out[out.length - 1] !== p) out.push(p)
+    d.setDate(d.getDate() + 1)
+  }
+  return out
+}
+
 export function getNextPeriodo(frecuencia: string, diasPago: number[] = [], now: Date = new Date()): string {
   switch (frecuencia) {
-    case 'quincenal': {
-      const advanced = new Date(now)
-      advanced.setDate(advanced.getDate() + 16)
-      return getPeriodoQuincenal(diasPago, advanced)
-    }
+    case 'quincenal':
+      return periodoSiguienteDe(d => getPeriodoQuincenal(diasPago, d), now)
     case 'semanal': {
       const advanced = new Date(now)
       advanced.setDate(advanced.getDate() + 7)

@@ -29,9 +29,10 @@ import { prisma } from '../config/database.js'
 import { getMontoPorPeriodo } from './period.js'
 import { parseDays, fixedExpenseDay, isDebtPending, isFixedExpensePending } from './obligation-schedule.js'
 import { cuotaEfectivaTarjeta } from './installments.js'
+import { cuotaBaseDelPeriodo, debtPeriodo } from './debt-calc.js'
 import { payDebtServer } from './debt-payments.js'
 import { payFixedExpenseServer } from './fixed-expense-payments.js'
-import { sendPushToUser } from './push.js'
+import { sendPushToUser, avisar } from './push.js'
 import type { Debt, FixedExpense } from '@prisma/client'
 
 export interface AutoPayRunSummary {
@@ -47,7 +48,7 @@ function isDueToday(today: number, days: number[]): boolean {
 }
 
 async function notifyAutoPaySkipped(userId: string, nombre: string, monto: number) {
-  await sendPushToUser(userId, {
+  await avisar(userId, {
     title: '⚠️ No se pudo cobrar automáticamente',
     body: `"${nombre}" vence hoy ($${monto.toLocaleString('es-CO')}) pero tu disponible no alcanza. Págala a mano cuando puedas.`,
     tag: 'auto-pay-skipped',
@@ -92,8 +93,8 @@ export async function runAutoPay(now: Date = new Date()): Promise<AutoPayRunSumm
       // Para tarjetas, el monto real de esta cuota incluye lo financiado con
       // ella (pay-with-card) — no solo la columna base (ver cuotaEfectivaTarjeta).
       const montoPago = debt.tipoDeuda === 'TARJETA_CREDITO'
-        ? cuotaEfectivaTarjeta(Number(debt.cuotaPeriodo), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debt.id } }))
-        : Number(debt.cuotaPeriodo)
+        ? cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(debt, debtPeriodo(debt)), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debt.id } }))
+        : cuotaBaseDelPeriodo(debt, debtPeriodo(debt))
 
       const user = await prisma.user.findUnique({ where: { id: debt.userId }, select: { cashBalance: true } })
       if (!user || Number(user.cashBalance) < montoPago) {

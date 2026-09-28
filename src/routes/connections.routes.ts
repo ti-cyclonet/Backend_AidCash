@@ -4,7 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
-import { pushSocialInvite, pushGardenWatered, pushRoleChangeRequested, pushRoleChangeResponded } from '../lib/push.js'
+import { pushSocialInvite, pushGardenWatered, pushRoleChangeRequested, pushRoleChangeResponded, pushInviteAccepted } from '../lib/push.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { getUserGardenHealth } from '../lib/garden-health.js'
 import { todayPeriodo, recordOnboardingAction } from '../lib/missions.js'
@@ -180,6 +180,7 @@ router.post('/accept', validate(respondSchema), async (req: Request, res: Respon
     })
 
     // Notificar al solicitante que fue aceptado
+    pushInviteAccepted(conn.requesterId, conn.addressee.nombre).catch(() => {})
     emitToUser(conn.requesterId, SOCKET_EVENTS.INVITE_ACCEPTED, {
       connectionId: updated.id,
       by: { id: conn.addresseeId, nombre: conn.addressee.nombre, correo: conn.addressee.correo },

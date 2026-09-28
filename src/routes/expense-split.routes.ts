@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
+import { pushSplitRequested } from '../lib/push.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -101,6 +102,7 @@ router.post('/', validate(splitSchema), async (req: Request, res: Response): Pro
         borrower: { id: userId, nombre: lender?.nombre },
         isSplit: true,
       })
+      pushSplitRequested(loan.borrowerId, lender?.nombre ?? 'Alguien', montoPorPersona, expense.nombre).catch(() => {})
     }
 
     res.status(201).json({

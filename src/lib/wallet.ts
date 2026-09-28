@@ -47,3 +47,39 @@ export function planPocketCredit(pocket: WalletPocket, monto: number): Prisma.Us
     [field]: { increment: monto },
   } as Prisma.UserUpdateInput
 }
+
+type SaldosBolsillos = Record<WalletPocket, number>
+
+/**
+ * Descuenta `monto` de cashBalance tomando de los bolsillos en ORDEN: primero
+ * lo que tengan disponible (positivo) `orden[0]`, luego `orden[1]`… y si aun
+ * así falta (bolsillos descuadrados), el resto sale del último. Así un gasto
+ * que el usuario decidió hacer "con lo que tenga" (ej. prestar plata con el
+ * gasto libre en $0) no deja el bolsillo libre en negativo mientras otro
+ * bolsillo sí tenía la plata. Devuelve el `data` del update y el desglose.
+ */
+export function planDeduccionEnCascada(
+  saldos: SaldosBolsillos,
+  monto: number,
+  orden: WalletPocket[] = ['libre', 'endeudamiento', 'ahorro', 'obligaciones'],
+): { data: Prisma.UserUpdateInput; desglose: Partial<Record<WalletPocket, number>> } {
+  const desglose: Partial<Record<WalletPocket, number>> = {}
+  let falta = Math.round(monto * 100) / 100
+  for (const pocket of orden) {
+    if (falta <= 0) break
+    const tomar = Math.min(falta, Math.max(0, saldos[pocket]))
+    if (tomar > 0) {
+      desglose[pocket] = Math.round(tomar * 100) / 100
+      falta = Math.round((falta - tomar) * 100) / 100
+    }
+  }
+  if (falta > 0) {
+    const ultimo = orden[orden.length - 1]
+    desglose[ultimo] = Math.round(((desglose[ultimo] ?? 0) + falta) * 100) / 100
+  }
+  const data: Record<string, unknown> = { cashBalance: { decrement: monto } }
+  for (const [pocket, valor] of Object.entries(desglose)) {
+    data[WALLET_POCKET_FIELD[pocket as WalletPocket]] = { decrement: valor }
+  }
+  return { data: data as Prisma.UserUpdateInput, desglose }
+}

@@ -38,6 +38,8 @@ const STREAK_BADGES: { id: string; nombre: string; minStreak: number }[] = [
 export type MissionKey =
   | 'gasto_hormiga' | 'pagar_obligacion' | 'categorizar' | 'racha_semanal'
   | 'registrar_obligacion' | 'registrar_ingreso_real' | 'registrar_ahorro' | 'invitar_amigo'
+  | ReferralMissionKey
+export type ReferralMissionKey = 'referido_1' | 'referido_2' | 'referido_3'
 export type OnboardingMissionKey = 'registrar_obligacion' | 'registrar_ingreso_real' | 'registrar_ahorro' | 'invitar_amigo'
 export type RewardType = 'xp' | 'boost'
 
@@ -74,10 +76,23 @@ export const ONBOARDING_CATALOG: MissionCatalogEntry[] = [
   { key: 'registrar_obligacion', title: 'Registra tu primera obligación', desc: 'Añade una deuda o un gasto fijo en Obligaciones', icon: '🏛️', target: 1 },
   { key: 'registrar_ingreso_real', title: 'Registra tu sueldo real', desc: 'Registra un ingreso en Billetera para empezar a distribuir tu dinero', icon: '💰', target: 1 },
   { key: 'registrar_ahorro', title: 'Haz tu primer aporte de ahorro', desc: 'Deposita en un bolsillo de ahorro', icon: '🐷', target: 1 },
-  { key: 'invitar_amigo', title: 'Invita a un amigo', desc: 'Conecta con alguien en Social', icon: '🤝', target: 1 },
+  { key: 'invitar_amigo', title: 'Invita a un amigo', desc: 'Envíale tu enlace de Kiri o conéctate con alguien en Social', icon: '🤝', target: 1 },
 ]
 
-const ONBOARDING_REWARD_XP = 50
+/**
+ * Misiones de referidos — traer gente NUEVA a Kiri con tu enlace de
+ * invitación (ver lib/invitaciones.ts). Tres escalones (1, 2 y 3 personas),
+ * cada uno se reclama una sola vez. El progreso es el conteo real de usuarios
+ * con `invitedById = tú`, así que no se puede inflar desde el cliente.
+ */
+export const REFERRAL_CATALOG: (MissionCatalogEntry & { key: ReferralMissionKey; rewardXp: number })[] = [
+  { key: 'referido_1', title: 'Invita a un amigo a Kiri', desc: 'Que se registre con tu enlace de invitación', icon: '💌', target: 1, rewardXp: 25 },
+  { key: 'referido_2', title: 'Invita a 2 amigos a Kiri', desc: 'Dos personas registradas con tu enlace', icon: '🤝', target: 2, rewardXp: 50 },
+  { key: 'referido_3', title: 'Invita a 3 amigos a Kiri', desc: 'Tres personas registradas con tu enlace', icon: '🎉', target: 3, rewardXp: 75 },
+]
+export const REFERRAL_PERIODO = 'referidos'
+
+const ONBOARDING_REWARD_XP = 25
 
 export interface MissionView {
   key: MissionKey
@@ -91,9 +106,16 @@ export interface MissionView {
 
 // ─── Periodo ────────────────────────────────────────────────────────────────
 
-/** "2026-08-29" — periodo de las misiones diarias */
-export function todayPeriodo(): string {
-  return new Date().toISOString().slice(0, 10)
+/**
+ * "2026-08-29" — periodo de las misiones diarias, en la fecha LOCAL (el
+ * servidor corre con TZ=America/Bogota). Antes salía de toISOString (UTC):
+ * en Colombia las misiones "de hoy" se renovaban a las 7 PM, no a medianoche.
+ */
+export function todayPeriodo(date: Date = new Date()): string {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
 }
 
 /** YYYY-MM-DD de una fecha cualquiera, para comparar días de calendario sin
@@ -251,6 +273,41 @@ export async function recordOnboardingAction(userId: string, missionKey: Onboard
   }
 }
 
+/**
+ * Alguien se registró con el enlace de `inviterId`: sincroniza los tres
+ * escalones con el conteo real y avisa del que se acaba de completar.
+ */
+export async function recordReferral(inviterId: string): Promise<void> {
+  try {
+    const total = await prisma.user.count({ where: { invitedById: inviterId } })
+    for (const m of REFERRAL_CATALOG) {
+      const row = await getOrCreateProgress(inviterId, m.key, REFERRAL_PERIODO, m.target)
+      const nuevo = Math.min(total, m.target)
+      if (row.claimedAt || nuevo <= row.progress) continue
+      await prisma.missionProgress.update({ where: { id: row.id }, data: { progress: nuevo } })
+      if (nuevo >= m.target) pushMissionReady(inviterId, m.title)
+    }
+  } catch (error) {
+    console.error('[RecordReferral]', error)
+  }
+}
+
+/** Misiones de referidos, listas para el frontend (progreso = conteo real). */
+export async function getReferralMissionsForUser(userId: string): Promise<{ misiones: MissionView[]; referidos: number }> {
+  const total = await prisma.user.count({ where: { invitedById: userId } })
+  const misiones = await Promise.all(
+    REFERRAL_CATALOG.map(async (m) => {
+      let row = await getOrCreateProgress(userId, m.key, REFERRAL_PERIODO, m.target)
+      const real = Math.min(total, m.target)
+      if (!row.claimedAt && row.progress !== real) {
+        row = await prisma.missionProgress.update({ where: { id: row.id }, data: { progress: real } })
+      }
+      return { key: m.key, title: m.title, desc: `${m.desc} · +${m.rewardXp} XP`, icon: m.icon, target: m.target, progress: row.progress, claimed: !!row.claimedAt }
+    })
+  )
+  return { misiones, referidos: total }
+}
+
 /** Misiones de primeros pasos, listas para mostrar en el frontend. */
 export async function getOnboardingMissionsForUser(userId: string): Promise<MissionView[]> {
   return Promise.all(
@@ -312,15 +369,19 @@ interface RewardOption {
   icon: string
 }
 
-/** Servidor únicamente — ver nota de seguridad al inicio del archivo. */
+/**
+ * Servidor únicamente — ver nota de seguridad al inicio del archivo.
+ * Montos bajos a propósito (antes 15/30/50): el XP del árbol lo debe mover
+ * sobre todo la constancia (racha), no unos pocos cofres.
+ */
 const REWARD_POOL: RewardOption[] = [
-  { type: 'xp', amount: 15, weight: 45, label: '+15 XP', icon: '✨' },
-  { type: 'xp', amount: 30, weight: 30, label: '+30 XP', icon: '✨' },
-  { type: 'xp', amount: 50, weight: 15, label: '+50 XP', icon: '✨' },
+  { type: 'xp', amount: 5, weight: 45, label: '+5 XP', icon: '✨' },
+  { type: 'xp', amount: 10, weight: 30, label: '+10 XP', icon: '✨' },
+  { type: 'xp', amount: 20, weight: 15, label: '+20 XP', icon: '✨' },
   { type: 'boost', amount: 24, weight: 10, label: 'XP x2 por 24h', icon: '⚡' },
 ]
 
-const WEEKLY_REWARD: RewardOption = { type: 'xp', amount: 150, weight: 100, label: '+150 XP', icon: '🏆' }
+const WEEKLY_REWARD: RewardOption = { type: 'xp', amount: 60, weight: 100, label: '+60 XP', icon: '🏆' }
 const ONBOARDING_REWARD: RewardOption = { type: 'xp', amount: ONBOARDING_REWARD_XP, weight: 100, label: `+${ONBOARDING_REWARD_XP} XP`, icon: '🌱' }
 
 function pickReward(): RewardOption {
@@ -352,10 +413,11 @@ export type ClaimResult =
 export async function claimMission(userId: string, missionKey: MissionKey): Promise<ClaimResult> {
   const isWeekly = missionKey === WEEKLY_MISSION.key
   const isOnboarding = ONBOARDING_CATALOG.some((m) => m.key === missionKey)
-  const entry = isWeekly ? WEEKLY_MISSION : isOnboarding ? ONBOARDING_CATALOG.find((m) => m.key === missionKey) : MISSION_CATALOG.find((m) => m.key === missionKey)
+  const referral = REFERRAL_CATALOG.find((m) => m.key === missionKey)
+  const entry = isWeekly ? WEEKLY_MISSION : isOnboarding ? ONBOARDING_CATALOG.find((m) => m.key === missionKey) : referral ?? MISSION_CATALOG.find((m) => m.key === missionKey)
   if (!entry) return { ok: false, error: 'Misión no reconocida' }
 
-  const periodo = isWeekly ? weekPeriodo() : isOnboarding ? ONBOARDING_PERIODO : todayPeriodo()
+  const periodo = isWeekly ? weekPeriodo() : isOnboarding ? ONBOARDING_PERIODO : referral ? REFERRAL_PERIODO : todayPeriodo()
 
   const row = await prisma.missionProgress.findUnique({
     where: { userId_missionKey_periodo: { userId, missionKey, periodo } },
@@ -367,7 +429,13 @@ export async function claimMission(userId: string, missionKey: MissionKey): Prom
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { xpBoostExpiresAt: true } })
   const boostActive = !!(user?.xpBoostExpiresAt && user.xpBoostExpiresAt.getTime() > Date.now())
 
-  const picked = isWeekly ? WEEKLY_REWARD : isOnboarding ? ONBOARDING_REWARD : pickReward()
+  const picked: RewardOption = isWeekly
+    ? WEEKLY_REWARD
+    : isOnboarding
+      ? ONBOARDING_REWARD
+      : referral
+        ? { type: 'xp', amount: referral.rewardXp, weight: 100, label: `+${referral.rewardXp} XP`, icon: '💌' }
+        : pickReward()
   const finalAmount = picked.type === 'xp' && boostActive ? picked.amount * 2 : picked.amount
 
   await prisma.$transaction([

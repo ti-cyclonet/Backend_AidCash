@@ -47,6 +47,29 @@ router.post('/read-all', async (req: Request, res: Response): Promise<void> => {
   }
 })
 
+// ─── POST /notifications/read — marcar leídas solo ciertos eventos ───────────
+// Al abrir Social se marcan leídas solo las de Social (invitaciones,
+// préstamos…), sin tocar avisos de pagos o misiones que siguen pendientes.
+
+router.post('/read', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const events = (req.body as { events?: unknown }).events
+    if (!Array.isArray(events) || events.some((e) => typeof e !== 'string')) {
+      res.status(400).json({ error: 'events debe ser una lista' })
+      return
+    }
+    const r = await prisma.notification.updateMany({
+      where: { userId, read: false, event: { in: events as string[] } },
+      data: { read: true },
+    })
+    res.json({ marcadas: r.count })
+  } catch (error) {
+    console.error('[ReadNotifications]', error)
+    res.status(500).json({ error: 'Error al marcar notificaciones' })
+  }
+})
+
 // ─── DELETE /notifications — limpiar todas ────────────────────────────────────
 
 router.delete('/', async (req: Request, res: Response): Promise<void> => {

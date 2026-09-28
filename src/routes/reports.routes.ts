@@ -3,6 +3,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
 import { generarTablaAmortizacion } from '../lib/amortization.js'
+import { cuotaBaseDelPeriodo, tasaDelPeriodo } from '../lib/debt-calc.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -27,8 +28,15 @@ type Timeframe = 'week' | 'month' | 'year' | 'all' | 'custom'
  */
 function getDateRange(timeframe: Timeframe, customFrom?: string, customTo?: string): { from: Date; to: Date } {
   if (timeframe === 'custom' && customFrom && customTo) {
-    const from = new Date(customFrom)
-    const to = new Date(customTo)
+    // "AAAA-MM-DD" se interpreta como fecha LOCAL: new Date("2026-09-01") es
+    // medianoche UTC, que en Colombia es el 31 de agosto a las 7 p. m. — el
+    // rango arrancaba un día antes y metía movimientos del mes anterior.
+    const aFechaLocal = (s: string) => {
+      const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/)
+      return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(s)
+    }
+    const from = aFechaLocal(customFrom)
+    const to = aFechaLocal(customTo)
     from.setHours(0, 0, 0, 0)
     to.setHours(23, 59, 59, 999)
     if (!isNaN(from.getTime()) && !isNaN(to.getTime()) && from <= to) return { from, to }
@@ -164,7 +172,17 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // de nuevo aquí duplicaba el mismo dinero en "Total gastado": pagar un
     // gasto fijo de $100.000 con TC y luego abonar esos $100.000 a la tarjeta
     // sumaba $200.000 gastados por una sola compra real.
-    const debtPaymentsForSpending = debtPayments.filter(p => p.debt.tipoDeuda !== 'TARJETA_CREDITO')
+    //
+    // Los pagos "marcador" (el usuario declaró que esa cuota ya la había pagado
+    // por fuera de Kiri) solo existen para que la obligación no salga vencida:
+    // ese dinero nunca salió de la billetera en Kiri, así que no es un egreso.
+    const debtPaymentsForSpending = debtPayments.filter(p => p.debt.tipoDeuda !== 'TARJETA_CREDITO' && !p.esMarcador)
+    const fixedPaymentsForSpending = fixedExpensePayments.filter(p => !p.esMarcador)
+
+    const [externalLoansPeriod, externalPaymentsPeriod] = await Promise.all([
+      prisma.externalLoan.findMany({ where: { userId, createdAt: { gte: from, lte: to } } }),
+      prisma.externalLoanPayment.findMany({ where: { loan: { userId }, createdAt: { gte: from, lte: to } }, include: { loan: { select: { persona: true } } } }),
+    ])
 
     // ── Totales para el balance ─────────────────────────────────────────────────
 
@@ -177,7 +195,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // Deudas y fijos EFECTIVAMENTE PAGADOS dentro del rango — se toma del ledger
     // de pagos (montoPagado real), no de una columna "pagado" que ya no existe.
     const totalDebts   = debtPaymentsForSpending.reduce((s, p) => s + Number(p.montoPagado), 0)
-    const totalFixed   = fixedExpensePayments.reduce((s, p) => s + Number(p.montoPagado), 0)
+    const totalFixed   = fixedPaymentsForSpending.reduce((s, p) => s + Number(p.montoPagado), 0)
 
     // ── Amortización: intereses pagados vs capital abonado ────────────────────
     const totalInteresPagado = debtPaymentsForSpending.reduce((s, p) => s + Number(p.pagoInteres), 0)
@@ -188,7 +206,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // Cálculo simplificado: por cada peso extra abonado al capital, se evita pagar interés sobre ese peso
     // (excluye pagos a tarjetas propias — mismo motivo que debtPaymentsForSpending)
     const allDebtPaymentsEver = await prisma.debtPayment.aggregate({
-      where: { debt: { userId, tipoDeuda: { not: 'TARJETA_CREDITO' } } },
+      where: { debt: { userId, tipoDeuda: { not: 'TARJETA_CREDITO' } }, esMarcador: false },
       _sum: { pagoInteres: true, abonoCapital: true, montoPagado: true },
     })
     const totalInteresHistorico = Number(allDebtPaymentsEver._sum.pagoInteres ?? 0)
@@ -208,7 +226,9 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
 
     let interesEvitado = 0
     for (const d of debts) {
-      const tasa = d.tasaInteresAplicada ? Number(d.tasaInteresAplicada) : (d.tasaInteres ? Number(d.tasaInteres) : null)
+      // Tasa por PERIODO de la deuda (mitad de la mensual si es quincenal) —
+      // la tabla avanza de a una cuota, así que debe usar la tasa de cada cuota.
+      const tasa = tasaDelPeriodo(d.tasaInteresAplicada ? Number(d.tasaInteresAplicada) : (d.tasaInteres ? Number(d.tasaInteres) : null), d.frecuenciaPago)
       if (!tasa || tasa <= 0) continue
       const cuota = Number(d.cuotaPeriodo)
       if (!cuota || cuota <= 0) continue
@@ -255,7 +275,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // al pedir el mes actual, para la MISMA cuenta.
     const allImpulseEver = await prisma.impulseExpense.aggregate({ where: { userId }, _sum: { monto: true } })
     const allFixedPaymentsEver = await prisma.fixedExpensePayment.aggregate({
-      where: { fixedExpense: { userId } },
+      where: { fixedExpense: { userId }, esMarcador: false },
       _sum: { montoPagado: true },
     })
     const allDebtPaymentsTotal = Number(allDebtPaymentsEver._sum.montoPagado ?? 0)
@@ -265,7 +285,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     const categoryDistribution = [
       { name: 'Deudas',          value: totalDebts,   color: '#8096E6' },
       { name: 'Gastos Fijos',    value: totalFixed,   color: '#A2D2FF' },
-      { name: 'Gastos Hormiga',  value: totalImpulse, color: '#FFB3C6' },
+      // impulse_expenses guarda TODOS los gastos variables — solo los marcados
+      // esHormiga son hormiga; el resto (ej. un vuelo) va aparte.
+      { name: 'Gastos Hormiga',  value: impulseExpenses.filter(e => e.esHormiga).reduce((s, e) => s + Number(e.monto), 0), color: '#FFB3C6' },
+      { name: 'Gastos Variables', value: impulseExpenses.filter(e => !e.esHormiga).reduce((s, e) => s + Number(e.monto), 0), color: '#FFD6A5' },
       { name: 'Ahorro',          value: totalSaved,   color: '#B9FBC0' },
     ].filter(c => c.value > 0)
 
@@ -307,7 +330,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     debtPaymentsForSpending.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
     // Gastos fijos pagados — fecha real de cada pago del ledger, no `updatedAt`
     // de la fila (que se mueve con cualquier PATCH, no solo con un pago)
-    fixedExpensePayments.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
+    fixedPaymentsForSpending.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
 
     // Ingresos reales registrados
     const incomeRecordsPeriodList = await prisma.incomeRecord.findMany({
@@ -379,7 +402,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
           tasaInteres: d.tasaInteres != null ? Number(d.tasaInteres) : null,
           tasaInteresAplicada: d.tasaInteresAplicada != null ? Number(d.tasaInteresAplicada) : null,
           tasaInteresMensual: d.tasaInteresMensual != null ? Number(d.tasaInteresMensual) : null,
-          pagadoEstePeriodo: paid >= Number(d.cuotaPeriodo),
+          pagadoEstePeriodo: paid >= cuotaBaseDelPeriodo(d, periodo),
           montoPagadoEstePeriodo: paid > 0 ? paid : null,
         }
       }),
@@ -417,7 +440,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       // el periodo actual sin importar from/to), esta lista sí respeta el
       // rango solicitado. Es lo que debe usar la UI para construir la tabla
       // de "Detalle de transacciones", no el flag de arriba.
-      fixedExpensePayments: fixedExpensePayments.map(p => ({
+      fixedExpensePayments: fixedPaymentsForSpending.map(p => ({
         id: p.id,
         nombre: p.fixedExpense.nombre,
         montoPagado: Number(p.montoPagado),
@@ -428,6 +451,21 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
 
       // Ingresos registrados (sueldo + extras)
       incomeRecords: incomeRecordsPeriodList.map(r => ({ ...r, monto: Number(r.monto) })),
+
+      // "Me deben": préstamos a personas sin Kiri y sus abonos dentro del
+      // rango. Solo para el historial — NO suman a ingresos ni egresos (prestar
+      // no es gastar, y que te devuelvan no es ganar), pero sí explican por qué
+      // bajó o subió el disponible.
+      prestamosExternos: {
+        prestamos: externalLoansPeriod.map(l => ({
+          id: l.id, persona: l.persona, monto: Number(l.montoPrestado),
+          desdeBilletera: Number(l.montoDesdeBilletera) > 0, fecha: l.createdAt,
+        })),
+        abonos: externalPaymentsPeriod.map(p => ({
+          id: p.id, persona: p.loan.persona, monto: Number(p.monto),
+          entraABilletera: p.entraABilletera, fecha: p.createdAt,
+        })),
+      },
     })
   } catch (error) {
     console.error('[BalanceReport]', error)

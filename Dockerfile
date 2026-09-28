@@ -17,7 +17,13 @@ RUN npm run build
 # Production stage
 FROM node:20-alpine
 
-RUN apk add --no-cache openssl
+RUN apk add --no-cache openssl tzdata
+
+# Toda la lógica de periodos (mes/quincena de cada pago, "vence hoy",
+# "vencido") usa la hora LOCAL del servidor. En UTC, desde las 7 p. m. hora
+# Colombia el servidor ya está en el día siguiente: un pago hecho el 30 a las
+# 8 p. m. quedaba etiquetado en el mes siguiente.
+ENV TZ=America/Bogota
 
 WORKDIR /app
 

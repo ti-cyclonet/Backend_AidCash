@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { authMiddleware } from '../middleware/auth.js'
-import { getMissionsForUser, getOnboardingMissionsForUser, claimMission, MissionKey } from '../lib/missions.js'
+import { getMissionsForUser, getOnboardingMissionsForUser, getReferralMissionsForUser, claimMission, MissionKey } from '../lib/missions.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -10,11 +10,12 @@ router.use(authMiddleware)
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const [{ daily, weekly }, onboarding] = await Promise.all([
+    const [{ daily, weekly }, onboarding, invitaciones] = await Promise.all([
       getMissionsForUser(userId),
       getOnboardingMissionsForUser(userId),
+      getReferralMissionsForUser(userId),
     ])
-    res.json({ daily, weekly, onboarding })
+    res.json({ daily, weekly, onboarding, invitaciones })
   } catch (error) {
     console.error('[GetMissions]', error)
     res.status(500).json({ error: 'Error al obtener misiones' })
