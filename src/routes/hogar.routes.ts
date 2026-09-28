@@ -3,6 +3,17 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { hogarHabilitado, resolverPlan, otorgarInsigniaPro } from '../lib/planes.js'
+import { respuestaFuncion } from '../middleware/limit-enforcement.js'
+import type { NextFunction } from 'express'
+
+/** El presupuesto del hogar es de KIRI PRO (basta con que uno de la pareja lo tenga). */
+async function requireHogar(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    if (await hogarHabilitado(req.user!.userId)) { next(); return }
+    res.status(403).json(respuestaFuncion(await resolverPlan(req.user!.userId), 'householdBudget'))
+  } catch { next() }
+}
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { sendPushToUser } from '../lib/push.js'
 import { conexionHogar, resumenHogar, categoriaDelUsuario, type PeriodoHogar } from '../lib/hogar.js'
@@ -26,8 +37,9 @@ const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
 
 router.get('/', async (req: Request, res: Response): Promise<void> => {
   try {
-    const resumen = await resumenHogar(req.user!.userId)
-    res.json(resumen ? { conectado: true, ...resumen } : { conectado: false })
+    const [resumen, habilitado] = await Promise.all([resumenHogar(req.user!.userId), hogarHabilitado(req.user!.userId)])
+    // habilitado: el hogar es de KIRI PRO (basta con que uno de la pareja lo tenga)
+    res.json(resumen ? { conectado: true, habilitado, ...resumen } : { conectado: false, habilitado })
   } catch (error) {
     console.error('[Hogar]', error)
     res.status(500).json({ error: 'Error al cargar el presupuesto del hogar' })
@@ -36,7 +48,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /hogar/categorias ───────────────────────────────────────────────────
 
-router.post('/categorias', validate(categoriaSchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/categorias', validate(categoriaSchema), requireHogar, async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const hogar = await conexionHogar(userId)
@@ -49,6 +61,7 @@ router.post('/categorias', validate(categoriaSchema), async (req: Request, res: 
     const detalle = `Presupuesto de ${fmt(montoLimite)} ${hogar.periodo === 'quincenal' ? 'por quincena' : 'al mes'}. Ya pueden registrar sus gastos ahí.`
     emitToUser(hogar.pareja.id, SOCKET_EVENTS.HOGAR_GASTO, { message: titulo, detalle, route: '/social' })
     sendPushToUser(hogar.pareja.id, { title: titulo, body: detalle, tag: 'hogar-categoria', url: '/social' }).catch(() => {})
+    otorgarInsigniaPro(userId, 'pro_hogar_equipo')
     res.status(201).json({ categoria: { ...cat, montoLimite: Number(cat.montoLimite) } })
   } catch (error) {
     console.error('[HogarCrear]', error)
@@ -99,7 +112,7 @@ router.patch('/periodo', validate(periodoSchema), async (req: Request, res: Resp
 
 // ─── PATCH /hogar/categorias/:id ──────────────────────────────────────────────
 
-router.patch('/categorias/:id', validate(categoriaSchema.partial()), async (req: Request, res: Response): Promise<void> => {
+router.patch('/categorias/:id', validate(categoriaSchema.partial()), requireHogar, async (req: Request, res: Response): Promise<void> => {
   try {
     const r = await categoriaDelUsuario(req.user!.userId, String(req.params.id))
     if (!r) { res.status(404).json({ error: 'Categoría no encontrada' }); return }

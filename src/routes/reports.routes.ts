@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
+import { resolverPlan, inicioHistorial, mejoraPara } from '../lib/planes.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
 import { generarTablaAmortizacion } from '../lib/amortization.js'
 import { cuotaBaseDelPeriodo, tasaDelPeriodo } from '../lib/debt-calc.js'
@@ -82,7 +83,19 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     const timeframe: Timeframe = validTimeframes.includes(rawTimeframe as Timeframe)
       ? (rawTimeframe as Timeframe)
       : 'month'
-    const { from, to } = getDateRange(timeframe, req.query.from as string | undefined, req.query.to as string | undefined)
+    const rango = getDateRange(timeframe, req.query.from as string | undefined, req.query.to as string | undefined)
+    let from = rango.from
+    const to = rango.to
+
+    // Historial según el plan: FREE 3 meses, PLUS 24, PRO sin límite
+    const plan = await resolverPlan(userId)
+    const mesesHistorial = plan.limites.mesesHistorial?.maxValue ?? 3
+    const inicioPermitido = plan.fuente === 'sin_conexion' ? null : inicioHistorial(mesesHistorial)
+    let historialLimitado: { meses: number; desde: string; plan: string; mejora: ReturnType<typeof mejoraPara> } | null = null
+    if (inicioPermitido && from < inicioPermitido) {
+      from = inicioPermitido
+      historialLimitado = { meses: mesesHistorial, desde: inicioPermitido.toISOString(), plan: plan.planName, mejora: mejoraPara('mesesHistorial', plan.tier) }
+    }
 
     const [
       impulseExpenses,
@@ -389,6 +402,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
 
     res.json({
       timeframe,
+      historialLimitado,
       from: from.toISOString(),
       to: to.toISOString(),
 

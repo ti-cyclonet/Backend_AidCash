@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken'
 import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { aplicarInvitacionAlRegistro, acreditarReferido } from '../lib/invitaciones.js'
+import { DIAS_PRUEBA_REGISTRO } from '../lib/planes.js'
 import { env } from '../config/env.js'
 import { validate } from '../middleware/validate.js'
 import { authMiddleware, AuthPayload } from '../middleware/auth.js'
@@ -90,6 +91,8 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
         metaAhorroGlobal: 5000,
         saldoAhorroTotal: 0,
         fondoEmergenciaActual: 0,
+        // 14 días de KIRI PLUS para conocer todo (lib/planes.ts)
+        pruebaPlusHasta: new Date(Date.now() + DIAS_PRUEBA_REGISTRO * 86400000),
       },
     })
 

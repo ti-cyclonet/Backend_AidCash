@@ -1,48 +1,54 @@
 /**
- * Middleware de control de límites por paquete.
- * Consulta a Authoriza los límites del tenant y valida que el recurso
- * no haya excedido su cuota antes de permitir la creación.
+ * Límites y funciones por plan (KIRI FREE / PLUS / PRO).
  *
- * Patrón inspirado en Inout's LimitEnforcementGuard.
+ * - checkLimit('nCategorias'): antes de crear algo, ¿le cabe en su plan?
+ * - requireFeature('p2pLoans'): ¿su plan incluye esta función?
+ *
+ * El plan sale de resolverPlan() (lib/planes.ts), que busca el contrato por
+ * correo — antes solo se revisaba con tokens de Authoriza (tenantId) y quien
+ * entraba por el login de Kiri no tenía ningún límite.
+ *
+ * Las respuestas 403 traen `codigo` y `mejora` para que el frontend muestre
+ * "Llegaste a tus 5 categorías. Con KIRI PLUS tienes 20" con el botón a Mi plan.
  */
 import { Request, Response, NextFunction } from 'express'
 import { prisma } from '../config/database.js'
-import { fetchKiriLimits, AuthorizaError } from '../lib/authoriza-client.js'
-import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
+import { ILIMITADO, MATRIZ, mejoraPara, resolverPlan, type PlanResuelto } from '../lib/planes.js'
 
-// ─── Mapeo de variables de límite a conteos reales en BD ──────────────────────
-
-/**
- * Mapeo de nombre de variable en Authoriza → modelo Prisma que se cuenta.
- * Estas son las variables que deben existir en los paquetes de Authoriza
- * con targetApplication = "Kiri".
- */
+/** Variable de cantidad → recurso que se cuenta */
 export const KIRI_VARIABLE_MAP: Record<string, string> = {
+  nCategorias: 'categories',
   nDeudas: 'debts',
   nGastosFijos: 'fixed-expenses',
+  nBolsillos: 'pockets',
+  nMeDeben: 'external-loans',
   nIngresosExtra: 'extra-incomes',
   nBolsillosCompartidos: 'shared-pockets',
   nPrestamos: 'loans',
   nConexiones: 'connections',
+  iaMensajesMes: 'ia-coach',
+  iaDictadosMes: 'ia-dictado',
+  iaEscaneosMes: 'ia-escaneo',
 }
 
-export const KIRI_VARIABLE_DISPLAY: Record<string, string> = {
-  nDeudas: 'Deudas',
-  nGastosFijos: 'Gastos Fijos',
-  nIngresosExtra: 'Ingresos Extra',
-  nBolsillosCompartidos: 'Bolsillos Compartidos',
-  nPrestamos: 'Préstamos',
-  nConexiones: 'Conexiones',
-}
+export const KIRI_VARIABLE_DISPLAY: Record<string, string> = Object.fromEntries(
+  Object.entries(MATRIZ).map(([k, v]) => [k, v.displayName]),
+)
 
-// ─── Funciones de conteo por recurso ──────────────────────────────────────────
+export const periodoIA = (now: Date = new Date()) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
 
-async function countResource(resource: string, userId: string): Promise<number> {
+export async function countResource(resource: string, userId: string): Promise<number> {
   switch (resource) {
+    case 'categories':
+      return prisma.budgetCategory.count({ where: { userId } })
     case 'debts':
       return prisma.debt.count({ where: { userId, estado: 'activa' } })
     case 'fixed-expenses':
       return prisma.fixedExpense.count({ where: { userId } })
+    case 'pockets':
+      return prisma.savingsPocket.count({ where: { userId } })
+    case 'external-loans':
+      return prisma.externalLoan.count({ where: { userId, estado: 'activo' } })
     case 'extra-incomes':
       return prisma.extraIncome.count({ where: { userId } })
     case 'shared-pockets':
@@ -50,114 +56,102 @@ async function countResource(resource: string, userId: string): Promise<number> 
     case 'loans':
       return prisma.loan.count({
         where: {
-          OR: [
-            { lenderId: userId, status: { in: ['ACTIVE', 'PENDING_APPROVAL', 'PENDING_BORROWER_CONFIRMATION'] } },
-            { borrowerId: userId, status: { in: ['ACTIVE', 'PENDING_APPROVAL', 'PENDING_BORROWER_CONFIRMATION'] } },
-          ],
+          OR: [{ lenderId: userId }, { borrowerId: userId }],
+          status: { in: ['ACTIVE', 'PENDING_APPROVAL', 'PENDING_BORROWER_CONFIRMATION'] },
         },
       })
     case 'connections':
       return prisma.connection.count({
-        where: {
-          OR: [
-            { requesterId: userId, status: 'ACCEPTED' },
-            { addresseeId: userId, status: 'ACCEPTED' },
-          ],
-        },
+        where: { status: 'ACCEPTED', OR: [{ requesterId: userId }, { addresseeId: userId }] },
       })
+    case 'ia-coach':
+    case 'ia-dictado':
+    case 'ia-escaneo': {
+      const tipo = resource.slice(3)
+      const r = await prisma.aiUso.findUnique({ where: { userId_periodo_tipo: { userId, periodo: periodoIA(), tipo } } })
+      return r?.cantidad ?? 0
+    }
     default:
       return 0
   }
 }
 
-// ─── Middleware factory ───────────────────────────────────────────────────────
+/** Mensaje y datos de "llegaste al límite" para una variable de cantidad. */
+export function respuestaLimite(plan: PlanResuelto, variableName: string, currentCount: number) {
+  const lim = plan.limites[variableName]
+  const nombre = lim?.displayName ?? KIRI_VARIABLE_DISPLAY[variableName] ?? variableName
+  const maxValue = lim?.maxValue ?? 0
+  const mejora = mejoraPara(variableName, plan.tier)
+  const mejoraTxt = mejora
+    ? mejora.maxValue >= ILIMITADO ? `Con ${mejora.plan} no tienes límite.` : `Con ${mejora.plan} tienes ${mejora.maxValue}.`
+    : ''
+  const message = maxValue <= 0
+    ? `Tu plan no incluye ${nombre}. ${mejora ? `Está incluido desde ${mejora.plan}.` : ''}`.trim()
+    : `Llegaste a tus ${maxValue} ${nombre} de ${plan.planName}. ${mejoraTxt}`.trim()
+  return { error: 'LIMIT_REACHED', codigo: 'LIMITE', message, variableName, currentCount, maxValue, plan: plan.planName, mejora }
+}
 
-/**
- * Crea un middleware que valida si el usuario (tenant) tiene cuota disponible
- * para crear un nuevo recurso del tipo indicado.
- *
- * Si el usuario inició sesión con token de Kiri (sin tenantId), se aplica
- * sin restricción (usuario standalone, plan libre).
- *
- * @param variableName - Nombre de la variable de límite (ej: 'nDeudas')
- */
+/** ¿Le cabe uno más de este recurso en su plan? */
 export function checkLimit(variableName: string) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const tenantId = req.user?.tenantId
-
-      // Si no hay tenantId (usuario con token Kiri propio) o la cuenta tiene
-      // acceso completo, permitir sin restricción
-      if (!tenantId || tieneAccesoCompleto(req.user?.correo)) {
-        next()
-        return
-      }
-
+      const userId = req.user?.userId
+      if (!userId) { next(); return }
+      const plan = await resolverPlan(userId)
+      // Authoriza caído y sin nada guardado: no bloquear a nadie por eso
+      if (plan.fuente === 'sin_conexion') { next(); return }
+      const max = plan.limites[variableName]?.maxValue
       const resource = KIRI_VARIABLE_MAP[variableName]
-      if (!resource) {
-        // Variable no mapeada, permitir
-        next()
-        return
-      }
+      if (max == null || max >= ILIMITADO || !resource) { next(); return }
 
-      // Obtener límites desde Authoriza
-      const limits = await fetchKiriLimits(tenantId)
-      const limitDef = limits.find(l => l.variableName === variableName)
-
-      // Si no hay límite definido para esta variable, permitir
-      if (!limitDef) {
-        next()
-        return
-      }
-
-      // Contar el uso actual
-      const userId = req.user!.userId
       const currentCount = await countResource(resource, userId)
-
-      if (currentCount >= limitDef.maxValue) {
-        res.status(403).json({
-          error: 'LIMIT_REACHED',
-          message: `Has alcanzado el límite de ${limitDef.displayName || KIRI_VARIABLE_DISPLAY[variableName] || variableName} (${limitDef.maxValue})`,
-          variableName,
-          currentCount,
-          maxValue: limitDef.maxValue,
-        })
+      if (currentCount >= max) {
+        res.status(403).json(respuestaLimite(plan, variableName, currentCount))
         return
       }
-
-      // Agregar info de uso al response (para warnings)
-      const percentage = Math.round((currentCount / limitDef.maxValue) * 100)
-      if (percentage >= 80) {
-        // Inyectar warning que las rutas pueden incluir en la respuesta
+      if (max > 0 && currentCount / max >= 0.8) {
         ;(req as any)._usageWarning = {
-          variableName,
-          displayName: limitDef.displayName || KIRI_VARIABLE_DISPLAY[variableName],
-          currentCount,
-          maxValue: limitDef.maxValue,
-          percentage,
-          message: `Estás cerca del límite de ${limitDef.displayName || KIRI_VARIABLE_DISPLAY[variableName]} (${percentage}%)`,
+          variableName, currentCount, maxValue: max,
+          displayName: plan.limites[variableName]?.displayName,
+          message: `Vas en ${currentCount} de ${max} ${plan.limites[variableName]?.displayName ?? ''}`.trim(),
         }
       }
-
       next()
     } catch (error) {
-      if (error instanceof AuthorizaError) {
-        // Si Authoriza no está disponible, permitir la operación (fail-open)
-        // pero loggear el error
-        console.error('[LimitEnforcement] Authoriza unavailable, allowing operation:', error.message)
-        next()
-        return
-      }
-      next(error)
+      console.error('[checkLimit]', error)
+      next() // nunca tumbar la creación por un error al revisar el plan
     }
   }
 }
 
-// ─── Helper para adjuntar warning al response ────────────────────────────────
+/** Respuesta estándar de "tu plan no incluye esta función". */
+export function respuestaFuncion(plan: PlanResuelto, feature: string) {
+  const def = MATRIZ[feature]
+  const mejora = mejoraPara(feature, plan.tier)
+  return {
+    error: 'FEATURE_BLOCKED', codigo: 'FUNCION', feature,
+    message: `«${def?.displayName ?? 'Esta función'}» ${mejora ? `es parte de ${mejora.plan}` : 'no está en tu plan'}.`,
+    plan: plan.planName, mejora,
+  }
+}
 
-/**
- * Helper que las rutas pueden usar para incluir el usage warning en la respuesta.
- */
+/** ¿Su plan incluye esta función? */
+export function requireFeature(feature: string) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const userId = req.user?.userId
+      if (!userId) { next(); return }
+      const plan = await resolverPlan(userId)
+      if (plan.fuente === 'sin_conexion' || plan.features[feature]) { next(); return }
+      res.status(403).json(respuestaFuncion(plan, feature))
+    } catch (error) {
+      console.error('[requireFeature]', error)
+      next()
+    }
+  }
+}
+
+/** Helper que las rutas pueden usar para incluir el aviso de uso en la respuesta. */
 export function attachUsageWarning(req: Request, data: any): any {
   const warning = (req as any)._usageWarning
   if (warning && data && typeof data === 'object') {

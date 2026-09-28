@@ -168,6 +168,26 @@ con sus días de pago; se cambia en Perfil).
   pago) llega un aviso en Kiri; al tocarlo se abre Mi plan en el acceso a FactoNet. Si hay una
   factura pendiente, Mi plan la muestra arriba con su valor y fecha.
 
+## PLANES KIRI (precios en COP)
+- KIRI FREE ($0): registrar gastos, ingresos y pagos sin límite; árbol, misiones y racha; fondo de
+  emergencia. Límites: 5 categorías, 5 deudas, 8 gastos fijos, 3 bolsillos, 3 "me deben",
+  2 ingresos extra, 2 conexiones; proyecciones hasta 3 meses; historial de 3 meses; IA al mes:
+  10 mensajes con Kiri Coach, 10 dictados, 3 escaneos. Sin préstamos entre usuarios, deudas ni
+  bolsillos compartidos.
+- KIRI PLUS ($12.900/mes o $119.000/año): 20 categorías, 10 bolsillos, deudas, gastos fijos,
+  "me deben", ingresos extra ilimitados, 20 conexiones; préstamos y deudas compartidas, 3 bolsillos
+  compartidos; proyecciones de 3 a 24 meses con "recortar gastos hormiga"; historial de 24 meses y
+  reportes PDF; IA al mes: 150 mensajes, 100 dictados, 30 escaneos; acceso a FactoNet.
+- KIRI PRO ($24.900/mes o $229.000/año): todo ilimitado; presupuesto del hogar (la pareja conectada
+  recibe PLUS gratis); conexión con el banco; escenarios de proyección guardados; historial
+  ilimitado; escáner que separa por productos; insignias exclusivas; soporte prioritario; IA al
+  mes: 500 mensajes, 300 dictados, 100 escaneos.
+- Las cuotas de IA se renuevan el día 1 de cada mes; Mi plan muestra "Tu uso este mes".
+- Al registrarse, cada usuario tiene 14 días de KIRI PLUS de prueba. Por cada amigo invitado que se
+  registre y verifique su cuenta, quien invitó gana 7 días más de PLUS.
+- Si llega a un límite, Kiri le muestra un aviso con el botón "Ver planes" que lleva a Mi plan.
+  Nunca inventes precios ni límites distintos a estos.
+
 ## NOTIFICACIONES
 - Campana: solicitudes y avisos de Social, préstamos, hogar, misiones, pagos por vencer, consejos.
 - Al celular (barra de notificaciones) si se activan en Perfil.

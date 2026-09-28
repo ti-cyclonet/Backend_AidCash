@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
+import { z } from 'zod'
+import { validate } from '../middleware/validate.js'
+import { requireFeature } from '../middleware/limit-enforcement.js'
+import { otorgarInsigniaPro } from '../lib/planes.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -178,6 +182,54 @@ router.get('/movimientos', async (req: Request, res: Response): Promise<void> =>
   } catch (error) {
     console.error('[ProjectionsMovimientos]', error)
     res.status(500).json({ error: 'Error al cargar los movimientos' })
+  }
+})
+
+// ─── Escenarios guardados de Proyecciones (KIRI PRO) ──────────────────────────
+
+const escenarioSchema = z.object({
+  nombre: z.string().trim().min(1).max(60),
+  aporteExtra: z.number().min(0).max(1_000_000_000),
+  recortarHormiga: z.boolean().default(false),
+  meses: z.number().int().min(1).max(24).default(12),
+}).strict()
+
+const serializarEscenario = (e: { id: string; nombre: string; aporteExtra: unknown; recortarHormiga: boolean; meses: number; createdAt: Date }) =>
+  ({ id: e.id, nombre: e.nombre, aporteExtra: Number(e.aporteExtra), recortarHormiga: e.recortarHormiga, meses: e.meses, createdAt: e.createdAt })
+
+router.get('/escenarios', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const rows = await prisma.proyeccionEscenario.findMany({ where: { userId: req.user!.userId }, orderBy: { createdAt: 'desc' } })
+    res.json({ escenarios: rows.map(serializarEscenario) })
+  } catch (error) {
+    console.error('[Escenarios]', error)
+    res.status(500).json({ error: 'Error al cargar los escenarios' })
+  }
+})
+
+router.post('/escenarios', requireFeature('savedScenarios'), validate(escenarioSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const total = await prisma.proyeccionEscenario.count({ where: { userId } })
+    if (total >= 20) { res.status(400).json({ error: 'Tienes 20 escenarios guardados: borra alguno para guardar otro.' }); return }
+    const d = req.body as z.infer<typeof escenarioSchema>
+    const e = await prisma.proyeccionEscenario.create({ data: { userId, nombre: d.nombre, aporteExtra: d.aporteExtra, recortarHormiga: d.recortarHormiga, meses: d.meses } })
+    otorgarInsigniaPro(userId, 'pro_estratega')
+    res.status(201).json({ escenario: serializarEscenario(e) })
+  } catch (error) {
+    console.error('[EscenarioCrear]', error)
+    res.status(500).json({ error: 'Error al guardar el escenario' })
+  }
+})
+
+router.delete('/escenarios/:id', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const r = await prisma.proyeccionEscenario.deleteMany({ where: { id: String(req.params.id), userId: req.user!.userId } })
+    if (r.count === 0) { res.status(404).json({ error: 'Escenario no encontrado' }); return }
+    res.json({ message: 'Escenario eliminado' })
+  } catch (error) {
+    console.error('[EscenarioBorrar]', error)
+    res.status(500).json({ error: 'Error al eliminar el escenario' })
   }
 })
 

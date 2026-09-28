@@ -1,128 +1,55 @@
 /**
- * Rutas de estado de uso y límites del paquete.
- * Permite al frontend mostrar el consumo actual vs. los límites del plan.
+ * Rutas de estado de uso y límites del plan (KIRI FREE / PLUS / PRO).
+ * Mi plan las usa para "Tu uso este mes": lo que llevas frente al tope de tu plan.
  */
 import { Router, Request, Response } from 'express'
 import { authMiddleware } from '../middleware/auth.js'
-import { prisma } from '../config/database.js'
-import {
-  fetchTenantLimits,
-  fetchKiriLimits,
-  invalidateTenantCache,
-  AuthorizaError,
-} from '../lib/authoriza-client.js'
-import { KIRI_VARIABLE_MAP, KIRI_VARIABLE_DISPLAY } from '../middleware/limit-enforcement.js'
+import { invalidateTenantCache } from '../lib/authoriza-client.js'
+import { KIRI_VARIABLE_MAP, countResource } from '../middleware/limit-enforcement.js'
+import { ILIMITADO, resolverPlan } from '../lib/planes.js'
 
 const router = Router()
 
-// ─── GET /usage-status — Estado completo de uso ───────────────────────────────
+async function usoDelPlan(userId: string) {
+  const plan = await resolverPlan(userId)
+  const variables = await Promise.all(
+    Object.entries(plan.limites)
+      .filter(([k]) => KIRI_VARIABLE_MAP[k])
+      .map(async ([variableName, lim]) => {
+        const currentCount = await countResource(KIRI_VARIABLE_MAP[variableName], userId)
+        const ilimitado = lim.maxValue >= ILIMITADO
+        return {
+          variableName,
+          displayName: lim.displayName,
+          maxValue: lim.maxValue,
+          ilimitado,
+          currentCount,
+          usagePercentage: ilimitado || lim.maxValue <= 0 ? 0 : Math.min(100, Math.round((currentCount / lim.maxValue) * 100)),
+        }
+      }),
+  )
+  return { plan, variables }
+}
+
+// ─── GET /usage-status — uso actual frente al plan ────────────────────────────
 
 router.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
-    const tenantId = req.user?.tenantId
-
-    if (!tenantId) {
-      // Usuario standalone (token Kiri), no tiene límites de paquete
-      res.json({
-        tenantId: null,
-        packageName: 'Standalone',
-        isBillable: false,
-        variables: [],
-        message: 'Este usuario no está vinculado a un contrato Cyclonet.',
-      })
-      return
-    }
-
-    const limitsResponse = await fetchTenantLimits(tenantId)
-    const kiriLimits = limitsResponse.limits.filter(l => l.targetApplication === 'Kiri')
-
-    // Contar uso actual para cada variable
-    const userId = req.user!.userId
-    const variables = await Promise.all(
-      kiriLimits.map(async (limit) => {
-        const resource = KIRI_VARIABLE_MAP[limit.variableName]
-        let currentCount = 0
-
-        if (resource) {
-          currentCount = await countResourceForStatus(resource, userId)
-        }
-
-        const usagePercentage = limit.maxValue > 0
-          ? Math.round((currentCount / limit.maxValue) * 100)
-          : 0
-
-        return {
-          variableName: limit.variableName,
-          displayName: limit.displayName || KIRI_VARIABLE_DISPLAY[limit.variableName] || limit.variableName,
-          maxValue: limit.maxValue,
-          currentCount,
-          usagePercentage,
-        }
-      })
-    )
-
-    res.json({
-      tenantId,
-      packageName: limitsResponse.packageName,
-      isBillable: limitsResponse.isBillable,
-      startDate: limitsResponse.startDate,
-      endDate: limitsResponse.endDate,
-      variables,
-    })
+    const { plan, variables } = await usoDelPlan(req.user!.userId)
+    res.json({ packageName: plan.planName, tier: plan.tier, fuente: plan.fuente, isBillable: plan.isBillable ?? false, variables })
   } catch (error) {
-    if (error instanceof AuthorizaError) {
-      res.status(error.statusCode).json({ error: error.code, message: error.message })
-      return
-    }
     console.error('[UsageStatus]', error)
     res.status(500).json({ error: 'Error al obtener estado de uso' })
   }
 })
 
-// ─── GET /usage-status/warnings — Variables que superan el 80% ────────────────
+// ─── GET /usage-status/warnings — lo que va en 80% o más ──────────────────────
 
 router.get('/warnings', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
-    const tenantId = req.user?.tenantId
-
-    if (!tenantId) {
-      res.json({ warnings: [] })
-      return
-    }
-
-    const kiriLimits = await fetchKiriLimits(tenantId)
-    const userId = req.user!.userId
-    const warnings: any[] = []
-
-    for (const limit of kiriLimits) {
-      const resource = KIRI_VARIABLE_MAP[limit.variableName]
-      if (!resource) continue
-
-      const currentCount = await countResourceForStatus(resource, userId)
-      const percentage = limit.maxValue > 0
-        ? Math.round((currentCount / limit.maxValue) * 100)
-        : 0
-
-      if (percentage >= 80) {
-        warnings.push({
-          variableName: limit.variableName,
-          displayName: limit.displayName || KIRI_VARIABLE_DISPLAY[limit.variableName],
-          currentCount,
-          maxValue: limit.maxValue,
-          percentage,
-          message: percentage >= 100
-            ? `Has alcanzado el límite de ${limit.displayName || KIRI_VARIABLE_DISPLAY[limit.variableName]}`
-            : `Estás cerca del límite de ${limit.displayName || KIRI_VARIABLE_DISPLAY[limit.variableName]} (${percentage}%)`,
-        })
-      }
-    }
-
-    res.json({ warnings })
+    const { variables } = await usoDelPlan(req.user!.userId)
+    res.json({ warnings: variables.filter(v => !v.ilimitado && v.maxValue > 0 && v.usagePercentage >= 80) })
   } catch (error) {
-    if (error instanceof AuthorizaError) {
-      res.status(error.statusCode).json({ error: error.code, message: error.message })
-      return
-    }
     console.error('[UsageWarnings]', error)
     res.status(500).json({ error: 'Error al obtener advertencias de uso' })
   }
@@ -135,40 +62,5 @@ router.post('/invalidate-cache/:tenantId', async (req: Request, res: Response): 
   invalidateTenantCache(tenantId)
   res.json({ success: true, message: `Cache invalidada para tenant ${tenantId}` })
 })
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-async function countResourceForStatus(resource: string, userId: string): Promise<number> {
-  switch (resource) {
-    case 'debts':
-      return prisma.debt.count({ where: { userId, estado: 'activa' } })
-    case 'fixed-expenses':
-      return prisma.fixedExpense.count({ where: { userId } })
-    case 'extra-incomes':
-      return prisma.extraIncome.count({ where: { userId } })
-    case 'shared-pockets':
-      return prisma.sharedPocketMember.count({ where: { userId } })
-    case 'loans':
-      return prisma.loan.count({
-        where: {
-          OR: [
-            { lenderId: userId, status: { in: ['ACTIVE', 'PENDING_APPROVAL', 'PENDING_BORROWER_CONFIRMATION'] } },
-            { borrowerId: userId, status: { in: ['ACTIVE', 'PENDING_APPROVAL', 'PENDING_BORROWER_CONFIRMATION'] } },
-          ],
-        },
-      })
-    case 'connections':
-      return prisma.connection.count({
-        where: {
-          OR: [
-            { requesterId: userId, status: 'ACCEPTED' },
-            { addresseeId: userId, status: 'ACCEPTED' },
-          ],
-        },
-      })
-    default:
-      return 0
-  }
-}
 
 export default router

@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { checkLimit } from '../middleware/limit-enforcement.js'
 import { recordMissionAction } from '../lib/missions.js'
 import { resumenCategorias } from '../lib/category-summary.js'
 import { sugerirCategoria } from '../lib/categorias.js'
@@ -119,7 +120,7 @@ router.get('/sugerir', async (req: Request, res: Response): Promise<void> => {
 
 // ─── POST /budget-categories — Crear una categoría ────────────────────────────
 
-router.post('/', validate(createCategorySchema), async (req: Request, res: Response): Promise<void> => {
+router.post('/', validate(createCategorySchema), checkLimit('nCategorias'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { nombre, icono, color, tipo, montoLimite, linkedFixedExpenseIds } = req.body
