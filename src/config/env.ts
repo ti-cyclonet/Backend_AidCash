@@ -38,7 +38,7 @@ export const env = {
   AUTHORIZA_API_URL: process.env.AUTHORIZA_API_URL || 'http://localhost:3000',
   // FactoNet (facturación): donde el usuario ve su contrato y sus facturas,
   // con el mismo correo y contraseña de Kiri
-  FACTONET_URL: process.env.FACTONET_URL || (process.env.NODE_ENV === 'production' ? 'https://billing.cyclonet.com.co' : 'http://localhost:4202'),
+  FACTONET_URL: process.env.FACTONET_URL || 'https://billing.cyclonet.com.co',
 
   // ─── Belvo Open Banking ─────────────────────────────────────────────────────
   BELVO_SECRET_ID: process.env.BELVO_SECRET_ID || '',
