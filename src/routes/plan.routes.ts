@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import { authMiddleware } from '../middleware/auth.js'
 import { requireInternalKey } from '../middleware/internal-key.js'
+import { verifyCredentials } from '../lib/authoriza-auth.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
@@ -241,7 +242,18 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
       return res.status(404).json({ success: false, error: 'Usuario no encontrado.' })
     }
 
-    const isValid = await bcrypt.compare(password, user.passwordHash)
+    // Si la cuenta ya existe en Authoriza, SU contraseña es la única válida.
+    // Solo las cuentas antiguas que existen únicamente en Kiri se validan con
+    // el hash local — es el puente para migrarlas a Authoriza (ensure-kiri-user).
+    let cred
+    try {
+      cred = await verifyCredentials(email, password)
+    } catch {
+      return res.status(503).json({ success: false, error: 'No pudimos validar tu cuenta en este momento. Intenta de nuevo.' })
+    }
+    const isValid = cred.exists
+      ? cred.valid
+      : await bcrypt.compare(password, user.passwordHash).catch(() => false)
     if (!isValid) {
       return res.status(401).json({ success: false, error: 'Contraseña incorrecta.' })
     }
@@ -407,7 +419,7 @@ router.post('/set-user-status', requireInternalKey, async (req: Request, res: Re
 
     await prisma.user.update({
       where: { id: user.id },
-      data: { isActive: allowed },
+      data: { isActive: allowed, ...(allowed ? {} : { sessionsValidAfter: new Date() }) },
     })
 
     // If blocking, revoke all active refresh tokens to force logout
@@ -420,6 +432,40 @@ router.post('/set-user-status', requireInternalKey, async (req: Request, res: Re
   } catch (error: any) {
     console.error('[Plan] Error setting user status:', error.message)
     return res.status(500).json({ success: false, error: 'Error updating user status.' })
+  }
+})
+
+/**
+ * POST /api/plan/revoke-sessions
+ * Webhook called by Authoriza when a user's password changes or is reset there.
+ * Closes every open Kiri session: deletes refresh tokens and rejects access
+ * tokens issued before now (see middleware/auth.ts).
+ * Server-to-server: exige x-internal-key (INTERNAL_API_KEY).
+ * Body: { email }
+ */
+router.post('/revoke-sessions', requireInternalKey, async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'email is required.' })
+    }
+
+    const user = await prisma.user.findUnique({ where: { correo: email } })
+    if (!user) {
+      // Cuenta sin perfil en Kiri: no hay sesiones que cerrar
+      return res.json({ success: true, message: 'No Kiri user for this email.' })
+    }
+
+    await prisma.$transaction([
+      prisma.user.update({ where: { id: user.id }, data: { sessionsValidAfter: new Date() } }),
+      prisma.refreshToken.deleteMany({ where: { userId: user.id } }),
+    ])
+
+    console.log(`[Plan] Sessions revoked for ${user.correo} (credentials changed in Authoriza)`)
+    return res.json({ success: true, message: 'Sessions revoked.' })
+  } catch (error: any) {
+    console.error('[Plan] Error revoking sessions:', error.message)
+    return res.status(500).json({ success: false, error: 'Error revoking sessions.' })
   }
 })
 
