@@ -10,6 +10,13 @@ import { authMiddleware, AuthPayload } from '../middleware/auth.js'
 import { generateUniqueUsername } from '../lib/username.js'
 import { sendMail } from '../lib/mail.js'
 import crypto from 'crypto'
+import {
+  AUTHORIZA_MANAGED_PASSWORD,
+  AuthorizaRejectedError,
+  ensureAuthorizaAccount,
+  setPassword as setAuthorizaPassword,
+  verifyCredentials,
+} from '../lib/authoriza-auth.js'
 
 const router = Router()
 
@@ -64,9 +71,6 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
       return
     }
 
-    // Hashear contraseña
-    const passwordHash = await bcrypt.hash(password, 12)
-
     // @username público (Social) — se autogenera del nombre, editable después
     const username = await generateUniqueUsername(nombre)
 
@@ -76,7 +80,8 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
         nombre,
         correo,
         username,
-        passwordHash,
+        // La contraseña vive solo en Authoriza (se envía abajo en register-kiri)
+        passwordHash: AUTHORIZA_MANAGED_PASSWORD,
         isActive: false, // Inactivo hasta verificar el correo
         frecuenciaIngreso: 'mensual',
         ingresoBase: 0,
@@ -109,14 +114,27 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
           documentNumber: documentNumber || '',
         }),
       })
-      const authData = await authRes.json() as any
-      // If user already existed in Authoriza (verified), activate locally
-      if (authData.alreadyExists) {
+      const authData = await authRes.json().catch(() => ({})) as any
+      if (!authRes.ok) {
+        // Sin cuenta en Authoriza no hay contraseña con la que entrar: no dejar
+        // una fila local huérfana que después bloquee el registro con "ya existe".
+        await prisma.user.delete({ where: { id: user.id } }).catch(() => {})
+        const message = Array.isArray(authData?.message) ? authData.message[0] : authData?.message
+        res.status(authRes.status === 409 ? 409 : 502).json({
+          error: message || 'No se pudo completar el registro. Intenta de nuevo.',
+        })
+        return
+      }
+      // Cuenta CycloNet existente y verificada (misma contraseña): activar local
+      if (authData.alreadyExists && authData.verificationRequired === false) {
         verificationRequired = false
         await prisma.user.update({ where: { id: user.id }, data: { isActive: true } })
       }
     } catch (authErr) {
       console.warn('[Register] Failed to register in Authoriza:', (authErr as Error).message)
+      await prisma.user.delete({ where: { id: user.id } }).catch(() => {})
+      res.status(503).json({ error: 'No pudimos completar el registro en este momento. Intenta de nuevo en unos minutos.' })
+      return
     }
 
     res.status(201).json({
@@ -141,80 +159,70 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
 
 router.post('/login', validate(loginSchema), async (req: Request, res: Response): Promise<void> => {
   try {
-    const { correo, password } = req.body
+    const correo = String(req.body.correo).trim()
+    const { password } = req.body
+
+    // 1. La contraseña se valida SOLO contra Authoriza (fuente de verdad). Si
+    //    no responde, el login falla cerrado: nunca se cae a una copia local.
+    let cred
+    try {
+      cred = await verifyCredentials(correo, password)
+    } catch (err) {
+      console.warn('[Login] Authoriza no disponible:', (err as Error).message)
+      res.status(503).json({
+        error: 'No pudimos validar tu acceso en este momento. Intenta de nuevo en unos minutos.',
+        code: 'AUTH_UNAVAILABLE',
+      })
+      return
+    }
 
     const user = await prisma.user.findUnique({ where: { correo } })
-    if (!user) {
-      res.status(401).json({ error: 'Correo o contraseña incorrectos.' })
-      return
-    }
 
-    const isValid = await bcrypt.compare(password, user.passwordHash)
-    if (!isValid) {
-      res.status(401).json({ error: 'Correo o contraseña incorrectos.' })
-      return
-    }
-
-    // Verificar estado en Authoriza (fuente de verdad del control de acceso)
-    try {
-      const authorizaUrl = env.AUTHORIZA_API_URL || 'http://localhost:3000'
-      const statusRes = await fetch(`${authorizaUrl}/api/auth/user-status`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: correo }),
-      })
-      if (statusRes.ok) {
-        const statusData = await statusRes.json() as any
-        // Only enforce if the user exists in Authoriza
-        if (statusData.exists && !statusData.allowed) {
-          // Sync local isActive flag to match Authoriza
-          await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
-
-          const messages: Record<string, string> = {
-            NOT_VERIFIED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
-            UNCONFIRMED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
-            SUSPENDED: 'Tu cuenta ha sido suspendida. Contacta al administrador.',
-            INACTIVE: 'Tu cuenta está inactiva. Contacta al administrador.',
-            DELINQUENT: 'Tu cuenta tiene un pago pendiente. Regulariza tu situación para continuar.',
-            DELETED: 'Esta cuenta ya no está disponible.',
-          }
-          res.status(403).json({
-            error: messages[statusData.reason] || 'Tu acceso ha sido restringido. Contacta al administrador.',
-            code: 'ACCESS_DENIED',
-            reason: statusData.reason,
-          })
-          return
-        }
-        // If Authoriza allows and local was inactive, reactivate locally
-        if (statusData.exists && statusData.allowed && user.isActive === false) {
-          await prisma.user.update({ where: { id: user.id }, data: { isActive: true } }).catch(() => {})
-          user.isActive = true
-        }
-        // Authoriza respondió y NO tiene registro de este correo (p. ej. se
-        // borró/reseteó allá) — es la fuente de verdad, así que una fila vieja
-        // que sobrevivió en la base local de Kiri no debe poder autenticar.
-        if (!statusData.exists) {
-          await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
-          res.status(403).json({
-            error: 'Esta cuenta ya no está disponible. Regístrate de nuevo.',
-            code: 'ACCESS_DENIED',
-            reason: 'NOT_FOUND',
-          })
-          return
-        }
-      }
-    } catch (statusErr) {
-      // If Authoriza is unreachable, fall back to local isActive check (fail-safe)
-      console.warn('[Login] Could not verify status in Authoriza:', (statusErr as Error).message)
-    }
-
-    // Verificar que el usuario esté activo localmente (fallback)
-    if (user.isActive === false) {
+    if (!cred.exists && user) {
+      // Cuenta antigua que solo existía en Kiri: su contraseña local ya no se
+      // acepta. Recuperarla por correo crea la cuenta en Authoriza.
       res.status(403).json({
-        error: 'Tu cuenta está temporalmente suspendida. Recibirás un correo cuando sea reactivada.',
-        code: 'ACCOUNT_SUSPENDED',
+        error: 'Tu cuenta de Kiri debe migrarse a CycloNet. Usa "¿Olvidaste tu contraseña?" para crear tu nueva contraseña.',
+        code: 'LEGACY_ACCOUNT',
       })
       return
+    }
+
+    if (!cred.valid) {
+      res.status(401).json({ error: 'Correo o contraseña incorrectos.' })
+      return
+    }
+
+    if (!user) {
+      // Cuenta CycloNet válida pero aún sin perfil en Kiri
+      res.status(403).json({
+        error: 'Tu cuenta CycloNet aún no está habilitada en Kiri. Regístrate en Kiri con este correo y tu misma contraseña.',
+        code: 'NOT_IN_KIRI',
+      })
+      return
+    }
+
+    // 2. Estado de acceso (Authoriza manda)
+    if (!cred.allowed) {
+      await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
+      const messages: Record<string, string> = {
+        NOT_VERIFIED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
+        UNCONFIRMED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
+        SUSPENDED: 'Tu cuenta ha sido suspendida. Contacta al administrador.',
+        INACTIVE: 'Tu cuenta está inactiva. Contacta al administrador.',
+        DELINQUENT: 'Tu cuenta tiene un pago pendiente. Regulariza tu situación para continuar.',
+        DELETED: 'Esta cuenta ya no está disponible.',
+      }
+      res.status(403).json({
+        error: messages[cred.reason || ''] || 'Tu acceso ha sido restringido. Contacta al administrador.',
+        code: 'ACCESS_DENIED',
+        reason: cred.reason,
+      })
+      return
+    }
+    if (user.isActive === false) {
+      await prisma.user.update({ where: { id: user.id }, data: { isActive: true } }).catch(() => {})
+      user.isActive = true
     }
 
     // Generar tokens
@@ -241,6 +249,9 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
       },
       accessToken,
       refreshToken,
+      // Tras un reset desde Authoriza (contraseña temporal): el frontend obliga
+      // a cambiarla antes de dejar usar la app.
+      mustChangePassword: cred.mustChangePassword,
     })
   } catch (error) {
     console.error('[Login]', error)
@@ -467,9 +478,33 @@ router.post('/reset-password', validate(resetPasswordSchema), async (req: Reques
       return
     }
 
-    const newHash = await bcrypt.hash(newPassword, 12)
+    // La contraseña se fija en Authoriza (única fuente). Si falla, el token NO
+    // se consume: el usuario puede reintentar con el mismo enlace.
+    try {
+      try {
+        await setAuthorizaPassword(correo, newPassword)
+      } catch (err) {
+        // Cuenta antigua que solo existía en Kiri: el token enviado a su correo
+        // prueba que es suya, así que se crea en Authoriza con la nueva contraseña.
+        if (err instanceof AuthorizaRejectedError && err.status === 404) {
+          await ensureAuthorizaAccount(correo, newPassword, user.nombre)
+        } else {
+          throw err
+        }
+      }
+    } catch (err) {
+      if (err instanceof AuthorizaRejectedError) {
+        res.status(400).json({ error: err.message })
+        return
+      }
+      console.warn('[ResetPassword] Authoriza no disponible:', (err as Error).message)
+      res.status(503).json({ error: 'No pudimos actualizar tu contraseña en este momento. Intenta de nuevo en unos minutos.' })
+      return
+    }
+
     await prisma.$transaction([
-      prisma.user.update({ where: { id: user.id }, data: { passwordHash: newHash } }),
+      // Cierra también los access tokens ya emitidos (ver middleware/auth.ts)
+      prisma.user.update({ where: { id: user.id }, data: { sessionsValidAfter: new Date() } }),
       // Invalidar el token de reset usado y cualquier sesión activa — igual
       // que un cambio de contraseña normal, para que un enlace viejo o una
       // sesión robada no sigan sirviendo después del reset.
@@ -520,26 +555,18 @@ router.post('/change-password', authMiddleware, validate(changePasswordSchema), 
       return
     }
 
-    // Validate current password
-    const isValid = await bcrypt.compare(currentPassword, user.passwordHash)
-    if (!isValid) {
-      res.status(401).json({ error: 'La contraseña actual es incorrecta.' })
+    // Authoriza valida la actual y fija la nueva (única fuente de la contraseña)
+    try {
+      await setAuthorizaPassword(user.correo, newPassword, currentPassword)
+    } catch (err) {
+      if (err instanceof AuthorizaRejectedError) {
+        res.status(err.status === 401 ? 401 : 400).json({ error: err.message })
+        return
+      }
+      console.warn('[ChangePassword] Authoriza no disponible:', (err as Error).message)
+      res.status(503).json({ error: 'No pudimos actualizar tu contraseña en este momento. Intenta de nuevo en unos minutos.' })
       return
     }
-
-    // Prevent reusing the same password
-    const isSame = await bcrypt.compare(newPassword, user.passwordHash)
-    if (isSame) {
-      res.status(400).json({ error: 'La nueva contraseña debe ser diferente a la actual.' })
-      return
-    }
-
-    // Hash and update
-    const newHash = await bcrypt.hash(newPassword, 12)
-    await prisma.user.update({
-      where: { id: userId },
-      data: { passwordHash: newHash },
-    })
 
     res.json({ message: 'Contraseña actualizada exitosamente.' })
   } catch (error) {

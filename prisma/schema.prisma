@@ -20,7 +20,12 @@ model User {
   // nombre al registrarse, editable después desde Perfil.
   username              String   @unique
   avatarUrl             String?  @map("avatar_url") // foto de perfil en base64
+  // Obsoleto: la contraseña vive SOLO en Authoriza (ver src/lib/authoriza-auth.ts).
+  // Las cuentas nuevas guardan un marcador que nunca valida.
   passwordHash          String   @map("password_hash")
+  // Tokens de acceso emitidos antes de esta fecha se rechazan (reset/cambio de
+  // contraseña en Authoriza o Kiri, bloqueo). Null = ninguno revocado.
+  sessionsValidAfter    DateTime? @map("sessions_valid_after")
   ingresoBase           Decimal  @default(0) @map("ingreso_base") @db.Decimal(12, 2)
   frecuenciaIngreso     String   @default("mensual") @map("frecuencia_ingreso")
   diasPago              Int[]    @default([]) @map("dias_pago")
