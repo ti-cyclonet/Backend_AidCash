@@ -125,12 +125,14 @@ export function initPaymentNotificationsCron() {
         take: 50,
       })
 
+      // Solo datos verificables y funciones que existen (antes había cifras
+      // inventadas como "ahorra hasta un 20% más").
       const tips = [
-        '🌱 ¡Te extrañamos! Revisa tu jardín financiero hoy.',
-        '💡 Tip: Registrar tus gastos diarios te ayuda a ahorrar hasta un 20% más.',
-        '🎯 ¿Ya revisaste si puedes abonar extra a alguna deuda esta semana?',
-        '📊 Tu presupuesto te espera. Pequeñas acciones hoy, grandes resultados mañana.',
-        '🐷 ¿Sabías que ahorrar aunque sea $1,000 al día suma $365,000 al año?',
+        '🌱 ¡Te extrañamos! Tu jardín financiero te espera: revisa cómo va tu árbol.',
+        '🐜 $5.000 diarios en gastos hormiga son $150.000 al mes. Anótalos en Kiri para verlos.',
+        '🎯 Un abono extra a capital baja el saldo de tu deuda y los intereses de los meses siguientes.',
+        '🏦 Cuando pagues una cuota, escribe en Kiri el saldo que te muestra el banco y verás el interés real que pagaste.',
+        '🐷 Ahorrar $1.000 al día suma $365.000 al año.',
       ]
 
       for (const user of inactiveUsers) {

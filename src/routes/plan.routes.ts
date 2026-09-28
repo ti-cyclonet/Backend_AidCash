@@ -4,6 +4,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { requireInternalKey } from '../middleware/internal-key.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
+import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
 
 const router = Router()
 
@@ -32,11 +33,8 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userEmail = (req as any).user?.correo
 
-    // ═══ BYPASS: Usuario(s) de prueba con acceso completo a todos los módulos ═══
-    // 'qa.obligaciones@kiri.test' es la cuenta QA de esta sesión de debugging —
-    // quitar de esta lista cuando ya no se necesite probar features premium sin Authoriza.
-    const TEST_EMAILS = ['test@kiri.app', 'qa.obligaciones@kiri.test', 'qa.me@kiri.test', 'qa.partner@kiri.test']
-    if (TEST_EMAILS.includes(userEmail)) {
+    // ═══ BYPASS: cuentas con acceso completo a todos los módulos (ver lib/acceso-completo.ts) ═══
+    if (tieneAccesoCompleto(userEmail)) {
       return res.json({
         planName: 'KIRI PRO (Test)',
         features: {

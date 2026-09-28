@@ -1,6 +1,9 @@
 import { Router, Request, Response } from 'express'
 import { z } from 'zod'
 import { prisma } from '../config/database.js'
+// Mover plata entre usuarios toca cashBalance Y el bolsillo libre por el mismo
+// monto — antes solo cashBalance, y la suma de bolsillos dejaba de cuadrar.
+import { planPocketCredit, planPocketDeduction } from '../lib/wallet.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
@@ -223,11 +226,11 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
         }),
         prisma.user.update({
           where: { id: lenderId },
-          data: { cashBalance: { decrement: montoOriginal } },
+          data: planPocketDeduction('libre', montoOriginal),
         }),
         prisma.user.update({
           where: { id: loan.borrowerId },
-          data: { cashBalance: { increment: montoOriginal } },
+          data: planPocketCredit('libre', montoOriginal),
         }),
       ])
 
@@ -286,11 +289,11 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
         prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE' } }),
         prisma.user.update({
           where: { id: loan.lenderId },
-          data: { cashBalance: { decrement: disbursed } },
+          data: planPocketDeduction('libre', disbursed),
         }),
         prisma.user.update({
           where: { id: borrowerId },
-          data: { cashBalance: { increment: disbursed } },
+          data: planPocketCredit('libre', disbursed),
         }),
       ])
 
@@ -449,11 +452,11 @@ router.post('/payment', validate(paymentSchema), async (req: Request, res: Respo
         }),
         prisma.user.update({
           where: { id: borrowerId },
-          data: { cashBalance: { decrement: monto } },
+          data: planPocketDeduction('libre', monto),
         }),
         prisma.user.update({
           where: { id: loan.lenderId },
-          data: { cashBalance: { increment: monto } },
+          data: planPocketCredit('libre', monto),
         }),
       ])
 
@@ -546,11 +549,11 @@ router.post('/payment/confirm', validate(confirmPaymentSchema), async (req: Requ
       }),
       prisma.user.update({
         where: { id: payment.userId },
-        data: { cashBalance: { decrement: Number(payment.monto) } },
+        data: planPocketDeduction('libre', Number(payment.monto)),
       }),
       prisma.user.update({
         where: { id: lenderId },
-        data: { cashBalance: { increment: Number(payment.monto) } },
+        data: planPocketCredit('libre', Number(payment.monto)),
       }),
     ])
 

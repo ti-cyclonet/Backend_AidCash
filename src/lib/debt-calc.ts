@@ -1,5 +1,78 @@
-import { getPeriodo, parseDiasPago } from './period.js'
-import type { DebtPayment } from '@prisma/client'
+import { getPeriodo, parseDiasPago, periodoSiguienteDe, periodosAnteriores } from './period.js'
+import type { DebtPayment, Prisma } from '@prisma/client'
+
+type DebtSchedule = { frecuenciaPago: string; diasPago: string }
+
+/** Periodo inmediatamente siguiente de la deuda — destino de "Adelantar próxima cuota". */
+export function debtPeriodoSiguiente(debt: DebtSchedule, now: Date = new Date()): string {
+  return periodoSiguienteDe(d => debtPeriodo(debt, d), now)
+}
+
+/**
+ * La tasa guardada es MENSUAL. Una deuda quincenal tiene dos periodos por mes,
+ * así que cada quincena causa la mitad — antes se cobraba la tasa mensual
+ * completa en cada quincena (el doble de interés real), y además no calzaba
+ * con la proyección del formulario de registro, que sí usaba tasa/2.
+ */
+export function tasaDelPeriodo(tasaMensual: number | null, frecuenciaPago: string): number | null {
+  if (!tasaMensual) return tasaMensual
+  return frecuenciaPago === 'quincenal' ? tasaMensual / 2 : tasaMensual
+}
+
+type CuotaFields = { cuotaPeriodo: Prisma.Decimal | number; cuotaOverride?: Prisma.Decimal | number | null; cuotaOverridePeriodo?: string | null }
+
+/** Cuota base exigida en `periodo`: el ajuste "solo este mes" si aplica a ese periodo, si no la cuota normal. */
+export function cuotaBaseDelPeriodo(debt: CuotaFields, periodo: string): number {
+  if (debt.cuotaOverride != null && debt.cuotaOverridePeriodo === periodo) return Number(debt.cuotaOverride)
+  return Number(debt.cuotaPeriodo)
+}
+
+export interface Atraso {
+  periodo: string
+  cuota: number
+  pagado: number
+  falta: number
+}
+
+/** Hasta cuántos periodos atrás se buscan cuotas sin pagar. */
+export const ATRASOS_MAX_DIAS = 186
+
+/**
+ * Periodos ya cerrados que se deben revisar por atrasos: desde el periodo en
+ * que se creó la deuda (o desde `activoDesdePeriodo` si arrancaba después),
+ * con un tope de ~6 meses hacia atrás.
+ */
+export function periodosRevisables(
+  debt: DebtSchedule & { createdAt: Date; activoDesdePeriodo?: string | null },
+  now: Date = new Date(),
+): string[] {
+  const tope = new Date(now.getTime() - ATRASOS_MAX_DIAS * 86_400_000)
+  const desde = debt.createdAt > tope ? debt.createdAt : tope
+  return periodosAnteriores(d => debtPeriodo(debt, d), desde, now)
+    .filter(p => !debt.activoDesdePeriodo || p >= debt.activoDesdePeriodo)
+}
+
+/**
+ * Cuotas de periodos YA CERRADOS que quedaron sin cubrir. Antes, al cambiar de
+ * mes/quincena el estado volvía a $0 y la cuota no pagada desaparecía sin
+ * rastro (solo quedaba en el saldo). Las tarjetas de crédito se excluyen: su
+ * cuota "mínima" cambia con cada compra y el banco la recalcula, no es fija.
+ */
+export function calcularAtrasos(
+  debt: DebtSchedule & CuotaFields & { createdAt: Date; activoDesdePeriodo?: string | null; tipoDeuda: string; estado: string },
+  payments: { periodo: string; montoPagado: Prisma.Decimal | number }[],
+  now: Date = new Date(),
+): Atraso[] {
+  if (debt.tipoDeuda === 'TARJETA_CREDITO' || debt.estado !== 'activa') return []
+  const atrasos: Atraso[] = []
+  for (const periodo of periodosRevisables(debt, now)) {
+    const cuota = cuotaBaseDelPeriodo(debt, periodo)
+    const pagado = payments.filter(p => p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
+    const falta = Math.round((cuota - pagado) * 100) / 100
+    if (falta > 0.009) atrasos.push({ periodo, cuota, pagado, falta })
+  }
+  return atrasos
+}
 
 // ─── Estado derivado por periodo ────────────────────────────────────────────────
 // pagadoEstePeriodo/montoPagadoEstePeriodo ya no son columnas: se calculan sumando
@@ -30,6 +103,30 @@ export function computePeriodStatus(payments: DebtPayment[], periodo: string, sa
   const interesPagadoEstePeriodo = own.reduce((s, p) => s + Number(p.pagoInteres), 0)
   const saldoAlIniciarPeriodo = own.length > 0 ? Number(own[0].saldoAnterior) : saldoActualFallback
   return { periodo, montoPagadoEstePeriodo, interesPagadoEstePeriodo, saldoAlIniciarPeriodo }
+}
+
+/**
+ * Resumen de los pagos del periodo actual de una obligación (deuda o gasto
+ * fijo) — lo usa el frontend para decidir qué ofrecer al "Deshacer pago": si
+ * hay más de un pago en el periodo (cuota + abonos), preguntar si deshacer
+ * solo el último o todo; si hay uno solo, deshacerlo directo.
+ */
+export interface ResumenPagosPeriodo {
+  cantidad: number
+  ultimoMonto: number | null
+  ultimoEsMarcador: boolean
+}
+
+export function resumenPagosPeriodo(
+  payments: { periodo: string; montoPagado: unknown; createdAt: Date; esMarcador: boolean }[],
+  periodo: string,
+): ResumenPagosPeriodo {
+  const own = payments.filter(p => p.periodo === periodo).sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+  return {
+    cantidad: own.length,
+    ultimoMonto: own.length > 0 ? Number(own[0].montoPagado) : null,
+    ultimoEsMarcador: own.length > 0 ? own[0].esMarcador : false,
+  }
 }
 
 export interface PagoDeudaResult {

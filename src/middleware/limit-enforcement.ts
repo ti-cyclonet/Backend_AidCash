@@ -8,6 +8,7 @@
 import { Request, Response, NextFunction } from 'express'
 import { prisma } from '../config/database.js'
 import { fetchKiriLimits, AuthorizaError } from '../lib/authoriza-client.js'
+import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
 
 // ─── Mapeo de variables de límite a conteos reales en BD ──────────────────────
 
@@ -85,8 +86,9 @@ export function checkLimit(variableName: string) {
     try {
       const tenantId = req.user?.tenantId
 
-      // Si no hay tenantId (usuario con token Kiri propio), permitir sin restricción
-      if (!tenantId) {
+      // Si no hay tenantId (usuario con token Kiri propio) o la cuenta tiene
+      // acceso completo, permitir sin restricción
+      if (!tenantId || tieneAccesoCompleto(req.user?.correo)) {
         next()
         return
       }

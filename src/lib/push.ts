@@ -151,6 +151,19 @@ export function pushMissionReady(userId: string, missionTitle: string) {
   })
 }
 
+export function pushReferralJoined(userId: string, nombre: string, rolLabel: string) {
+  return sendPushToUser(userId, {
+    title: `🎉 ${nombre} se unió a Kiri`,
+    body: `Entró con tu enlace y ya está en tus conexiones como ${rolLabel}. Tu misión de invitar avanzó.`,
+    tag: 'referral-joined',
+    url: '/misiones',
+  })
+}
+
+export function pushMissionReminder(userId: string, title: string, body: string) {
+  return sendPushToUser(userId, { title, body, tag: 'mission-reminder', url: '/misiones' })
+}
+
 export function pushBadgeUnlocked(userId: string, badgeName: string) {
   return sendPushToUser(userId, {
     title: '🏅 ¡Insignia desbloqueada!',

@@ -6,7 +6,8 @@
  * el otro cobrar otro.
  */
 import type { Debt, DebtPayment, FixedExpense, FixedExpensePayment } from '@prisma/client'
-import { getPeriodo, getMontoPorPeriodo } from './period.js'
+import { getPeriodo, getMontoPorPeriodo, esPendienteProximoPeriodo } from './period.js'
+import { cuotaBaseDelPeriodo } from './debt-calc.js'
 
 export function parseDays(value: string | null | undefined): number[] {
   if (!value) return []
@@ -32,16 +33,22 @@ export function itemPeriodo(frecuencia: string, ownDays: string): string {
   return getPeriodo('quincenal', parseDays(ownDays))
 }
 
+// Una obligación marcada "nueva, inicia el próximo periodo" (activoDesdePeriodo)
+// todavía no se debe en el periodo actual: ni se avisa como vencida ni se
+// cobra con pago automático — antes ambos crons la ignoraban y podían cobrarla
+// o anunciarla vencida aunque la app la mostrara "Pendiente".
 export function isDebtPending(debt: Debt, payments: DebtPayment[]): boolean {
   const periodo = itemPeriodo(debt.frecuenciaPago === 'quincenal' ? 'quincenal' : 'mensual', debt.diasPago)
+  if (esPendienteProximoPeriodo(debt.activoDesdePeriodo, periodo)) return false
   const paid = payments
     .filter(p => p.debtId === debt.id && p.periodo === periodo)
     .reduce((s, p) => s + Number(p.montoPagado), 0)
-  return paid < Number(debt.cuotaPeriodo)
+  return paid < cuotaBaseDelPeriodo(debt, periodo)
 }
 
 export function isFixedExpensePending(fe: FixedExpense, payments: FixedExpensePayment[]): boolean {
   const periodo = itemPeriodo(fe.frecuencia, fe.fechaCorte)
+  if (esPendienteProximoPeriodo(fe.activoDesdePeriodo, periodo)) return false
   const montoPorPeriodo = getMontoPorPeriodo(Number(fe.monto), fe.frecuencia)
   const paid = payments
     .filter(p => p.fixedExpenseId === fe.id && p.periodo === periodo)

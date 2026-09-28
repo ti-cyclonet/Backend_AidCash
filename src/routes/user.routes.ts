@@ -71,6 +71,28 @@ const walletWithdrawSchema = z.object({
   bolsillo: z.enum(['obligaciones', 'libre', 'ahorro', 'endeudamiento']),
 }).strict()
 
+// ─── POST /users/guias — marcar una guía/tutorial como vista ──────────────────
+// Así la guía de un módulo (o la bienvenida) sale solo la primera vez, en
+// cualquier dispositivo. Volver a verla es desde Perfil → Guía de Kiri.
+
+const guiaSchema = z.object({ guia: z.string().min(1).max(40) }).strict()
+
+router.post('/guias', validate(guiaSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { guia } = req.body as { guia: string }
+    const u = await prisma.user.findUnique({ where: { id: userId }, select: { guiasVistas: true } })
+    if (!u) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+    if (!u.guiasVistas.includes(guia) && !u.guiasVistas.includes('*')) {
+      await prisma.user.update({ where: { id: userId }, data: { guiasVistas: { push: guia } } })
+    }
+    res.json({ ok: true })
+  } catch (error) {
+    console.error('[Guias]', error)
+    res.status(500).json({ error: 'Error al guardar' })
+  }
+})
+
 // ─── PATCH /users/profile ─────────────────────────────────────────────────────
 
 router.patch('/profile', validate(updateProfileSchema), async (req: Request, res: Response): Promise<void> => {

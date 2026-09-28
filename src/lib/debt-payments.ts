@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto'
 import { prisma } from '../config/database.js'
 import { planPocketDeduction } from './wallet.js'
-import { debtPeriodo, computePeriodStatus, calcularPagoDeuda } from './debt-calc.js'
+import { debtPeriodo, debtPeriodoSiguiente, computePeriodStatus, calcularPagoDeuda, calcularAtrasos, cuotaBaseDelPeriodo, periodosRevisables, tasaDelPeriodo } from './debt-calc.js'
 import { cuotaEfectivaTarjeta, allocateCardPayment } from './installments.js'
 import { recordMissionAction } from './missions.js'
 import { sendPushToUser } from './push.js'
@@ -24,7 +24,32 @@ export interface PayDebtResult {
   saldoAnterior: number
   saldoNuevo: number
   liquidada: boolean
+  /** Periodo al que quedó asignado el pago (puede ser el siguiente o uno atrasado). */
+  periodo: string
+  esPeriodoActual: boolean
+  /** Si el usuario dio el saldo real del banco: tasa mensual que resultó (y se guardó como tasa aplicada). */
+  tasaObservadaMensual: number | null
+  /** La cuota del periodo se dio por cubierta con un monto distinto (ver `cuotaCompleta`). */
+  cuotaAjustada: boolean
 }
+
+export interface OpcionesPago {
+  /**
+   * Saldo que quedó según el banco después de este pago. Si viene, manda
+   * sobre el cálculo de Kiri: lo que bajó el saldo es abono a capital y el
+   * resto del pago fue interés. Antes el interés salía SIEMPRE de la tasa
+   * registrada y el saldo de Kiri se alejaba del saldo real del banco.
+   */
+  saldoReal?: number
+  /**
+   * "Con este valor quedó pagada la cuota" — ej. la cuota llegó en $180.000
+   * y no en $182.000: el periodo queda cubierto sin dejar $2.000 pendientes.
+   */
+  cuotaCompleta?: boolean
+}
+
+/** Tasa mensual máxima que se acepta como "observada" (más que esto es un saldo mal digitado, no un interés). */
+const TASA_OBSERVADA_MAX = 15
 
 /**
  * Registra el pago de la cuota de una deuda — misma lógica exacta que usa
@@ -37,19 +62,53 @@ export interface PayDebtResult {
  * Devuelve `null` si la deuda no existe/no está activa — quien llama decide
  * qué hacer con eso (404 en la ruta HTTP, skip silencioso en el cron).
  */
-export async function payDebtServer(userId: string, debtId: string, montoInput?: number): Promise<PayDebtResult | null> {
+/** El periodo pedido no es ni el actual, ni el siguiente, ni una cuota atrasada de esta deuda. */
+export class PeriodoInvalidoError extends Error {}
+
+/**
+ * A qué periodo va el pago:
+ *  - 'actual' (default): la cuota del periodo en curso, como siempre.
+ *  - 'siguiente': adelantar la próxima cuota — antes pagar "antes de tiempo"
+ *    (ej. el 30 la cuota del 1) quedaba en el periodo en curso y la próxima
+ *    cuota salía sin pagar al cambiar de periodo.
+ *  - un string de periodo pasado: pagar una cuota atrasada (ver calcularAtrasos).
+ */
+export type DestinoPago = 'actual' | 'siguiente' | string
+
+export async function resolverPeriodoDestino(
+  debt: Parameters<typeof calcularAtrasos>[0] & { id: string },
+  destino: DestinoPago = 'actual',
+): Promise<string> {
+  if (destino === 'actual') return debtPeriodo(debt)
+  if (destino === 'siguiente') return debtPeriodoSiguiente(debt)
+  const revisables = periodosRevisables(debt)
+  if (!revisables.includes(destino)) throw new PeriodoInvalidoError('Periodo no válido para esta deuda')
+  const pagos = await prisma.debtPayment.findMany({ where: { debtId: debt.id, periodo: destino } })
+  if (calcularAtrasos(debt, pagos).length === 0) throw new PeriodoInvalidoError('Esa cuota no está atrasada')
+  return destino
+}
+
+export async function payDebtServer(userId: string, debtId: string, montoInput?: number, destino: DestinoPago = 'actual', opciones: OpcionesPago = {}): Promise<PayDebtResult | null> {
   const existing = await prisma.debt.findFirst({ where: { id: debtId, userId, estado: 'activa' } })
   if (!existing) return null
+
+  const periodo = await resolverPeriodoDestino(existing, destino)
+  const esPeriodoActual = periodo === debtPeriodo(existing)
 
   // Para una tarjeta de crédito, la cuota real de este periodo es la base MÁS
   // los planes de pay-with-card vigentes (misma cuenta que GET /debts) — usar
   // solo la columna base haría que pagarla marcara la tarjeta como "pagada"
   // aunque quedara pendiente todo lo financiado con ella ese periodo.
+  const cuotaBase = cuotaBaseDelPeriodo(existing, periodo)
   const cuotaVigente = existing.tipoDeuda === 'TARJETA_CREDITO'
-    ? cuotaEfectivaTarjeta(Number(existing.cuotaPeriodo), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }))
-    : Number(existing.cuotaPeriodo)
+    ? cuotaEfectivaTarjeta(cuotaBase, await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }))
+    : cuotaBase
 
-  const montoPago = montoInput ?? cuotaVigente
+  const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId, periodo } })
+  const yaPagado = paymentsThisPeriod.reduce((s, p) => s + Number(p.montoPagado), 0)
+  // Sin monto explícito se paga lo que FALTA del periodo, no la cuota completa
+  // de nuevo (una cuota atrasada puede tener un abono parcial previo).
+  const montoPago = montoInput ?? Math.max(0.01, Math.round((cuotaVigente - (esPeriodoActual ? 0 : yaPagado)) * 100) / 100)
   const currentSaldo = Number(existing.saldoRestante)
 
   const tasaMensual = existing.tasaInteresAplicada
@@ -58,27 +117,62 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
       ? Number(existing.tasaInteres)
       : null
 
-  const periodo = debtPeriodo(existing)
-  const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId, periodo } })
   const status = computePeriodStatus(paymentsThisPeriod, periodo, currentSaldo)
 
-  const { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaMensual, status, montoPago)
+  let { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaDelPeriodo(tasaMensual, existing.frecuenciaPago), status, montoPago)
+
+  // Saldo real del banco: manda sobre la estimación con la tasa registrada.
+  let tasaObservadaMensual: number | null = null
+  if (opciones.saldoReal !== undefined) {
+    nuevoSaldo = Math.max(0, Math.round(opciones.saldoReal * 100) / 100)
+    abonoCapital = Math.round((currentSaldo - nuevoSaldo) * 100) / 100
+    pagoInteres = Math.max(0, Math.round((montoPago - abonoCapital) * 100) / 100)
+    nuevoEstado = nuevoSaldo <= 0 ? 'saldada' : 'activa'
+    // Aprender la tasa real: solo con el PRIMER pago del periodo (el interés
+    // del periodo se causa sobre el saldo con que arrancó) y no en tarjetas,
+    // cuyo saldo también cambia por compras nuevas.
+    if (status.montoPagadoEstePeriodo === 0 && currentSaldo > 0 && pagoInteres > 0 && existing.tipoDeuda !== 'TARJETA_CREDITO') {
+      const tasaPeriodo = (pagoInteres / currentSaldo) * 100
+      const mensual = Math.round((existing.frecuenciaPago === 'quincenal' ? tasaPeriodo * 2 : tasaPeriodo) * 10000) / 10000
+      if (mensual <= TASA_OBSERVADA_MAX) tasaObservadaMensual = mensual
+    }
+  }
 
   const totalPaidThisPeriod = status.montoPagadoEstePeriodo + montoPago
-  const cuotaCubierta = totalPaidThisPeriod >= cuotaVigente
+  const faltaCuota = Math.round((cuotaVigente - totalPaidThisPeriod) * 100) / 100
+  const cuotaAjustada = !!opciones.cuotaCompleta && faltaCuota > 0
+  const cuotaCubierta = totalPaidThisPeriod >= cuotaVigente || cuotaAjustada
 
   const walletDeductionData = planPocketDeduction('obligaciones', montoPago)
 
   const paymentId = randomUUID()
   const allocationOps = existing.tipoDeuda === 'TARJETA_CREDITO'
-    ? await allocateCardPayment(debtId, paymentId, abonoCapital)
+    ? await allocateCardPayment(debtId, paymentId, Math.max(0, abonoCapital))
     : []
+
+  // "Quedó pagada la cuota" con otro valor: en un préstamo, la cuota de ESTE
+  // periodo pasa a ser lo pagado (el siguiente vuelve a la normal, igual que
+  // "Solo este mes"); en una tarjeta, cuya cuota incluye planes de cuotas, se
+  // cubre la diferencia con un marcador que no mueve saldo ni billetera.
+  const ajusteOps = !cuotaAjustada
+    ? []
+    : existing.tipoDeuda === 'TARJETA_CREDITO'
+      ? [prisma.debtPayment.create({
+          data: { debtId, montoPagado: faltaCuota, abonoCapital: 0, pagoInteres: 0, saldoAnterior: nuevoSaldo, saldoPosterior: nuevoSaldo, periodo, esMarcador: true, createdAt: new Date(Date.now() - 1) },
+        })]
+      : []
 
   const [debt] = await prisma.$transaction([
     prisma.debt.update({
       where: { id: debtId },
-      data: { saldoRestante: nuevoSaldo, estado: nuevoEstado },
+      data: {
+        saldoRestante: nuevoSaldo,
+        estado: nuevoEstado,
+        ...(tasaObservadaMensual !== null ? { tasaInteresAplicada: tasaObservadaMensual } : {}),
+        ...(cuotaAjustada && existing.tipoDeuda !== 'TARJETA_CREDITO' ? { cuotaOverride: totalPaidThisPeriod, cuotaOverridePeriodo: periodo } : {}),
+      },
     }),
+    ...ajusteOps,
     prisma.debtPayment.create({
       data: {
         id: paymentId,
@@ -98,8 +192,8 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
   await recordMissionAction(userId, 'pagar_obligacion')
 
   const cuotaPeriodoRespuesta = debt.tipoDeuda === 'TARJETA_CREDITO'
-    ? cuotaEfectivaTarjeta(Number(debt.cuotaPeriodo), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }))
-    : Number(debt.cuotaPeriodo)
+    ? cuotaEfectivaTarjeta(cuotaBase, await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }))
+    : cuotaBase
 
   const debtName = existing.nombre
   sendPushToUser(userId, {
@@ -120,11 +214,16 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
       pagadoEstePeriodo: cuotaCubierta,
       montoPagadoEstePeriodo: totalPaidThisPeriod > 0 ? totalPaidThisPeriod : null,
       tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
+      pagosPeriodo: { cantidad: paymentsThisPeriod.length + 1, ultimoMonto: montoPago, ultimoEsMarcador: false },
     },
     amortizacion: { montoPagado: montoPago, pagoInteres, abonoCapital },
     pagado: montoPago,
     saldoAnterior: currentSaldo,
     saldoNuevo: nuevoSaldo,
     liquidada: nuevoEstado === 'saldada',
+    periodo,
+    esPeriodoActual,
+    tasaObservadaMensual,
+    cuotaAjustada,
   }
 }

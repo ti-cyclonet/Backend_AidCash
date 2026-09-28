@@ -7,7 +7,8 @@ import { checkLimit } from '../middleware/limit-enforcement.js'
 import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { buildInstallmentRevertOps } from '../lib/installments.js'
-import { fixedPeriodo, payFixedExpenseServer } from '../lib/fixed-expense-payments.js'
+import { fixedPeriodo, fixedPeriodoSiguiente, payFixedExpenseServer, fixedPeriodosRevisables, calcularAtrasosFijo, PeriodoFijoInvalidoError } from '../lib/fixed-expense-payments.js'
+import { resumenPagosPeriodo } from '../lib/debt-calc.js'
 import type { FixedExpensePayment, Prisma } from '@prisma/client'
 
 // ─── Estado derivado por periodo (mismo patrón que debts.routes.ts) ────────────
@@ -57,7 +58,16 @@ const updateSchema = z.object({
   tarjetaVinculadaId: z.string().nullable().optional(),
   pagoAutomatico: z.boolean().optional(),
   budgetCategoryId: z.string().uuid().nullable().optional(),
+  // Respuesta a "¿ya pagaste la cuota de este periodo?" al editar — mismo
+  // significado que en PATCH /debts/:id.
+  yaPagoEstePeriodo: z.boolean().optional(),
+  nuevaProximoPeriodo: z.boolean().optional(),
 }).strict()
+
+const undoPaySchema = z.object({
+  alcance: z.enum(['ultimo', 'todo']).default('todo'),
+  periodo: z.enum(['actual', 'siguiente']).default('actual'),
+}).default({})
 
 // ─── GET /fixed-expenses ──────────────────────────────────────────────────────
 
@@ -67,12 +77,13 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 
     const fixedExpenses = await prisma.fixedExpense.findMany({ where: { userId }, orderBy: { createdAt: 'desc' } })
 
-    // Traer los pagos recientes de todos los gastos fijos en una sola query.
-    // 40 días cubre de sobra un mes, quincena, semana o incluso el arranque de un año.
-    const fortyDaysAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000)
+    // Pagos de los periodos que se necesitan (actual, siguiente y los ya
+    // cerrados que se revisan por atrasos) en una sola query — por periodo y
+    // no por fecha de creación: una cuota atrasada puede pagarse semanas después.
+    const periodos = [...new Set(fixedExpenses.flatMap(f => [fixedPeriodo(f), fixedPeriodoSiguiente(f), ...fixedPeriodosRevisables(f)]))]
     const recentPayments = fixedExpenses.length > 0
       ? await prisma.fixedExpensePayment.findMany({
-          where: { fixedExpenseId: { in: fixedExpenses.map(f => f.id) }, createdAt: { gte: fortyDaysAgo } },
+          where: { fixedExpenseId: { in: fixedExpenses.map(f => f.id) }, periodo: { in: periodos } },
         })
       : []
     const paymentsByExpense = new Map<string, FixedExpensePayment[]>()
@@ -87,11 +98,20 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
         const periodo = fixedPeriodo(f)
         const montoPorPeriodo = getMontoPorPeriodo(Number(f.monto), f.frecuencia)
         const { montoPagadoEstePeriodo } = fixedStatus(paymentsByExpense.get(f.id) ?? [], periodo)
+        const periodoSiguiente = fixedPeriodoSiguiente(f)
+        const { montoPagadoEstePeriodo: montoAdelantado } = fixedStatus(paymentsByExpense.get(f.id) ?? [], periodoSiguiente)
+        const atrasos = calcularAtrasosFijo(f, paymentsByExpense.get(f.id) ?? [])
         return {
           ...f,
           pagadoEstePeriodo: montoPagadoEstePeriodo >= montoPorPeriodo,
           montoPagadoEstePeriodo: montoPagadoEstePeriodo > 0 ? montoPagadoEstePeriodo : null,
           pendienteProximoPeriodo: esPendienteProximoPeriodo(f.activoDesdePeriodo, periodo),
+          pagosPeriodo: resumenPagosPeriodo(paymentsByExpense.get(f.id) ?? [], periodo),
+          periodoSiguiente,
+          montoAdelantado: montoAdelantado > 0 ? montoAdelantado : null,
+          proximaCuotaCubierta: montoAdelantado >= montoPorPeriodo && montoAdelantado > 0,
+          atrasos,
+          montoAtrasado: Math.round(atrasos.reduce((s, a) => s + a.falta, 0) * 100) / 100,
         }
       }),
     })
@@ -136,8 +156,9 @@ router.post('/', validate(createSchema), checkLimit('nGastosFijos'), async (req:
           await tx.fixedExpensePayment.create({
             data: {
               fixedExpenseId: created.id,
-              montoPagado: monto,
+              montoPagado: getMontoPorPeriodo(monto, frecuenciaFinal),
               periodo: fixedPeriodo(created),
+              esMarcador: true,
             },
           })
           return created
@@ -150,8 +171,11 @@ router.post('/', validate(createSchema), checkLimit('nGastosFijos'), async (req:
       fixedExpense: {
         ...expense,
         pagadoEstePeriodo: !!yaPagoEstePeriodo,
-        montoPagadoEstePeriodo: yaPagoEstePeriodo ? Number(monto) : null,
+        montoPagadoEstePeriodo: yaPagoEstePeriodo ? getMontoPorPeriodo(monto, frecuenciaFinal) : null,
         pendienteProximoPeriodo: esPendienteProximoPeriodo(expense.activoDesdePeriodo, fixedPeriodo(expense)),
+        pagosPeriodo: yaPagoEstePeriodo
+          ? { cantidad: 1, ultimoMonto: getMontoPorPeriodo(monto, frecuenciaFinal), ultimoEsMarcador: true }
+          : { cantidad: 0, ultimoMonto: null, ultimoEsMarcador: false },
       },
     })
   } catch (error) {
@@ -173,16 +197,44 @@ router.patch('/:id', validate(updateSchema), async (req: Request, res: Response)
       return
     }
 
-    const expense = await prisma.fixedExpense.update({
-      where: { id },
-      data: req.body,
+    const { yaPagoEstePeriodo, nuevaProximoPeriodo, ...fields } = req.body as z.infer<typeof updateSchema>
+    const data: Prisma.FixedExpenseUncheckedUpdateInput = { ...fields }
+
+    const frecuenciaFinal = fields.frecuencia ?? existing.frecuencia
+    const fechaCorteFinal = fields.fechaCorte ?? existing.fechaCorte
+    if (nuevaProximoPeriodo !== undefined) {
+      data.activoDesdePeriodo = nuevaProximoPeriodo && !yaPagoEstePeriodo
+        ? getNextPeriodo(frecuenciaFinal, parseDiasPago(fechaCorteFinal))
+        : null
+    }
+
+    const periodoAnterior = fixedPeriodo(existing)
+    const periodo = fixedPeriodo({ frecuencia: frecuenciaFinal, fechaCorte: fechaCorteFinal })
+
+    const expense = await prisma.$transaction(async tx => {
+      const updated = await tx.fixedExpense.update({ where: { id }, data })
+
+      // Cambiar frecuencia/días cambia la etiqueta del periodo en curso — lo
+      // ya pagado en él debe seguir contando (ver misma nota en PATCH /debts/:id).
+      if (periodo !== periodoAnterior) {
+        await tx.fixedExpensePayment.updateMany({ where: { fixedExpenseId: id, periodo: periodoAnterior }, data: { periodo } })
+      }
+
+      if (yaPagoEstePeriodo) {
+        const montoPorPeriodo = getMontoPorPeriodo(Number(updated.monto), updated.frecuencia)
+        const prev = await tx.fixedExpensePayment.findMany({ where: { fixedExpenseId: id, periodo } })
+        const falta = Math.round((montoPorPeriodo - prev.reduce((s, p) => s + Number(p.montoPagado), 0)) * 100) / 100
+        if (falta > 0) {
+          await tx.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: falta, periodo, esMarcador: true } })
+        }
+      }
+      return updated
     })
 
-    if (req.body.categoria) {
+    if (fields.categoria) {
       await recordMissionAction(userId, 'categorizar')
     }
 
-    const periodo = fixedPeriodo(expense)
     const montoPorPeriodo = getMontoPorPeriodo(Number(expense.monto), expense.frecuencia)
     const payments = await prisma.fixedExpensePayment.findMany({ where: { fixedExpenseId: id, periodo } })
     const { montoPagadoEstePeriodo } = fixedStatus(payments, periodo)
@@ -193,6 +245,7 @@ router.patch('/:id', validate(updateSchema), async (req: Request, res: Response)
         pagadoEstePeriodo: montoPagadoEstePeriodo >= montoPorPeriodo,
         montoPagadoEstePeriodo: montoPagadoEstePeriodo > 0 ? montoPagadoEstePeriodo : null,
         pendienteProximoPeriodo: esPendienteProximoPeriodo(expense.activoDesdePeriodo, periodo),
+        pagosPeriodo: resumenPagosPeriodo(payments, periodo),
       },
     })
   } catch (error) {
@@ -210,14 +263,20 @@ router.patch('/:id', validate(updateSchema), async (req: Request, res: Response)
 
 const payFixedSchema = z.object({
   monto: z.number().min(0.01).optional(),
+  // 'actual' | 'siguiente' (adelantar) | periodo de una cuota atrasada, ej. "2026-08"
+  periodo: z.string().min(1).optional(),
+  // "Con este valor quedó pagada la cuota del periodo"
+  cuotaCompleta: z.boolean().optional(),
 }).strict()
+
+const marcarPagadoSchema = z.object({ periodo: z.string().min(1) })
 
 router.patch('/:id/pay', validate(payFixedSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const id = req.params.id as string
 
-    const result = await payFixedExpenseServer(userId, id, req.body.monto)
+    const result = await payFixedExpenseServer(userId, id, req.body.monto, req.body.periodo ?? 'actual', !!req.body.cuotaCompleta)
     if (!result) {
       res.status(404).json({ error: 'Gasto fijo no encontrado' })
       return
@@ -225,8 +284,44 @@ router.patch('/:id/pay', validate(payFixedSchema), async (req: Request, res: Res
 
     res.json(result)
   } catch (error) {
+    if (error instanceof PeriodoFijoInvalidoError) {
+      res.status(400).json({ error: error.message })
+      return
+    }
     console.error('[PayFixed]', error)
     res.status(500).json({ error: 'Error al registrar pago' })
+  }
+})
+
+// ─── POST /fixed-expenses/:id/marcar-pagado ───────────────────────────────────
+// "Esa cuota atrasada ya la había pagado por fuera de Kiri" — marcador que no
+// toca la billetera (mismo que en POST /debts/:id/marcar-pagado).
+
+router.post('/:id/marcar-pagado', validate(marcarPagadoSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+    const { periodo } = req.body as z.infer<typeof marcarPagadoSchema>
+    const fe = await prisma.fixedExpense.findFirst({ where: { id, userId } })
+    if (!fe) {
+      res.status(404).json({ error: 'Gasto fijo no encontrado' })
+      return
+    }
+    if (!fixedPeriodosRevisables(fe).includes(periodo)) {
+      res.status(400).json({ error: 'Solo se pueden marcar cuotas de periodos ya cerrados' })
+      return
+    }
+    const pagos = await prisma.fixedExpensePayment.findMany({ where: { fixedExpenseId: id, periodo } })
+    const atraso = calcularAtrasosFijo(fe, pagos)[0]
+    if (!atraso) {
+      res.status(400).json({ error: 'Esa cuota no está atrasada' })
+      return
+    }
+    await prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: atraso.falta, periodo, esMarcador: true } })
+    res.json({ ok: true })
+  } catch (error) {
+    console.error('[MarcarPagadoFixed]', error)
+    res.status(500).json({ error: 'Error al marcar la cuota' })
   }
 })
 
@@ -234,7 +329,7 @@ router.patch('/:id/pay', validate(payFixedSchema), async (req: Request, res: Res
 // Revierte el pago de un gasto fijo. Devuelve el monto al cashBalance.
 // Usa $transaction para garantizar consistencia atómica.
 
-router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> => {
+router.post('/:id/undo-pay', validate(undoPaySchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const id = req.params.id as string
@@ -248,18 +343,26 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
     // Solo se puede deshacer un pago dentro del periodo actual — un pago de un
     // periodo ya cerrado no se puede tocar (no hay columna mutable que "recuerde"
     // otra cosa).
-    const periodo = fixedPeriodo(existing)
-    const payments = await prisma.fixedExpensePayment.findMany({ where: { fixedExpenseId: id, periodo } })
+    const periodo = req.body.periodo === 'siguiente' ? fixedPeriodoSiguiente(existing) : fixedPeriodo(existing)
+    const payments = await prisma.fixedExpensePayment.findMany({ where: { fixedExpenseId: id, periodo }, orderBy: { createdAt: 'desc' } })
     if (payments.length === 0) {
       res.status(400).json({ error: 'Este gasto no tiene pagos registrados' })
       return
     }
 
+    // 'ultimo' deshace solo el pago más reciente del periodo (ej. un abono
+    // extra) y deja el resto — ver misma lógica en POST /debts/:id/undo-pay.
+    const alcance: 'ultimo' | 'todo' = req.body.alcance
+    const aDeshacer = alcance === 'ultimo' ? payments.slice(0, 1) : payments
+    const restantes = payments.slice(aDeshacer.length)
+
     // Cada pago dice por sí mismo si salió en efectivo o de una tarjeta
     // (tarjetaVinculada permanente o un pay-with-card puntual) — ya no hace
     // falta adivinar por el vínculo del gasto fijo, que solo cubría un caso.
-    const cashPayments = payments.filter(p => !p.tarjetaId)
-    const cardPayments = payments.filter(p => p.tarjetaId)
+    // Los marcadores ("ya lo había pagado por fuera") no devuelven nada:
+    // nunca salió plata de la billetera por ellos.
+    const cashPayments = aDeshacer.filter(p => !p.tarjetaId && !p.esMarcador)
+    const cardPayments = aDeshacer.filter(p => p.tarjetaId)
     const montoDevolver = cashPayments.reduce((s, p) => s + Number(p.montoPagado), 0)
 
     // Dos tipos de pago con tarjeta muy distintos acá: el vínculo PERMANENTE
@@ -277,7 +380,7 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
     }
 
     const ops: Prisma.PrismaPromise<unknown>[] = [
-      prisma.fixedExpensePayment.deleteMany({ where: { fixedExpenseId: id, periodo } }),
+      prisma.fixedExpensePayment.deleteMany({ where: { id: { in: aDeshacer.map(p => p.id) } } }),
     ]
     if (montoDevolver > 0) {
       ops.push(prisma.user.update({
@@ -306,9 +409,19 @@ router.post('/:id/undo-pay', async (req: Request, res: Response): Promise<void> 
       select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
     })
 
+    const montoPorPeriodo = getMontoPorPeriodo(Number(existing.monto), existing.frecuencia)
+    const { montoPagadoEstePeriodo } = fixedStatus(restantes, periodo)
+
     res.json({
-      fixedExpense: { ...existing, pagadoEstePeriodo: false, montoPagadoEstePeriodo: null },
+      fixedExpense: {
+        ...existing,
+        pagadoEstePeriodo: montoPagadoEstePeriodo >= montoPorPeriodo,
+        montoPagadoEstePeriodo: montoPagadoEstePeriodo > 0 ? montoPagadoEstePeriodo : null,
+        pendienteProximoPeriodo: esPendienteProximoPeriodo(existing.activoDesdePeriodo, periodo),
+        pagosPeriodo: resumenPagosPeriodo(restantes, periodo),
+      },
       montoDevuelto: montoDevolver,
+      pagosDeshechos: aDeshacer.length,
       revertidoDeTarjeta: cardPayments.length > 0
         ? [...new Set(cardPayments.map(p => p.tarjetaId!))].map(tarjetaId => ({ tarjetaId }))
         : null,

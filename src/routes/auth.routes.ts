@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { z } from 'zod'
 import { prisma } from '../config/database.js'
+import { aplicarInvitacionAlRegistro } from '../lib/invitaciones.js'
 import { env } from '../config/env.js'
 import { validate } from '../middleware/validate.js'
 import { authMiddleware, AuthPayload } from '../middleware/auth.js'
@@ -24,6 +25,8 @@ const registerSchema = z.object({
   secondName: z.string().optional(),
   firstSurname: z.string().optional(),
   secondSurname: z.string().optional(),
+  // Código del enlace de invitación con el que llegó (ver lib/invitaciones.ts)
+  invitacion: z.string().max(40).optional(),
 })
 
 const loginSchema = z.object({
@@ -52,7 +55,7 @@ function getRefreshExpiry(): Date {
 
 router.post('/register', validate(registerSchema), async (req: Request, res: Response): Promise<void> => {
   try {
-    const { nombre, correo, password, documentType, documentNumber, firstName, secondName, firstSurname, secondSurname } = req.body
+    const { nombre, correo, password, documentType, documentNumber, firstName, secondName, firstSurname, secondSurname, invitacion } = req.body
 
     // Verificar si el correo ya existe
     const existing = await prisma.user.findUnique({ where: { correo } })
@@ -83,6 +86,10 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
         fondoEmergenciaActual: 0,
       },
     })
+
+    // Llegó con un enlace de invitación: queda conectado en Social con quien
+    // lo invitó y a esa persona le avanza la misión de invitar.
+    if (invitacion) await aplicarInvitacionAlRegistro(invitacion, user.id, nombre)
 
     // Registrar en Authoriza con verificación de correo
     let verificationRequired = true
@@ -230,6 +237,7 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
         nombre: user.nombre,
         correo: user.correo,
         onboardingDone: user.onboardingDone,
+        guiasVistas: user.guiasVistas,
       },
       accessToken,
       refreshToken,
@@ -341,6 +349,7 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
         streakMejor: true,
         streakUltimoCheck: true,
         createdAt: true,
+        guiasVistas: true,
       },
     })
 
