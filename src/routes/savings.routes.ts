@@ -29,13 +29,13 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       take: limit,
     })
 
-    // Total acumulado
-    const totalResult = await prisma.savingsHistory.aggregate({
-      where: { userId, tipo: 'ahorro' },
-      _sum: { monto: true },
-    })
-
-    const totalAhorrado = Number(totalResult._sum.monto ?? 0)
+    // Total ahorrado NETO: lo depositado menos lo retirado (antes solo sumaba
+    // depósitos, así que retirar de un bolsillo no bajaba el total)
+    const [depositos, retiros] = await Promise.all([
+      prisma.savingsHistory.aggregate({ where: { userId, tipo: 'ahorro' }, _sum: { monto: true } }),
+      prisma.savingsHistory.aggregate({ where: { userId, tipo: 'retiro' }, _sum: { monto: true } }),
+    ])
+    const totalAhorrado = Math.max(0, Number(depositos._sum.monto ?? 0) - Number(retiros._sum.monto ?? 0))
 
     res.json({ history, totalAhorrado })
   } catch (error) {

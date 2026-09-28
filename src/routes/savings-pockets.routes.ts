@@ -34,7 +34,7 @@ const createPocketSchema = z.object({
 const updatePocketSchema = z.object({
   nombre: z.string().min(1).max(50).optional(),
   meta: z.number().min(0).optional(),
-  montoActual: z.number().min(0).optional(),
+  // montoActual no se edita directo (aparecería o desaparecería plata): solo con /deposit y /withdraw
   color: z.string().optional(),
   icono: z.string().optional(),
   descripcion: z.string().max(200).optional(),
@@ -75,10 +75,18 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createPocketSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, meta, montoActual, color, icono } = req.body
+    // Antes solo se guardaban nombre/meta/color/ícono: la fecha límite, la
+    // descripción, el tipo de meta y el pago automático se perdían. El saldo
+    // inicial NO se acepta aquí (aparecería plata de la nada): el frontend lo
+    // aplica con /deposit, que sí lo descuenta de la billetera.
+    const { nombre, meta, color, icono, descripcion, pagoAutomatico, tipoMeta, fechaLimite } = req.body as z.infer<typeof createPocketSchema>
 
     const pocket = await prisma.savingsPocket.create({
-      data: { userId, nombre, meta, montoActual, color, icono },
+      data: {
+        userId, nombre, meta, montoActual: 0, color, icono,
+        descripcion: descripcion ?? null, pagoAutomatico, tipoMeta,
+        fechaLimite: tipoMeta === 'fecha' ? (fechaLimite ?? null) : null,
+      },
     })
 
     res.status(201).json({ pocket: serializePocket(pocket) })
@@ -240,9 +248,12 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
     // borrarlo — de lo contrario borrar un bolsillo con saldo lo destruiría.
     const remaining = Number(existing.montoActual)
     if (remaining > 0) {
+      const periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
       await prisma.$transaction([
         prisma.user.update({ where: { id: userId }, data: planPocketCredit('ahorro', remaining) }),
         prisma.savingsPocket.delete({ where: { id } }),
+        // Sin esto la plata volvía a la billetera pero el total ahorrado seguía contándola
+        prisma.savingsHistory.create({ data: { userId, periodo, monto: remaining, tipo: 'retiro' } }),
       ])
     } else {
       await prisma.savingsPocket.delete({ where: { id } })
