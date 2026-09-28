@@ -52,6 +52,11 @@ model User {
   isActive              Boolean  @default(true) @map("is_active")
   // Bienvenida pendiente tras activación de plan pago (para mostrar notificación in-app)
   pendingWelcome        String?  @map("pending_welcome")
+  // Última factura de su plan que FactoNet/Authoriza avisó como pendiente
+  // (null cuando se paga) — Mi plan la muestra con el acceso a FactoNet
+  facturaPendiente      Json?    @map("factura_pendiente")
+  // Cambio de plan pedido desde Kiri y aún no activado (contrato por firmar/pagar)
+  cambioPlan            Json?    @map("cambio_plan")
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
@@ -796,6 +801,14 @@ model Loan {
   montoOriginal   Decimal? @map("monto_original") @db.Decimal(12, 2)
   // Referencia al gasto hormiga que originó el split (opcional)
   sourceExpenseId String?  @map("source_expense_id")
+  // Préstamo que YA existía antes de Kiri (la plata se entregó hace tiempo, tal
+  // vez ya se gastó): al confirmarlo NO se mueve plata de ninguna billetera,
+  // solo queda el registro para que ambos lleven el control de los abonos.
+  sinDesembolso   Boolean  @default(false) @map("sin_desembolso")
+  // Quién lo registró (el otro es quien confirma)
+  creadoPorId     String?  @map("creado_por_id")
+  // Cuándo quedó activo (se movió la plata o se confirmó uno previo) — Balance
+  activadoEn      DateTime? @map("activado_en")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 

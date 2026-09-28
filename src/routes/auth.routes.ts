@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { z } from 'zod'
 import { prisma } from '../config/database.js'
-import { aplicarInvitacionAlRegistro } from '../lib/invitaciones.js'
+import { aplicarInvitacionAlRegistro, acreditarReferido } from '../lib/invitaciones.js'
 import { env } from '../config/env.js'
 import { validate } from '../middleware/validate.js'
 import { authMiddleware, AuthPayload } from '../middleware/auth.js'
@@ -14,6 +14,7 @@ import {
   AUTHORIZA_MANAGED_PASSWORD,
   AuthorizaRejectedError,
   ensureAuthorizaAccount,
+  getAuthorizaAvatar,
   setPassword as setAuthorizaPassword,
   verifyCredentials,
 } from '../lib/authoriza-auth.js'
@@ -92,10 +93,6 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
       },
     })
 
-    // Llegó con un enlace de invitación: queda conectado en Social con quien
-    // lo invitó y a esa persona le avanza la misión de invitar.
-    if (invitacion) await aplicarInvitacionAlRegistro(invitacion, user.id, nombre)
-
     // Registrar en Authoriza con verificación de correo
     let verificationRequired = true
     try {
@@ -136,6 +133,11 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
       res.status(503).json({ error: 'No pudimos completar el registro en este momento. Intenta de nuevo en unos minutos.' })
       return
     }
+
+    // Llegó con un enlace de invitación (y el registro sí se completó): queda
+    // conectado en Social con quien lo invitó. La misión de quien invitó se
+    // acredita cuando esta cuenta nueva verifique su correo (ver login).
+    if (invitacion) await aplicarInvitacionAlRegistro(invitacion, user.id, nombre)
 
     res.status(201).json({
       user: {
@@ -223,6 +225,15 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
     if (user.isActive === false) {
       await prisma.user.update({ where: { id: user.id }, data: { isActive: true } }).catch(() => {})
       user.isActive = true
+      // Primera vez que entra tras verificar el correo: si llegó invitado, ahora
+      // sí cuenta para la misión de quien lo invitó (solo la primera sesión).
+      if (user.invitedById && (await prisma.refreshToken.count({ where: { userId: user.id } })) === 0) {
+        acreditarReferido(user.id).catch(() => {})
+      }
+    }
+    // Avatar vigente de Authoriza (pudo cambiarse desde otra app)
+    if (cred.avatarUrl && cred.avatarUrl !== user.avatarUrl) {
+      await prisma.user.update({ where: { id: user.id }, data: { avatarUrl: cred.avatarUrl } }).catch(() => {})
     }
 
     // Generar tokens
@@ -367,6 +378,14 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
     if (!user) {
       res.status(404).json({ error: 'Usuario no encontrado' })
       return
+    }
+
+    // Avatar vigente de Authoriza: si se cambió en otra app, se refleja al
+    // abrir Kiri. Si Authoriza no responde se usa la copia local.
+    const avatarActual = await getAuthorizaAvatar(user.correo)
+    if (avatarActual && avatarActual !== user.avatarUrl) {
+      await prisma.user.update({ where: { id: user.id }, data: { avatarUrl: avatarActual } }).catch(() => {})
+      user.avatarUrl = avatarActual
     }
 
     // Autosanar cuentas viejas sin @username (de antes de que existiera esta

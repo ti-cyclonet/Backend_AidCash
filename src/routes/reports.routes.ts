@@ -184,6 +184,47 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       prisma.externalLoanPayment.findMany({ where: { loan: { userId }, createdAt: { gte: from, lte: to } }, include: { loan: { select: { persona: true } } } }),
     ])
 
+    // ── Social: préstamos entre usuarios, sus abonos y ahorros compartidos ──
+    // Antes nada de Social quedaba en Balance aunque moviera la billetera.
+    const [loansSocial, loanPaymentsSocial, depositosCompartidos] = await Promise.all([
+      prisma.loan.findMany({
+        where: {
+          OR: [{ lenderId: userId }, { borrowerId: userId }],
+          status: { in: ['ACTIVE', 'PAID'] },
+          activadoEn: { gte: from, lte: to },
+        },
+        include: { lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } },
+      }),
+      prisma.loanPayment.findMany({
+        where: {
+          status: 'CONFIRMED',
+          updatedAt: { gte: from, lte: to },
+          // (ojo: NOT {nota: x} en SQL también descarta las notas vacías)
+          OR: [{ nota: null }, { nota: { not: '__REMINDER__' } }],
+          loan: { OR: [{ lenderId: userId }, { borrowerId: userId }] },
+        },
+        include: { loan: { select: { lenderId: true, lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } } } },
+      }),
+      prisma.sharedDeposit.findMany({
+        where: { userId, createdAt: { gte: from, lte: to } },
+        include: { sharedPocket: { select: { nombre: true } } },
+      }),
+    ])
+    // Tipo de cada movimiento de un ahorro compartido según su marca en la nota
+    const tipoDeposito = (nota: string | null, monto: number): 'aporte' | 'previo' | 'retiro' | null => {
+      const n = nota ?? ''
+      if (n.includes('DELETE_REQUEST') || n.includes('RETIRO_PENDIENTE') || n.includes('RECHAZ')) return null
+      if (n.includes('PREVIO')) return 'previo'
+      if (n.includes('RETIRO')) return 'retiro'
+      return monto > 0 ? 'aporte' : null
+    }
+    const ahorrosCompartidos = depositosCompartidos
+      .map(d => ({ d, tipo: tipoDeposito(d.nota, Number(d.monto)) }))
+      .filter((x): x is { d: typeof depositosCompartidos[number]; tipo: 'aporte' | 'previo' | 'retiro' } => x.tipo !== null)
+    // Aportes a ahorros compartidos desde la billetera también son ahorro del periodo
+    const ahorroCompartidoNeto = ahorrosCompartidos.reduce((s, x) =>
+      x.tipo === 'aporte' ? s + Number(x.d.monto) : x.tipo === 'retiro' ? s - Math.abs(Number(x.d.monto)) : s, 0)
+
     // ── Totales para el balance ─────────────────────────────────────────────────
 
     const totalImpulse = impulseExpenses.reduce((s, e) => s + Number(e.monto), 0)
@@ -191,6 +232,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // bolsillo no restaba nada porque ni siquiera se registraba (ver BAL-05).
     const totalSaved   = savingsHistory.filter(e => e.tipo === 'ahorro').reduce((s, e) => s + Number(e.monto), 0)
       - savingsHistory.filter(e => e.tipo === 'retiro').reduce((s, e) => s + Number(e.monto), 0)
+      + ahorroCompartidoNeto
     const totalExtra   = extraIncomes.reduce((s, e) => s + Number(e.monto), 0)
     // Deudas y fijos EFECTIVAMENTE PAGADOS dentro del rango — se toma del ledger
     // de pagos (montoPagado real), no de una columna "pagado" que ya no existe.
@@ -456,6 +498,31 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       // rango. Solo para el historial — NO suman a ingresos ni egresos (prestar
       // no es gastar, y que te devuelvan no es ganar), pero sí explican por qué
       // bajó o subió el disponible.
+      // Social: igual que "Me deben", los préstamos y sus abonos NO suman a
+      // ingresos ni egresos (prestar no es gastar), pero explican por qué
+      // subió o bajó el disponible. Los aportes a ahorros compartidos sí
+      // cuentan como ahorro del periodo (ya van en summary.totalSaved).
+      social: {
+        prestamos: loansSocial.map(l => {
+          const yoPreste = l.lenderId === userId
+          return {
+            id: l.id, conQuien: (yoPreste ? l.borrower.nombre : l.lender.nombre),
+            rol: yoPreste ? 'preste' : 'me_prestaron', monto: Number(l.montoOriginal ?? l.amount),
+            previo: l.sinDesembolso, descripcion: l.descripcion, fecha: l.activadoEn ?? l.createdAt,
+          }
+        }),
+        abonos: loanPaymentsSocial.map(p => {
+          const recibi = p.loan.lenderId === userId
+          return {
+            id: p.id, conQuien: recibi ? p.loan.borrower.nombre : p.loan.lender.nombre,
+            rol: recibi ? 'recibi' : 'pague', monto: Number(p.monto), fecha: p.updatedAt,
+          }
+        }),
+        ahorros: ahorrosCompartidos.map(({ d, tipo }) => ({
+          id: d.id, bolsillo: d.sharedPocket.nombre, tipo, monto: Math.abs(Number(d.monto)), fecha: d.createdAt,
+        })),
+      },
+
       prestamosExternos: {
         prestamos: externalLoansPeriod.map(l => ({
           id: l.id, persona: l.persona, monto: Number(l.montoPrestado),

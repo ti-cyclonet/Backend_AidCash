@@ -33,6 +33,8 @@ export interface CredentialsResult {
   status: string | null
   reason?: string
   mustChangePassword: boolean
+  /** Avatar vigente en Authoriza (null si no tiene foto) */
+  avatarUrl?: string | null
 }
 
 async function callInternal<T>(path: string, body: unknown): Promise<T> {
@@ -71,6 +73,28 @@ export function verifyCredentials(email: string, password: string): Promise<Cred
  */
 export function setPassword(email: string, newPassword: string, currentPassword?: string): Promise<{ message: string }> {
   return callInternal('set-password', { email, newPassword, ...(currentPassword !== undefined ? { currentPassword } : {}) })
+}
+
+// ─── Avatar ───────────────────────────────────────────────────────────────────
+// La foto de perfil también vive SOLO en Authoriza (compartida por todas las
+// apps). Kiri guarda una copia de la URL en users.avatar_url para mostrar la
+// foto de otros usuarios (Social) sin consultar Authoriza en cada vista.
+
+/** Sube a Authoriza una imagen en data URL base64 y devuelve la URL alojada. */
+export async function setAuthorizaAvatar(email: string, dataUrl: string): Promise<string> {
+  const data = await callInternal<{ url: string }>('set-avatar', { email, dataUrl })
+  if (!data?.url) throw new AuthorizaRejectedError(502, 'Authoriza no devolvió la foto.')
+  return data.url
+}
+
+/** Avatar vigente en Authoriza: URL, null si no tiene, o undefined si no respondió. */
+export async function getAuthorizaAvatar(email: string): Promise<string | null | undefined> {
+  try {
+    const data = await callInternal<{ url: string | null }>('avatar', { email })
+    return data?.url || null
+  } catch {
+    return undefined
+  }
 }
 
 /**

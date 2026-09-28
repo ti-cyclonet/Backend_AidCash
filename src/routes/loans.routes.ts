@@ -100,6 +100,8 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
         payments: l.payments.map(p => ({ ...p, monto: Number(p.monto) })),
         fechaCompromiso: l.fechaCompromiso ? l.fechaCompromiso.toISOString().slice(0, 10) : null,
         diasParaCompromiso: diasHasta(l.fechaCompromiso),
+        sinDesembolso: l.sinDesembolso,
+        creadoPorId: l.creadoPorId,
       })),
     })
   } catch (error) {
@@ -203,6 +205,72 @@ router.post('/request', validate(requestLoanSchema), checkLimit('nPrestamos'), a
   }
 })
 
+// ─── POST /loans/existente — registrar un préstamo que YA existía ─────────────
+// Caso: "le presté a mi pareja hace meses" o "mi hermano me prestó y ya lo
+// gasté". No es plata nueva: al confirmarlo la otra persona, NO se mueve nada
+// de ninguna billetera. Queda el saldo pendiente para llevar juntos los abonos
+// (que sí mueven plata, porque son pagos nuevos).
+//   - Si lo registra quien debe  → PENDING_APPROVAL (confirma quien prestó)
+//   - Si lo registra quien prestó → PENDING_BORROWER_CONFIRMATION (confirma quien debe)
+
+const existenteSchema = z.object({
+  otroId: z.string().min(1),
+  rol: z.enum(['yo_preste', 'me_prestaron']),
+  monto: z.number().min(1),
+  // Lo que falta por pagar hoy (si ya hubo abonos antes de registrarlo)
+  pendiente: z.number().min(1),
+  descripcion: z.string().max(200).optional(),
+  fechaCompromiso: fechaISO.nullable().optional(),
+}).strict()
+
+router.post('/existente', validate(existenteSchema), checkLimit('nPrestamos'), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { otroId, rol, monto, pendiente, descripcion, fechaCompromiso } = req.body as z.infer<typeof existenteSchema>
+
+    if (otroId === userId) { res.status(400).json({ error: 'No puedes registrar un préstamo contigo mismo' }); return }
+    if (pendiente > monto) { res.status(400).json({ error: 'Lo que falta por pagar no puede ser mayor que lo que se prestó' }); return }
+    if (!(await requireConnection(userId, otroId))) {
+      res.status(403).json({ error: 'Solo puedes registrar préstamos con personas conectadas' })
+      return
+    }
+
+    const yoPreste = rol === 'yo_preste'
+    const loan = await prisma.loan.create({
+      data: {
+        lenderId: yoPreste ? userId : otroId,
+        borrowerId: yoPreste ? otroId : userId,
+        amount: monto,
+        remainingAmount: pendiente,
+        montoOriginal: monto,
+        tasaInteres: 0,
+        descripcion: descripcion?.trim() || null,
+        fechaCompromiso: aFecha(fechaCompromiso),
+        status: yoPreste ? 'PENDING_BORROWER_CONFIRMATION' : 'PENDING_APPROVAL',
+        sinDesembolso: true,
+        creadoPorId: userId,
+      },
+    })
+
+    const yo = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
+    const quien = yo?.nombre.split(' ')[0] ?? 'Alguien'
+    const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
+    emitToUser(otroId, SOCKET_EVENTS.LOAN_REQUESTED, { loanId: loan.id, amount: monto, existente: true, borrower: { id: userId, nombre: yo?.nombre } })
+    avisar(otroId, {
+      title: yoPreste ? `🤝 ${quien} registró que te prestó ${fmt(monto)}` : `🤝 ${quien} registró que le prestaste ${fmt(monto)}`,
+      body: `Es un préstamo que ya tenían (no mueve plata). Falta ${fmt(pendiente)}. Confírmalo en Social para llevar juntos el control.`,
+      url: '/social?tab=loans',
+      tag: `loan-existente-${loan.id}`,
+      tipo: 'prestamo',
+    }).catch(() => {})
+
+    res.status(201).json({ loan: { ...loan, amount: Number(loan.amount), remainingAmount: Number(loan.remainingAmount) } })
+  } catch (error) {
+    console.error('[LoanExistente]', error)
+    res.status(500).json({ error: 'Error al registrar el préstamo' })
+  }
+})
+
 // ─── POST /loans/approve ──────────────────────────────────────────────────────
 // Lender aprueba la solicitud
 
@@ -232,6 +300,21 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
     }
 
     const lender = await prisma.user.findUnique({ where: { id: lenderId }, select: { cashBalance: true, nombre: true } })
+
+    // Préstamo que ya existía: confirmar el registro, sin intereses nuevos ni
+    // mover plata (esa plata se entregó hace tiempo).
+    if (loan.sinDesembolso) {
+      const updated = await prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE', activadoEn: new Date() } })
+      emitToUser(loan.borrowerId, SOCKET_EVENTS.LOAN_APPROVED, { loanId, amount: Number(loan.amount), existente: true, requiresConfirmation: false })
+      avisar(loan.borrowerId, {
+        title: `✅ ${lender?.nombre.split(' ')[0] ?? 'Tu contacto'} confirmó el préstamo`,
+        body: `Ya llevan juntos el control: faltan $${Math.round(Number(loan.remainingAmount)).toLocaleString('es-CO')}.`,
+        url: '/social?tab=loans', tipo: 'prestamo',
+      }).catch(() => {})
+      res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, requiresConfirmation: false, existente: true })
+      return
+    }
+
     const lenderBalance = Number(lender?.cashBalance ?? 0)
     const montoOriginal = Number(loan.amount)
 
@@ -284,7 +367,7 @@ router.post('/approve', validate(approveWithInterestSchema), async (req: Request
       const [updated] = await prisma.$transaction([
         prisma.loan.update({
           where: { id: loanId },
-          data: { status: 'ACTIVE' },
+          data: { status: 'ACTIVE', activadoEn: new Date() },
         }),
         prisma.user.update({
           where: { id: lenderId },
@@ -336,6 +419,22 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
 
     const borrower = await prisma.user.findUnique({ where: { id: borrowerId }, select: { nombre: true } })
 
+    // Préstamo que ya existía (lo registró quien prestó): confirmar o no, sin mover plata
+    if (loan.sinDesembolso) {
+      const updated = await prisma.loan.update({ where: { id: loanId }, data: { status: accept ? 'ACTIVE' : 'REJECTED', ...(accept ? { activadoEn: new Date() } : {}) } })
+      const quien = borrower?.nombre.split(' ')[0] ?? 'Tu contacto'
+      emitToUser(loan.lenderId, accept ? SOCKET_EVENTS.LOAN_APPROVED : SOCKET_EVENTS.LOAN_REJECTED, { loanId, existente: true, borrowerAccepted: accept })
+      avisar(loan.lenderId, {
+        title: accept ? `✅ ${quien} confirmó el préstamo` : `❌ ${quien} dice que ese préstamo no es así`,
+        body: accept
+          ? `Ya llevan juntos el control: faltan $${Math.round(Number(loan.remainingAmount)).toLocaleString('es-CO')}.`
+          : 'Hablen y vuelvan a registrarlo con los valores correctos.',
+        url: '/social?tab=loans', tipo: 'prestamo',
+      }).catch(() => {})
+      res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) }, accepted: accept, existente: true })
+      return
+    }
+
     if (accept) {
       // Borrower acepta → Activar préstamo, descontar del lender y entregar el
       // principal (monto original, sin interés) al borrower
@@ -348,7 +447,7 @@ router.post('/borrower-confirm', validate(borrowerConfirmSchema), async (req: Re
       }
 
       const [updated] = await prisma.$transaction([
-        prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE' } }),
+        prisma.loan.update({ where: { id: loanId }, data: { status: 'ACTIVE', activadoEn: new Date() } }),
         prisma.user.update({
           where: { id: loan.lenderId },
           data: planPocketDeduction('libre', disbursed),
@@ -423,24 +522,33 @@ router.post('/reject', validate(respondLoanSchema), async (req: Request, res: Re
 
 router.post('/cancel', validate(respondLoanSchema), async (req: Request, res: Response): Promise<void> => {
   try {
-    const borrowerId = req.user!.userId
+    const userId = req.user!.userId
     const { loanId } = req.body as { loanId: string }
 
+    // Quien pidió cancela su solicitud; o quien registró un préstamo existente
+    // lo retira mientras el otro no lo haya confirmado.
     const loan = await prisma.loan.findFirst({
-      where: { id: loanId, borrowerId, status: 'PENDING_APPROVAL' },
+      where: {
+        id: loanId,
+        OR: [
+          { borrowerId: userId, status: 'PENDING_APPROVAL' },
+          { creadoPorId: userId, sinDesembolso: true, status: { in: ['PENDING_APPROVAL', 'PENDING_BORROWER_CONFIRMATION'] } },
+        ],
+      },
     })
     if (!loan) {
       res.status(404).json({ error: 'Solicitud no encontrada o ya procesada' })
       return
     }
 
-    const borrower = await prisma.user.findUnique({ where: { id: borrowerId }, select: { nombre: true } })
+    const yo = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
+    const otroId = loan.lenderId === userId ? loan.borrowerId : loan.lenderId
 
     // Eliminar directamente (ya no tiene sentido mantenerla)
     await prisma.loan.delete({ where: { id: loanId } })
 
-    emitToUser(loan.lenderId, SOCKET_EVENTS.LOAN_REJECTED, { loanId, cancelled: true })
-    pushLoanCancelled(loan.lenderId, borrower?.nombre ?? 'Alguien')
+    emitToUser(otroId, SOCKET_EVENTS.LOAN_REJECTED, { loanId, cancelled: true })
+    pushLoanCancelled(otroId, yo?.nombre ?? 'Alguien')
 
     res.json({ message: 'Solicitud cancelada' })
   } catch (error) {
