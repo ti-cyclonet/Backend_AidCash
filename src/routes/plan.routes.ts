@@ -7,6 +7,9 @@ import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
 import { acreditarReferido } from '../lib/invitaciones.js'
+import { avisar } from '../lib/push.js'
+import { z } from 'zod'
+import { Prisma } from '@prisma/client'
 
 const router = Router()
 
@@ -169,7 +172,7 @@ router.get('/available', authMiddleware, async (_req: Request, res: Response) =>
 router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userEmail = (req as any).user?.correo
-    const { packageId, password } = req.body
+    const { packageId, password, packageName, acceptTerms, acceptHabeasData } = req.body
 
     if (!packageId || !password) {
       return res.status(400).json({
@@ -194,6 +197,9 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
         email: userEmail,
         password,
         packageId,
+        // Aceptación de términos y tratamiento de datos al contratar (Authoriza la registra)
+        ...(acceptTerms ? { acceptTerms: true } : {}),
+        ...(acceptHabeasData ? { acceptHabeasData: true } : {}),
       }),
     })
 
@@ -210,6 +216,12 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
     // Access will upgrade automatically when the contract is signed and activated.
     // NOTE: We do NOT deactivate the user here — they keep using the previous plan
     // until the new contract is fully signed and activated by Authoriza's webhook.
+
+    // Recordarlo para mostrar en Mi plan "tu contrato está listo en FactoNet"
+    await prisma.user.update({
+      where: { id: (req as any).user.userId },
+      data: { cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, fecha: new Date().toISOString() } },
+    }).catch(() => {})
 
     return res.json({
       success: true,
@@ -336,7 +348,7 @@ router.post('/activate-user', requireInternalKey, async (req: Request, res: Resp
       where: { id: user.id },
       data: {
         isActive: true,
-        ...(welcomeFlag ? { pendingWelcome: welcomeFlag } : {}),
+        ...(welcomeFlag ? { pendingWelcome: welcomeFlag, cambioPlan: Prisma.DbNull } : {}),
       },
     })
 
@@ -474,6 +486,95 @@ router.post('/revoke-sessions', requireInternalKey, async (req: Request, res: Re
   } catch (error: any) {
     console.error('[Plan] Error revoking sessions:', error.message)
     return res.status(500).json({ success: false, error: 'Error revoking sessions.' })
+  }
+})
+
+// ─── FactoNet: contrato y facturas del plan ───────────────────────────────────
+// El usuario entra a FactoNet con el MISMO correo y contraseña de Kiri
+// (Authoriza es el dueño de las contraseñas y, al cambiarse a un plan pago, le
+// asigna el rol de FactoNet para ver su contrato y sus facturas).
+
+const fmtCOP = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
+const fmtFecha = (f?: string | null) => f ? new Date(`${f}T12:00:00`).toLocaleDateString('es-CO', { day: 'numeric', month: 'long' }) : null
+
+/** GET /api/plan/factonet — datos para la sección de FactoNet en Mi plan */
+router.get('/factonet', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: (req as any).user.userId },
+      select: { correo: true, facturaPendiente: true, cambioPlan: true },
+    })
+    if (!user) return res.status(404).json({ error: 'Usuario no encontrado' })
+    const base = env.FACTONET_URL.replace(/\/+$/, '')
+    return res.json({
+      url: `${base}/login`,
+      correo: user.correo,
+      facturaPendiente: user.facturaPendiente ?? null,
+      cambioPlan: user.cambioPlan ?? null,
+    })
+  } catch (error: any) {
+    console.error('[Plan] Error en /factonet:', error.message)
+    return res.status(500).json({ error: 'No se pudo cargar la información de FactoNet.' })
+  }
+})
+
+/**
+ * POST /api/plan/factura-evento
+ * Webhook de Authoriza (x-internal-key): una factura del plan de Kiri cambió
+ * (emitida y pendiente por pagar, recordatorios, recargo, suspensión, pagada).
+ * Se avisa en Kiri (campana + celular) y al tocar el aviso se abre Mi plan →
+ * acceso a FactoNet.
+ */
+const facturaEventoSchema = z.object({
+  email: z.string().email(),
+  evento: z.enum(['emitida', 'vence_hoy', 'aviso_mora', 'recargo', 'suspendida', 'pagada', 'pago_rechazado']),
+  factura: z.object({
+    codigo: z.string().max(60),
+    valor: z.number(),
+    emitida: z.string().nullable().optional(),
+    vence: z.string().nullable().optional(),
+    periodo: z.string().nullable().optional(),
+    estado: z.string().max(40).optional(),
+    plan: z.string().max(80).nullable().optional(),
+  }),
+})
+
+router.post('/factura-evento', requireInternalKey, async (req: Request, res: Response) => {
+  try {
+    const parsed = facturaEventoSchema.safeParse(req.body)
+    if (!parsed.success) return res.status(400).json({ success: false, error: 'Datos de factura inválidos.' })
+    const { email, evento, factura } = parsed.data
+
+    const user = await prisma.user.findUnique({ where: { correo: email }, select: { id: true } })
+    if (!user) return res.status(404).json({ success: false, error: 'User not found in Kiri.' })
+
+    const valor = fmtCOP(factura.valor)
+    const vence = fmtFecha(factura.vence)
+    const avisos: Record<typeof evento, { title: string; body: string }> = {
+      emitida: { title: `🧾 Tu factura de Kiri está lista: ${valor}`, body: `Factura ${factura.codigo}${vence ? `, vence el ${vence}` : ''}. Mírala y págala en FactoNet con tu mismo usuario de Kiri.` },
+      vence_hoy: { title: `⏰ Hoy vence tu factura de Kiri (${valor})`, body: `Factura ${factura.codigo}. Págala en FactoNet para no generar recargos.` },
+      aviso_mora: { title: `⚠️ Tu factura de Kiri está vencida`, body: `Factura ${factura.codigo} por ${valor}. Págala pronto en FactoNet para evitar el recargo por mora.` },
+      recargo: { title: `⚠️ Tu factura de Kiri ya tiene recargo por mora`, body: `Factura ${factura.codigo}. Ponte al día en FactoNet para no suspender tu plan.` },
+      suspendida: { title: `🚫 Tu plan de Kiri fue suspendido por falta de pago`, body: `Factura ${factura.codigo} por ${valor}. Paga en FactoNet para reactivarlo.` },
+      pagada: { title: `✅ Pago confirmado: factura ${factura.codigo}`, body: `Recibimos tu pago de ${valor}. ¡Gracias!` },
+      pago_rechazado: { title: `❌ No pudimos confirmar tu pago`, body: `Factura ${factura.codigo}. Revisa el comprobante y vuelve a reportarlo en FactoNet.` },
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        facturaPendiente: evento === 'pagada'
+          ? Prisma.DbNull
+          : { ...factura, evento, actualizada: new Date().toISOString() },
+      },
+    })
+
+    const { title, body } = avisos[evento]
+    await avisar(user.id, { title, body, url: '/mi-plan#factonet', tag: `factura-${factura.codigo}`, tipo: 'factura' })
+    return res.json({ success: true })
+  } catch (error: any) {
+    console.error('[Plan] Error en factura-evento:', error.message)
+    return res.status(500).json({ success: false, error: 'Error al registrar el aviso de factura.' })
   }
 })
 

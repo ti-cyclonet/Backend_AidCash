@@ -36,6 +36,9 @@ export const env = {
   // Sin valor por defecto: vacío, los tokens de Authoriza simplemente no validan
   AUTHORIZA_JWT_SECRET: process.env.AUTHORIZA_JWT_SECRET || '',
   AUTHORIZA_API_URL: process.env.AUTHORIZA_API_URL || 'http://localhost:3000',
+  // FactoNet (facturación): donde el usuario ve su contrato y sus facturas,
+  // con el mismo correo y contraseña de Kiri
+  FACTONET_URL: process.env.FACTONET_URL || (process.env.NODE_ENV === 'production' ? 'https://billing.cyclonet.com.co' : 'http://localhost:4202'),
 
   // ─── Belvo Open Banking ─────────────────────────────────────────────────────
   BELVO_SECRET_ID: process.env.BELVO_SECRET_ID || '',

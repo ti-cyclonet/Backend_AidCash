@@ -156,6 +156,18 @@ con sus días de pago; se cambia en Perfil).
 - Foto (se guarda en la cuenta), datos, frecuencia de ingreso, "Notificaciones del celular"
   (Activar / Probar), Guía de Kiri (volver a ver las guías), plan y cerrar sesión.
 
+## MI PLAN Y FACTONET — ruta /mi-plan (desde Perfil o Inicio)
+- Muestra el plan actual y los planes disponibles con su precio y lo que incluyen. Para cambiarse
+  se toca "Cambiarme a…", se confirma con la contraseña de Kiri y se aceptan los términos.
+- Al cambiarse a un plan pago se crea el contrato; el usuario sigue con su plan actual hasta que lo
+  firma y paga la primera factura, y ahí se activa el nuevo.
+- FactoNet es la plataforma de facturación de Cyclonet: ahí se ve y firma el contrato, se consultan
+  las facturas y se reportan los pagos. Se entra con el MISMO correo y contraseña de Kiri (botón
+  "Ir a FactoNet" en Mi plan).
+- Cuando FactoNet emite una factura (o vence, entra en mora, se suspende el plan o se confirma el
+  pago) llega un aviso en Kiri; al tocarlo se abre Mi plan en el acceso a FactoNet. Si hay una
+  factura pendiente, Mi plan la muestra arriba con su valor y fecha.
+
 ## NOTIFICACIONES
 - Campana: solicitudes y avisos de Social, préstamos, hogar, misiones, pagos por vencer, consejos.
 - Al celular (barra de notificaciones) si se activan en Perfil.

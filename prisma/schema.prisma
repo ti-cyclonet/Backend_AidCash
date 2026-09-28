@@ -52,6 +52,11 @@ model User {
   isActive              Boolean  @default(true) @map("is_active")
   // Bienvenida pendiente tras activación de plan pago (para mostrar notificación in-app)
   pendingWelcome        String?  @map("pending_welcome")
+  // Última factura de su plan que FactoNet/Authoriza avisó como pendiente
+  // (null cuando se paga) — Mi plan la muestra con el acceso a FactoNet
+  facturaPendiente      Json?    @map("factura_pendiente")
+  // Cambio de plan pedido desde Kiri y aún no activado (contrato por firmar/pagar)
+  cambioPlan            Json?    @map("cambio_plan")
   createdAt             DateTime @default(now()) @map("created_at")
   updatedAt             DateTime @updatedAt @map("updated_at")
 
