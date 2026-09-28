@@ -14,6 +14,7 @@ import {
   AUTHORIZA_MANAGED_PASSWORD,
   AuthorizaRejectedError,
   ensureAuthorizaAccount,
+  getAuthorizaAvatar,
   setPassword as setAuthorizaPassword,
   verifyCredentials,
 } from '../lib/authoriza-auth.js'
@@ -230,6 +231,10 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
         acreditarReferido(user.id).catch(() => {})
       }
     }
+    // Avatar vigente de Authoriza (pudo cambiarse desde otra app)
+    if (cred.avatarUrl && cred.avatarUrl !== user.avatarUrl) {
+      await prisma.user.update({ where: { id: user.id }, data: { avatarUrl: cred.avatarUrl } }).catch(() => {})
+    }
 
     // Generar tokens
     const tokenPayload: AuthPayload = { userId: user.id, correo: user.correo }
@@ -373,6 +378,14 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
     if (!user) {
       res.status(404).json({ error: 'Usuario no encontrado' })
       return
+    }
+
+    // Avatar vigente de Authoriza: si se cambió en otra app, se refleja al
+    // abrir Kiri. Si Authoriza no responde se usa la copia local.
+    const avatarActual = await getAuthorizaAvatar(user.correo)
+    if (avatarActual && avatarActual !== user.avatarUrl) {
+      await prisma.user.update({ where: { id: user.id }, data: { avatarUrl: avatarActual } }).catch(() => {})
+      user.avatarUrl = avatarActual
     }
 
     // Autosanar cuentas viejas sin @username (de antes de que existiera esta

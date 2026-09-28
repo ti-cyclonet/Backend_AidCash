@@ -8,6 +8,7 @@ import { sendPushToUser, contarDispositivos } from '../lib/push.js'
 import { env } from '../config/env.js'
 import { recordOnboardingAction } from '../lib/missions.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
+import { AuthorizaRejectedError, setAuthorizaAvatar } from '../lib/authoriza-auth.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -94,12 +95,53 @@ router.post('/guias', validate(guiaSchema), async (req: Request, res: Response):
   }
 })
 
+// ─── POST /users/avatar ───────────────────────────────────────────────────────
+// Sube la foto a Authoriza (fuente compartida por todas las apps). El token de
+// Kiri no sirve contra Authoriza, por eso el navegador no sube directo allá.
+
+const avatarSchema = z.object({
+  dataUrl: z.string().startsWith('data:image/', 'Formato de imagen inválido').max(12_000_000, 'La imagen es demasiado grande'),
+})
+
+router.post('/avatar', validate(avatarSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: { id: true, correo: true } })
+    if (!user) {
+      res.status(404).json({ error: 'Usuario no encontrado' })
+      return
+    }
+    const url = await setAuthorizaAvatar(user.correo, req.body.dataUrl)
+    await prisma.user.update({ where: { id: user.id }, data: { avatarUrl: url } })
+    res.json({ url })
+  } catch (error) {
+    if (error instanceof AuthorizaRejectedError) {
+      res.status(400).json({ error: error.message })
+      return
+    }
+    console.error('[Avatar]', (error as Error).message)
+    res.status(503).json({ error: 'No pudimos subir tu foto en este momento. Intenta de nuevo.' })
+  }
+})
+
 // ─── PATCH /users/profile ─────────────────────────────────────────────────────
 
 router.patch('/profile', validate(updateProfileSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
     const { firstName, secondName, firstSurname, secondSurname, documentType, documentNumber, ...localData } = req.body
+
+    // Una foto nueva llega como data URL: se sube a Authoriza para que se vea en
+    // todas las apps, y localmente se guarda solo la URL resultante.
+    if (typeof localData.avatarUrl === 'string' && localData.avatarUrl.startsWith('data:image/')) {
+      const owner = await prisma.user.findUnique({ where: { id: userId }, select: { correo: true } })
+      try {
+        localData.avatarUrl = await setAuthorizaAvatar(owner!.correo, localData.avatarUrl)
+      } catch (err) {
+        const msg = err instanceof AuthorizaRejectedError ? err.message : 'No pudimos subir tu foto en este momento. Intenta de nuevo.'
+        res.status(err instanceof AuthorizaRejectedError ? 400 : 503).json({ error: msg })
+        return
+      }
+    }
 
     // Update local Kiri DB (only local fields)
     const user = await prisma.user.update({

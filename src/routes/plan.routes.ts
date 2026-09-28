@@ -456,6 +456,27 @@ router.post('/set-user-status', requireInternalKey, async (req: Request, res: Re
 })
 
 /**
+ * POST /api/plan/set-avatar
+ * Webhook called by Authoriza when a user's avatar changes (from any app).
+ * Server-to-server: exige x-internal-key (INTERNAL_API_KEY).
+ * Body: { email, url }
+ */
+router.post('/set-avatar', requireInternalKey, async (req: Request, res: Response) => {
+  try {
+    const { email, url } = req.body
+    if (!email || typeof url !== 'string' || !/^https?:\/\//.test(url)) {
+      return res.status(400).json({ success: false, error: 'email and an http(s) url are required.' })
+    }
+
+    const result = await prisma.user.updateMany({ where: { correo: email }, data: { avatarUrl: url } })
+    return res.json({ success: true, updated: result.count })
+  } catch (error: any) {
+    console.error('[Plan] Error setting avatar:', error.message)
+    return res.status(500).json({ success: false, error: 'Error updating avatar.' })
+  }
+})
+
+/**
  * POST /api/plan/revoke-sessions
  * Webhook called by Authoriza when a user's password changes or is reset there.
  * Closes every open Kiri session: deletes refresh tokens and rejects access
