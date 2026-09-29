@@ -7,7 +7,7 @@ import { validate } from '../middleware/validate.js'
 import { sendPushToUser, contarDispositivos } from '../lib/push.js'
 import { env } from '../config/env.js'
 import { recordOnboardingAction } from '../lib/missions.js'
-import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
+import { planPocketDeduction, planPocketCredit, planDeduccionEnCascada, WALLET_POCKET_FIELD, type WalletPocket } from '../lib/wallet.js'
 import { AuthorizaRejectedError, setAuthorizaAvatar } from '../lib/authoriza-auth.js'
 
 const router = Router()
@@ -434,6 +434,79 @@ router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async
   } catch (error) {
     console.error('[WalletIncome]', error)
     res.status(500).json({ error: 'Error al registrar ingreso' })
+  }
+})
+
+// ─── DELETE /users/wallet/income/:id ──────────────────────────────────────────
+// Elimina un ingreso registrado como si nunca hubiera existido: sale del
+// historial y del balance, y la billetera pierde exactamente lo que ese
+// ingreso le sumó (cashBalance y cada bolsillo según su distribución).
+
+router.delete('/wallet/income/:id', walletLimiter, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const record = await prisma.incomeRecord.findFirst({ where: { id: String(req.params.id), userId } })
+    if (!record) { res.status(404).json({ error: 'Ingreso no encontrado' }); return }
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
+    })
+    if (!user) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+
+    const r2 = (n: number) => Math.round(n * 100) / 100
+    const monto = Number(record.monto)
+    const saldos: Record<WalletPocket, number> = {
+      ahorro: Number(user.walletAhorro), obligaciones: Number(user.walletObligaciones),
+      libre: Number(user.walletLibre), endeudamiento: Number(user.walletEndeudamiento),
+    }
+    const reparto: Record<WalletPocket, number> = {
+      ahorro: Number(record.aAhorro), obligaciones: Number(record.aObligaciones),
+      libre: Number(record.aLibre), endeudamiento: Number(record.aEndeudamiento),
+    }
+    // Cada bolsillo devuelve lo que recibió de este ingreso. Si de un bolsillo
+    // ya se gastó esa plata, lo que falta sale de los demás (en cascada) para
+    // que ningún bolsillo quede en negativo mientras otro sí la tiene.
+    const desglose: Record<WalletPocket, number> = { ahorro: 0, obligaciones: 0, libre: 0, endeudamiento: 0 }
+    let falta = r2(monto - Object.values(reparto).reduce((s, v) => s + v, 0))
+    for (const p of Object.keys(reparto) as WalletPocket[]) {
+      const tomar = Math.min(reparto[p], Math.max(0, saldos[p]))
+      desglose[p] = r2(tomar)
+      saldos[p] -= tomar
+      falta = r2(falta + reparto[p] - tomar)
+    }
+    if (falta > 0) {
+      const { desglose: extra } = planDeduccionEnCascada(saldos, falta)
+      for (const [p, v] of Object.entries(extra)) desglose[p as WalletPocket] = r2(desglose[p as WalletPocket] + (v ?? 0))
+    }
+    const data: Record<string, unknown> = { cashBalance: { decrement: monto } }
+    for (const p of Object.keys(desglose) as WalletPocket[]) {
+      if (desglose[p] > 0) data[WALLET_POCKET_FIELD[p]] = { decrement: desglose[p] }
+    }
+
+    const [, updated] = await prisma.$transaction([
+      prisma.incomeRecord.delete({ where: { id: record.id } }),
+      prisma.user.update({
+        where: { id: userId },
+        data,
+        select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
+      }),
+    ])
+
+    res.json({
+      message: 'Ingreso eliminado',
+      monto,
+      tipo: record.tipo,
+      wallet: {
+        cashBalance: Number(updated.cashBalance),
+        ahorro: Number(updated.walletAhorro),
+        obligaciones: Number(updated.walletObligaciones),
+        libre: Number(updated.walletLibre),
+        endeudamiento: Number(updated.walletEndeudamiento),
+      },
+    })
+  } catch (error) {
+    console.error('[WalletIncomeDelete]', error)
+    res.status(500).json({ error: 'Error al eliminar el ingreso' })
   }
 })
 
