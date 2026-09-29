@@ -56,6 +56,15 @@ con sus días de pago; se cambia en Perfil).
 - "Sueldo base" = lo que planeas recibir por periodo (quincena o mes). "Sueldo real / Disponible"
   = la plata que de verdad tienes; baja al pagar obligaciones o registrar gastos y sube al
   registrar ingresos.
+- Cómo recibes tu plata (lápiz de la tarjeta Sueldo base, y en el test inicial). Tres casos:
+  1) Sueldo fijo mensual, o quincenal con las dos quincenas iguales.
+  2) Sueldo fijo quincenal que cambia: se pone lo que pagan cada día de pago (ej. $1.000.000 el 15
+     y $750.000 el 30). Cada quincena Kiri usa y sugiere el monto de esa fecha.
+  3) Ingresos variables (independiente, ventas, comisiones, domicilios): NO hace falta sueldo fijo
+     ni días de pago. Se registra cada ingreso cuando llega ("De mi trabajo" o "Extra"); la
+     estimación mensual es opcional y, sin ella, Kiri planea con el promedio real de lo registrado
+     (últimos 3 meses). El periodo es el mes calendario. Consejo: con ingresos variables conviene
+     un fondo de emergencia más grande y planear con un mes flojo.
 - Registrar ingreso: tipo "salario" (tu pago) o "extra". Al registrar el salario, Kiri reparte en
   la billetera: primero lo de obligaciones; del resto, un % a ahorro que depende de cuánto te
   queda libre (20% si queda ≥40% del ingreso, 15% si ≥25%, 10% si ≥15%, 5% si menos); de lo que

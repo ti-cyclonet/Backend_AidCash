@@ -171,8 +171,11 @@ export function normalizarAcciones(raw: unknown, ctx: ContextoIA): Accion[] {
       }
       case 'ingreso': {
         const t = a.tipoIngreso === 'salario' || a.tipoIngreso === 'extra' ? a.tipoIngreso : null
-        const base = ctx.usuario.ingresoBase
-        acc.tipoIngreso = t ?? (base > 0 && Math.abs(monto - base) <= base * 0.1 ? 'salario' : 'extra')
+        // Antes se comparaba con el sueldo del MES: una quincena normal quedaba
+        // como "extra". Ahora con cada monto de sueldo (cada quincena o el mes).
+        // Con ingresos variables, lo que le entra por su trabajo es su ingreso principal.
+        const esSueldo = ctx.usuario.montosSueldo.some(base => base > 0 && Math.abs(monto - base) <= base * 0.1)
+        acc.tipoIngreso = t ?? (ctx.usuario.tipoIngreso === 'variable' || esSueldo ? 'salario' : 'extra')
         break
       }
       case 'pago_obligacion': {

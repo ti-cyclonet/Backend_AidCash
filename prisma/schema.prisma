@@ -26,8 +26,22 @@ model User {
   // Tokens de acceso emitidos antes de esta fecha se rechazan (reset/cambio de
   // contraseña en Authoriza o Kiri, bloqueo). Null = ninguno revocado.
   sessionsValidAfter    DateTime? @map("sessions_valid_after")
+  // Partes del nombre (el formulario de perfil las edita por separado; antes
+  // se adivinaban partiendo `nombre` por espacios y se perdía el 2.º nombre)
+  primerNombre          String?  @map("primer_nombre")
+  segundoNombre         String?  @map("segundo_nombre")
+  primerApellido        String?  @map("primer_apellido")
+  segundoApellido       String?  @map("segundo_apellido")
+  // Ingreso MENSUAL de referencia (fijo: el sueldo del mes; variable: lo que
+  // estima que le entra al mes, 0 si no sabe → se usa su promedio real)
   ingresoBase           Decimal  @default(0) @map("ingreso_base") @db.Decimal(12, 2)
   frecuenciaIngreso     String   @default("mensual") @map("frecuencia_ingreso")
+  // "fijo" (sueldo) | "variable" (independiente, ventas, comisiones: sin sueldo fijo)
+  tipoIngreso           String   @default("fijo") @map("tipo_ingreso")
+  // Quincenal con montos distintos: lo de la 1.ª y la 2.ª quincena del mes
+  // (null = las dos iguales, ingresoBase / 2)
+  ingresoQuincena1      Decimal? @map("ingreso_quincena1") @db.Decimal(12, 2)
+  ingresoQuincena2      Decimal? @map("ingreso_quincena2") @db.Decimal(12, 2)
   diasPago              Int[]    @default([]) @map("dias_pago")
   onboardingDone        Boolean  @default(false) @map("onboarding_done")
   metaAhorroGlobal      Decimal  @default(5000) @map("meta_ahorro_global") @db.Decimal(12, 2)

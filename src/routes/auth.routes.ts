@@ -11,11 +11,12 @@ import { authMiddleware, AuthPayload } from '../middleware/auth.js'
 import { generateUniqueUsername } from '../lib/username.js'
 import { sendMail } from '../lib/mail.js'
 import crypto from 'crypto'
+import { ingresoPromedioMensual, partirNombre, unirNombre } from '../lib/ingresos.js'
 import {
   AUTHORIZA_MANAGED_PASSWORD,
   AuthorizaRejectedError,
   ensureAuthorizaAccount,
-  getAuthorizaAvatar,
+  getAuthorizaAvatar, getAuthorizaName,
   setPassword as setAuthorizaPassword,
   verifyCredentials,
 } from '../lib/authoriza-auth.js'
@@ -80,6 +81,11 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
     const user = await prisma.user.create({
       data: {
         nombre,
+        // Partes del nombre tal como las escribió (Perfil las edita por separado)
+        ...(firstName && firstSurname ? {
+          primerNombre: String(firstName).trim(), segundoNombre: secondName ? String(secondName).trim() : null,
+          primerApellido: String(firstSurname).trim(), segundoApellido: secondSurname ? String(secondSurname).trim() : null,
+        } : {}),
         correo,
         username,
         // La contraseña vive solo en Authoriza (se envía abajo en register-kiri)
@@ -363,8 +369,15 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
         correo: true,
         username: true,
         avatarUrl: true,
+        primerNombre: true,
+        segundoNombre: true,
+        primerApellido: true,
+        segundoApellido: true,
         ingresoBase: true,
         frecuenciaIngreso: true,
+        tipoIngreso: true,
+        ingresoQuincena1: true,
+        ingresoQuincena2: true,
         diasPago: true,
         onboardingDone: true,
         metaAhorroGlobal: true,
@@ -391,6 +404,23 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
       user.avatarUrl = avatarActual
     }
 
+    // Cuentas sin el nombre en partes: se traen de Authoriza (donde sí están
+    // separadas) y se guardan; si Authoriza no responde, la mejor suposición.
+    if (!user.primerNombre) {
+      const na = await getAuthorizaName(user.correo)
+      const partes = na?.firstName && na.firstSurname
+        ? { primerNombre: na.firstName, segundoNombre: na.secondName ?? '', primerApellido: na.firstSurname, segundoApellido: na.secondSurname ?? '' }
+        : partirNombre(user.nombre)
+      // Solo se guarda lo que viene de Authoriza (la suposición no se fija)
+      if (na?.firstName && na.firstSurname && unirNombre(partes).toLowerCase() === user.nombre.trim().toLowerCase()) {
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { primerNombre: partes.primerNombre, segundoNombre: partes.segundoNombre || null, primerApellido: partes.primerApellido, segundoApellido: partes.segundoApellido || null },
+        }).catch(() => {})
+      }
+      Object.assign(user, { primerNombre: partes.primerNombre, segundoNombre: partes.segundoNombre || null, primerApellido: partes.primerApellido, segundoApellido: partes.segundoApellido || null })
+    }
+
     // Autosanar cuentas viejas sin @username (de antes de que existiera esta
     // generación, o creadas por un flujo que no pasó por /auth/register).
     if (!user.username) {
@@ -399,7 +429,10 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
       user.username = username
     }
 
-    res.json({ user })
+    // Ingresos variables: el promedio real con el que Kiri planea si no hay estimación
+    const ingresoPromedio = user.tipoIngreso === 'variable' ? await ingresoPromedioMensual(user.id) : null
+
+    res.json({ user: { ...user, ingresoPromedio } })
   } catch (error) {
     console.error('[Me]', error)
     res.status(500).json({ error: 'Error al obtener perfil' })
