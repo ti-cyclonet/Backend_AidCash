@@ -16,11 +16,20 @@ import { fixedPeriodo } from '../fixed-expense-payments.js'
 import { getMontoPorPeriodo } from '../period.js'
 import { resumenHogar } from '../hogar.js'
 import { resolverPlan } from '../planes.js'
+import { describirIngreso, ingresoPromedioMensual, ingresoReferenciaMensual, montosDeSueldo } from '../ingresos.js'
 
 export interface ContextoIA {
   hoy: string
   plan: { nombre: string; fuente: string; pruebaHasta: string | null; limites: string } | null
-  usuario: { nombre: string; frecuencia: string; ingresoBase: number; disponible: number; ahorroTotal: number }
+  usuario: {
+    nombre: string; frecuencia: string; disponible: number; ahorroTotal: number
+    /** Ingreso MENSUAL con el que se planea (sueldo del mes, o estimación/promedio si es variable) */
+    ingresoBase: number
+    tipoIngreso: string
+    /** Montos que cuentan como su sueldo (cada quincena o el mes); vacío si es variable */
+    montosSueldo: number[]
+    descripcionIngreso: string
+  }
   categorias: { id: string; nombre: string; limite: number; gastado: number; disponible: number; estado: string }[]
   deudas: { id: string; nombre: string; tipo: string; saldo: number; cuota: number; tasaMensual: number | null; frecuencia: string; diasPago: string; pagadaEstePeriodo: boolean; atrasado: number }[]
   fijos: { id: string; nombre: string; monto: number; frecuencia: string; pagadoEstePeriodo: boolean }[]
@@ -38,7 +47,7 @@ export async function construirContexto(userId: string, now: Date = new Date()):
   const hace3 = new Date(now.getFullYear(), now.getMonth() - 2, 1)
 
   const [user, resumen, debtsRaw, fijosRaw, bolsillos, loans, hogar, gastos, ingresos, pagosDeuda, pagosFijo, ahorros] = await Promise.all([
-    prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { nombre: true, frecuenciaIngreso: true, ingresoBase: true, cashBalance: true } }),
+    prisma.user.findUniqueOrThrow({ where: { id: userId }, select: { nombre: true, frecuenciaIngreso: true, ingresoBase: true, cashBalance: true, tipoIngreso: true, ingresoQuincena1: true, ingresoQuincena2: true } }),
     resumenCategorias(userId, 'periodo', now).catch(() => null),
     prisma.debt.findMany({ where: { userId, estado: 'activa' }, orderBy: { createdAt: 'asc' } }),
     prisma.fixedExpense.findMany({ where: { userId }, orderBy: { createdAt: 'asc' } }),
@@ -61,6 +70,7 @@ export async function construirContexto(userId: string, now: Date = new Date()):
     limites: `categorías ${lim('nCategorias')}, deudas ${lim('nDeudas')}, gastos fijos ${lim('nGastosFijos')}, bolsillos ${lim('nBolsillos')}, me deben ${lim('nMeDeben')}, ingresos extra ${lim('nIngresosExtra')}, conexiones ${lim('nConexiones')}; préstamos/deudas compartidas ${plan.features.p2pLoans ? 'sí' : 'no'}; hogar ${plan.features.householdBudget ? 'sí' : 'no'}`,
   } : null
 
+  const promedioIngreso = user.tipoIngreso === 'variable' ? await ingresoPromedioMensual(userId, now) : 0
   const ctxDeudas = await cargarContextoDeudas(debtsRaw)
   const deudas = debtsRaw.map(d => {
     const s = serializarDeuda(d, ctxDeudas) as { cuotaPeriodo: number; pagadoEstePeriodo: boolean; montoAtrasado: number; tasaInteres: number | null }
@@ -109,7 +119,10 @@ export async function construirContexto(userId: string, now: Date = new Date()):
     usuario: {
       nombre: user.nombre.split(' ')[0],
       frecuencia: user.frecuenciaIngreso,
-      ingresoBase: r(user.ingresoBase),
+      ingresoBase: r(ingresoReferenciaMensual(user, promedioIngreso)),
+      tipoIngreso: user.tipoIngreso,
+      montosSueldo: montosDeSueldo(user, promedioIngreso),
+      descripcionIngreso: describirIngreso(user, promedioIngreso),
       disponible: r(user.cashBalance),
       ahorroTotal: r(ahorros.reduce((s, a) => s + Number(a.monto), 0)),
     },
@@ -135,7 +148,7 @@ export function contextoComoTexto(c: ContextoIA): string {
   const lineas: string[] = []
   lineas.push(`Hoy: ${c.hoy}`)
   if (c.plan) lineas.push(`Plan: ${c.plan.nombre}${c.plan.fuente === 'prueba' && c.plan.pruebaHasta ? ` (prueba gratis hasta ${c.plan.pruebaHasta})` : c.plan.fuente === 'pareja' ? ' (gracias al KIRI PRO de su pareja)' : ''} · límites: ${c.plan.limites}. Si una acción supera el plan, avísale y sugiérele Mi plan.`)
-  lineas.push(`Usuario: ${u.nombre} · cobra ${u.frecuencia} · sueldo base por periodo ${$(u.ingresoBase)} · disponible hoy ${$(u.disponible)} · ahorrado en total ${$(u.ahorroTotal)}`)
+  lineas.push(`Usuario: ${u.nombre} · ${u.descripcionIngreso} · disponible hoy ${$(u.disponible)} · ahorrado en total ${$(u.ahorroTotal)}`)
   lineas.push('\nCATEGORÍAS DE PRESUPUESTO (este periodo) [id | nombre | límite | gastado | disponible | estado]:')
   lineas.push(c.categorias.length ? c.categorias.map(x => `- ${x.id} | ${x.nombre} | ${$(x.limite)} | ${$(x.gastado)} | ${$(x.disponible)} | ${x.estado}`).join('\n') : '- (no tiene categorías)')
   lineas.push('\nDEUDAS ACTIVAS [id | nombre | tipo | saldo | cuota | tasa mensual | frecuencia | días de pago | pagada este periodo | atrasado]:')

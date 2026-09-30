@@ -48,7 +48,7 @@ async function main() {
   mock.listen(MOCK_PORT)
 
   const stamp = Date.now()
-  const u = await prisma.user.create({ data: { nombre: 'Sofía Coach', correo: `sofia-ia-${stamp}@local.test`, username: `sofiaia${stamp}`, passwordHash: 'x', onboardingDone: true, ingresoBase: 1500000, frecuenciaIngreso: 'quincenal', cashBalance: 3000000, walletLibre: 3000000 } })
+  const u = await prisma.user.create({ data: { nombre: 'Sofía Coach', correo: `sofia-ia-${stamp}@local.test`, username: `sofiaia${stamp}`, passwordHash: 'x', onboardingDone: true, ingresoBase: 3000000, frecuenciaIngreso: 'quincenal', cashBalance: 3000000, walletLibre: 3000000 } })
   const token = jwt.sign({ userId: u.id, correo: 'qa.me@kiri.test' }, process.env.JWT_SECRET!, { expiresIn: '1h' })
   const api = async (base: string, method: string, path: string, body?: unknown, t: string | null = token) => {
     const r = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', ...(t ? { Authorization: `Bearer ${t}` } : {}) }, body: body ? JSON.stringify(body) : undefined })
@@ -123,7 +123,7 @@ async function main() {
     const a = d.acciones as any[]
     const por = (t: string, n?: string) => a.find(x => x.tipo === t && (!n || x.nombre === n))
     check('Dictado: el prompt lleva la transcripción', JSON.stringify(ultimo?.contents).includes('vendí ropa en 120 lucas'))
-    check('Ingreso igual al sueldo base → salario; otro → extra', por('ingreso', 'Quincena')?.tipoIngreso === 'salario' && por('ingreso', 'Venta de ropa')?.tipoIngreso === 'extra')
+    check('Ingreso igual a su quincena ($3M al mes / 2) → salario; otro → extra', por('ingreso', 'Quincena')?.tipoIngreso === 'salario' && por('ingreso', 'Venta de ropa')?.tipoIngreso === 'extra')
     check('Me deben sin persona → pide completar "persona"', por('me_deben')?.faltan.includes('persona'))
     check('Abono de "juan" → se ubica el Me deben de Juan Pérez', por('abono_me_deben')?.meDebenId === juan.id && por('abono_me_deben')?.faltan.length === 0)
     check('Deuda nueva sin cuota → pide completar "cuota"', por('crear_deuda')?.faltan.includes('cuota'))

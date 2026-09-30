@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
+import { ingresoPromedioMensual, ingresoReferenciaMensual } from '../lib/ingresos.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -79,12 +80,13 @@ export interface HomeBudgetResult {
 export async function calculateHomeBudget(userId1: string, userId2: string): Promise<HomeBudgetResult> {
   // Obtener ingresos de ambos usuarios
   const [user1, user2] = await Promise.all([
-    prisma.user.findUnique({ where: { id: userId1 }, select: { ingresoBase: true, frecuenciaIngreso: true } }),
-    prisma.user.findUnique({ where: { id: userId2 }, select: { ingresoBase: true, frecuenciaIngreso: true } }),
+    prisma.user.findUnique({ where: { id: userId1 }, select: { ingresoBase: true, frecuenciaIngreso: true, tipoIngreso: true, ingresoQuincena1: true, ingresoQuincena2: true } }),
+    prisma.user.findUnique({ where: { id: userId2 }, select: { ingresoBase: true, frecuenciaIngreso: true, tipoIngreso: true, ingresoQuincena1: true, ingresoQuincena2: true } }),
   ])
 
-  const ingreso1 = Number(user1?.ingresoBase ?? 0)
-  const ingreso2 = Number(user2?.ingresoBase ?? 0)
+  // Ingreso mensual de referencia (con ingresos variables, la estimación o el promedio real)
+  const ingreso1 = user1 ? ingresoReferenciaMensual(user1, user1.tipoIngreso === 'variable' ? await ingresoPromedioMensual(userId1) : 0) : 0
+  const ingreso2 = user2 ? ingresoReferenciaMensual(user2, user2.tipoIngreso === 'variable' ? await ingresoPromedioMensual(userId2) : 0) : 0
   const ingresoTotal = ingreso1 + ingreso2
 
   if (ingresoTotal <= 0) {

@@ -97,6 +97,34 @@ export async function getAuthorizaAvatar(email: string): Promise<string | null |
   }
 }
 
+// ─── Nombre en partes ─────────────────────────────────────────────────────────
+// Authoriza guarda primer/segundo nombre y apellidos por separado. Antes Kiri
+// intentaba actualizarlos con PUT /api/users/:id sin token (siempre 401, en
+// silencio): el cambio de nombre nunca llegaba a Authoriza.
+
+export interface NombreAuthoriza { firstName: string; secondName: string | null; firstSurname: string; secondSurname: string | null }
+
+/** Nombre en partes vigente en Authoriza; null si no tiene, undefined si no respondió. */
+export async function getAuthorizaName(email: string): Promise<NombreAuthoriza | null | undefined> {
+  try {
+    const data = await callInternal<{ name: NombreAuthoriza | null }>('person-name', { email })
+    return data?.name ?? null
+  } catch {
+    return undefined
+  }
+}
+
+/** Guarda el nombre en partes en Authoriza (no bloquea: devuelve false si falló). */
+export async function setAuthorizaName(email: string, name: { firstName: string; secondName?: string | null; firstSurname: string; secondSurname?: string | null }): Promise<boolean> {
+  try {
+    await callInternal('set-person-name', { email, ...name })
+    return true
+  } catch (err) {
+    console.warn('[Authoriza] No se pudo guardar el nombre:', (err as Error).message)
+    return false
+  }
+}
+
 /**
  * Cuentas antiguas que existen solo en Kiri: crea su cuenta en Authoriza con
  * la contraseña dada (ya verificada y activa). Solo debe llamarse cuando la

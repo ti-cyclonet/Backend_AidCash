@@ -8,7 +8,8 @@ import { sendPushToUser, contarDispositivos } from '../lib/push.js'
 import { env } from '../config/env.js'
 import { recordOnboardingAction } from '../lib/missions.js'
 import { planPocketDeduction, planPocketCredit, planDeduccionEnCascada, WALLET_POCKET_FIELD, type WalletPocket } from '../lib/wallet.js'
-import { AuthorizaRejectedError, setAuthorizaAvatar } from '../lib/authoriza-auth.js'
+import { AuthorizaRejectedError, setAuthorizaAvatar, setAuthorizaName } from '../lib/authoriza-auth.js'
+import { unirNombre } from '../lib/ingresos.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -39,15 +40,20 @@ const updateProfileSchema = z.object({
   avatarUrl: z.string().max(700_000, 'La imagen es demasiado grande').nullable().optional(),
   ingresoBase: z.number().min(0).optional(),
   frecuenciaIngreso: z.enum(['mensual', 'quincenal']).optional(),
+  // fijo = sueldo; variable = sin sueldo fijo (independiente, ventas, comisiones)
+  tipoIngreso: z.enum(['fijo', 'variable']).optional(),
+  // Quincenal con montos distintos (null = las dos quincenas iguales)
+  ingresoQuincena1: z.number().min(0).nullable().optional(),
+  ingresoQuincena2: z.number().min(0).nullable().optional(),
   diasPago: z.array(z.number().min(1).max(31)).max(2).optional(),
   onboardingDone: z.boolean().optional(),
   metaAhorroGlobal: z.number().min(0).optional(),
   fondoEmergenciaActual: z.number().min(0).optional(),
-  // Authoriza fields (not saved in Kiri DB)
-  firstName: z.string().optional(),
-  secondName: z.string().optional(),
-  firstSurname: z.string().optional(),
-  secondSurname: z.string().optional(),
+  // Nombre en partes: se guardan en Kiri y se sincronizan con Authoriza
+  firstName: z.string().trim().max(60).optional(),
+  secondName: z.string().trim().max(60).optional(),
+  firstSurname: z.string().trim().max(60).optional(),
+  secondSurname: z.string().trim().max(60).optional(),
   documentType: z.string().optional(),
   documentNumber: z.string().optional(),
 })
@@ -128,7 +134,48 @@ router.post('/avatar', validate(avatarSchema), async (req: Request, res: Respons
 router.patch('/profile', validate(updateProfileSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { firstName, secondName, firstSurname, secondSurname, documentType, documentNumber, ...localData } = req.body
+    const { firstName, secondName, firstSurname, secondSurname, documentType: _dt, documentNumber: _dn, ...localData } = req.body
+
+    // Nombre en partes: se guardan tal cual y `nombre` se arma con ellas
+    if (firstName && firstSurname) {
+      Object.assign(localData, {
+        primerNombre: firstName, segundoNombre: secondName || null,
+        primerApellido: firstSurname, segundoApellido: secondSurname || null,
+        nombre: unirNombre({ primerNombre: firstName, segundoNombre: secondName, primerApellido: firstSurname, segundoApellido: secondSurname }),
+      })
+    }
+
+    // Cambió el nombre completo sin las partes (otra pantalla): las partes
+    // viejas ya no corresponden, se olvidan (se vuelven a pedir en Perfil)
+    if (typeof localData.nombre === 'string' && !(firstName && firstSurname)) {
+      const cur = await prisma.user.findUnique({ where: { id: userId }, select: { primerNombre: true, segundoNombre: true, primerApellido: true, segundoApellido: true } })
+      if (cur?.primerNombre && unirNombre({ primerNombre: cur.primerNombre, segundoNombre: cur.segundoNombre ?? '', primerApellido: cur.primerApellido ?? '', segundoApellido: cur.segundoApellido ?? '' }).replace(/\s+/g, ' ').toLowerCase() !== localData.nombre.replace(/\s+/g, ' ').trim().toLowerCase()) {
+        Object.assign(localData, { primerNombre: null, segundoNombre: null, primerApellido: null, segundoApellido: null })
+      }
+    }
+
+    // Forma de recibir ingresos: se deja coherente
+    if (localData.tipoIngreso !== undefined || localData.frecuenciaIngreso !== undefined || localData.ingresoQuincena1 !== undefined || localData.ingresoQuincena2 !== undefined) {
+      const actual = await prisma.user.findUnique({ where: { id: userId }, select: { tipoIngreso: true, frecuenciaIngreso: true } })
+      const tipo = localData.tipoIngreso ?? actual?.tipoIngreso ?? 'fijo'
+      const frec = tipo === 'variable' ? 'mensual' : (localData.frecuenciaIngreso ?? actual?.frecuenciaIngreso ?? 'mensual')
+      if (tipo === 'variable') {
+        // Sin sueldo fijo: sin quincenas ni días de pago; el mes calendario es su periodo
+        Object.assign(localData, { frecuenciaIngreso: 'mensual', ingresoQuincena1: null, ingresoQuincena2: null })
+        if (localData.diasPago === undefined) localData.diasPago = [1]
+      } else if (frec !== 'quincenal') {
+        Object.assign(localData, { ingresoQuincena1: null, ingresoQuincena2: null })
+      } else {
+        const q1 = localData.ingresoQuincena1, q2 = localData.ingresoQuincena2
+        if (q1 != null && q2 != null && q1 > 0 && q2 > 0) {
+          // Si son iguales no hace falta guardarlas aparte; el mes = la suma
+          localData.ingresoBase = q1 + q2
+          if (q1 === q2) Object.assign(localData, { ingresoQuincena1: null, ingresoQuincena2: null })
+        } else if (q1 !== undefined || q2 !== undefined) {
+          Object.assign(localData, { ingresoQuincena1: null, ingresoQuincena2: null })
+        }
+      }
+    }
 
     // Una foto nueva llega como data URL: se sube a Authoriza para que se vea en
     // todas las apps, y localmente se guarda solo la URL resultante.
@@ -153,8 +200,15 @@ router.patch('/profile', validate(updateProfileSchema), async (req: Request, res
         correo: true,
         username: true,
         avatarUrl: true,
+        primerNombre: true,
+        segundoNombre: true,
+        primerApellido: true,
+        segundoApellido: true,
         ingresoBase: true,
         frecuenciaIngreso: true,
+        tipoIngreso: true,
+        ingresoQuincena1: true,
+        ingresoQuincena2: true,
         onboardingDone: true,
         metaAhorroGlobal: true,
         saldoAhorroTotal: true,
@@ -165,54 +219,10 @@ router.patch('/profile', validate(updateProfileSchema), async (req: Request, res
       },
     })
 
-    // Sync with Authoriza (non-blocking)
-    if (firstName || firstSurname || documentType || documentNumber) {
-      const correo = localData.correo || user.correo
-      try {
-        const authorizaUrl = env.AUTHORIZA_API_URL || 'http://localhost:3000'
-        
-        // Check if user exists in Authoriza
-        const checkRes = await fetch(`${authorizaUrl}/api/auth/check-email`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: correo }),
-        })
-        const checkData = await checkRes.json() as any
-
-        if (checkData.exists && checkData.userId) {
-          // Update user in Authoriza via the users endpoint
-          await fetch(`${authorizaUrl}/api/users/${checkData.userId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              naturalPersonData: {
-                firstName: firstName || undefined,
-                secondName: secondName || undefined,
-                firstSurname: firstSurname || undefined,
-                secondSurname: secondSurname || undefined,
-              },
-              documentType: documentType && documentNumber ? {
-                strDocumentType: documentType,
-                strDocumentNumber: documentNumber,
-              } : undefined,
-            }),
-          })
-        } else if (firstName && firstSurname) {
-          // Create user in Authoriza if doesn't exist
-          await fetch(`${authorizaUrl}/api/users/full`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              user: { strUserName: correo, strStatus: 'ACTIVE' },
-              basicData: { strPersonType: 'N', strStatus: 'ACTIVE' },
-              documentType: { strDocumentType: documentType || 'CC', strDocumentNumber: documentNumber || '' },
-              naturalPersonData: { firstName, secondName, firstSurname, secondSurname },
-            }),
-          })
-        }
-      } catch (authErr) {
-        console.warn('[UpdateProfile] Failed to sync with Authoriza:', (authErr as Error).message)
-      }
+    // El nombre también vive en Authoriza (lo ven FactoNet y las demás apps).
+    // No bloquea: si Authoriza no responde, en Kiri ya quedó guardado.
+    if (firstName && firstSurname) {
+      await setAuthorizaName(user.correo, { firstName, secondName: secondName || null, firstSurname, secondSurname: secondSurname || null })
     }
 
     res.json({ user })

@@ -7,6 +7,7 @@ import { emitToUser, SOCKET_EVENTS } from '../lib/socket.js'
 import { checkLimit, requireFeature } from '../middleware/limit-enforcement.js'
 import { requireConnection } from '../lib/connections.js'
 import { planPocketDeduction } from '../lib/wallet.js'
+import { ingresoPromedioMensual, ingresoReferenciaMensual } from '../lib/ingresos.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -468,16 +469,18 @@ router.get('/split-calculator', async (req: Request, res: Response): Promise<voi
     }
 
     const [userA, userB] = await Promise.all([
-      prisma.user.findUnique({ where: { id: userId }, select: { nombre: true, ingresoBase: true } }),
-      prisma.user.findUnique({ where: { id: partnerId }, select: { nombre: true, ingresoBase: true } }),
+      prisma.user.findUnique({ where: { id: userId }, select: { nombre: true, ingresoBase: true, frecuenciaIngreso: true, tipoIngreso: true, ingresoQuincena1: true, ingresoQuincena2: true } }),
+      prisma.user.findUnique({ where: { id: partnerId }, select: { nombre: true, ingresoBase: true, frecuenciaIngreso: true, tipoIngreso: true, ingresoQuincena1: true, ingresoQuincena2: true } }),
     ])
+    const refA = userA ? ingresoReferenciaMensual(userA, userA.tipoIngreso === 'variable' ? await ingresoPromedioMensual(userId) : 0) : 0
+    const refB = userB ? ingresoReferenciaMensual(userB, userB.tipoIngreso === 'variable' ? await ingresoPromedioMensual(partnerId) : 0) : 0
 
-    const split = calculateProportionalSplit(gasto, Number(userA?.ingresoBase ?? 0), Number(userB?.ingresoBase ?? 0))
+    const split = calculateProportionalSplit(gasto, refA, refB)
 
     res.json({
       gasto,
-      userA: { id: userId, nombre: userA?.nombre, ingreso: Number(userA?.ingresoBase), monto: split.montoA, pct: split.pctA },
-      userB: { id: partnerId, nombre: userB?.nombre, ingreso: Number(userB?.ingresoBase), monto: split.montoB, pct: split.pctB },
+      userA: { id: userId, nombre: userA?.nombre, ingreso: refA, monto: split.montoA, pct: split.pctA },
+      userB: { id: partnerId, nombre: userB?.nombre, ingreso: refB, monto: split.montoB, pct: split.pctB },
     })
   } catch (error) {
     console.error('[SplitCalculator]', error)
