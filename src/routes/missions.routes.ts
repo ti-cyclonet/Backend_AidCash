@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express'
 import { authMiddleware } from '../middleware/auth.js'
 import { getMissionsForUser, getOnboardingMissionsForUser, getReferralMissionsForUser, claimMission, MissionKey } from '../lib/missions.js'
+import { idiomaDePeticion, traducir } from '../lib/i18n.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -15,7 +16,11 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
       getOnboardingMissionsForUser(userId),
       getReferralMissionsForUser(userId),
     ])
-    res.json({ daily, weekly, onboarding, invitaciones })
+    // Títulos y descripciones en el idioma de la app
+    const idioma = idiomaDePeticion(req)
+    const tx = <T extends { title: string; desc: string }>(m: T): T => ({ ...m, title: traducir(m.title, idioma), desc: traducir(m.desc, idioma) })
+    const lista = <T extends { title: string; desc: string }>(l: T[] | undefined) => Array.isArray(l) ? l.map(tx) : l
+    res.json({ daily: lista(daily), weekly: weekly ? tx(weekly) : weekly, onboarding: lista(onboarding), invitaciones: invitaciones ? { ...invitaciones, misiones: lista(invitaciones.misiones) } : invitaciones })
   } catch (error) {
     console.error('[GetMissions]', error)
     res.status(500).json({ error: 'Error al obtener misiones' })

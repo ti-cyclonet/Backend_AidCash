@@ -14,6 +14,7 @@ import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 import type { AuthPayload } from '../middleware/auth.js'
 import type { Prisma } from '@prisma/client'
+import { idiomaDe, traducirCampos } from './i18n.js'
 
 let io: SocketServer | null = null
 
@@ -155,17 +156,22 @@ const PERSISTED_EVENTS = new Set<string>([
 /** Emite un evento a la sala privada de un usuario específico, y si es de los
  * que la campana de notificaciones debe recordar, lo guarda también. */
 export function emitToUser(userId: string, event: string, data: unknown): void {
-  try {
-    getIO().to(userId).emit(event, data)
-  } catch {
-    // Socket no inicializado en pruebas o SSR — silenciar
-  }
-
-  if (PERSISTED_EVENTS.has(event)) {
-    prisma.notification
-      .create({ data: { userId, event, data: (data ?? {}) as Prisma.InputJsonValue } })
-      .catch((error) => console.error('[Notification] Error al guardar:', error))
-  }
+  // Los textos (message, title, detalle…) van en el idioma de la cuenta
+  idiomaDe(userId)
+    .catch(() => 'es' as const)
+    .then(idioma => {
+      const datos = traducirCampos(data, idioma)
+      try {
+        getIO().to(userId).emit(event, datos)
+      } catch {
+        // Socket no inicializado en pruebas o SSR — silenciar
+      }
+      if (PERSISTED_EVENTS.has(event)) {
+        prisma.notification
+          .create({ data: { userId, event, data: (datos ?? {}) as Prisma.InputJsonValue } })
+          .catch((error) => console.error('[Notification] Error al guardar:', error))
+      }
+    })
 }
 
 /** Cierra limpiamente todas las conexiones Socket.io */

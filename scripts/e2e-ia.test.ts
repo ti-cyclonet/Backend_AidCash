@@ -160,14 +160,20 @@ async function main() {
       { body: { respuesta: 'Hola desde el respaldo', acciones: [], sugerencias: [] } },
     ]
     const e5 = await ia('POST', '/coach', { mensaje: 'hola' })
-    check('Modelo retirado (404) → reintenta solo con gemini-flash-latest', e5.status === 200 && e5.respuesta === 'Hola desde el respaldo' && ultimaUrl.includes('gemini-flash-latest'), ultimaUrl)
+    check('Modelo retirado (404) → reintenta con el primer respaldo (gemini-3.5-flash)', e5.status === 200 && e5.respuesta === 'Hola desde el respaldo' && ultimaUrl.includes('/gemini-3.5-flash:'), ultimaUrl)
     siguiente = [
       { status: 503, body: { error: { code: 503, status: 'UNAVAILABLE' } } },
       { status: 503, body: { error: { code: 503, status: 'UNAVAILABLE' } } },
       { body: { respuesta: 'Respondió el respaldo', acciones: [], sugerencias: [] } },
     ]
     const e6 = await ia('POST', '/coach', { mensaje: 'hola' })
-    check('Modelo saturado (503 ×2) → prueba el modelo de respaldo', e6.status === 200 && e6.respuesta === 'Respondió el respaldo' && ultimaUrl.includes('gemini-flash-latest'))
+    check('Modelo saturado (503 ×2) → sigue la cadena hasta gemini-flash-lite-latest', e6.status === 200 && e6.respuesta === 'Respondió el respaldo' && ultimaUrl.includes('gemini-flash-lite-latest'), ultimaUrl)
+    siguiente = [
+      { status: 429, body: { error: { status: 'RESOURCE_EXHAUSTED' } } },
+      { body: { respuesta: 'Cuota de otro modelo', acciones: [], sugerencias: [] } },
+    ]
+    const e6b = await ia('POST', '/coach', { mensaje: 'hola' })
+    check('Cuota agotada solo en el principal (429) → responde el respaldo', e6b.status === 200 && e6b.respuesta === 'Cuota de otro modelo')
     siguiente = { status: 503, body: { error: { code: 503, status: 'UNAVAILABLE' } } }
     const e7 = await ia('POST', '/coach', { mensaje: 'hola' })
     check('Todo saturado → mensaje "mucha demanda"', e7.status === 503 && e7.codigo === 'saturada')

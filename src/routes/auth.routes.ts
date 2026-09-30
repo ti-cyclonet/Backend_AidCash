@@ -5,14 +5,14 @@ import jwt from 'jsonwebtoken'
 import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { aplicarInvitacionAlRegistro, acreditarReferido } from '../lib/invitaciones.js'
-import { DIAS_PRUEBA_REGISTRO } from '../lib/planes.js'
 import { env } from '../config/env.js'
 import { validate } from '../middleware/validate.js'
-import { authMiddleware, AuthPayload } from '../middleware/auth.js'
+import { authMiddleware, AuthPayload, olvidarSesion } from '../middleware/auth.js'
 import { generateUniqueUsername } from '../lib/username.js'
 import { sendMail } from '../lib/mail.js'
 import crypto from 'crypto'
 import { ingresoPromedioMensual, partirNombre, unirNombre } from '../lib/ingresos.js'
+import { normalizarIdioma } from '../lib/i18n.js'
 import {
   AUTHORIZA_MANAGED_PASSWORD,
   AuthorizaRejectedError,
@@ -115,8 +115,8 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
         metaAhorroGlobal: 5000,
         saldoAhorroTotal: 0,
         fondoEmergenciaActual: 0,
-        // 14 días de KIRI PLUS para conocer todo (lib/planes.ts)
-        pruebaPlusHasta: new Date(Date.now() + DIAS_PRUEBA_REGISTRO * 86400000),
+        // Sin prueba de PLUS al registrarse: se empieza en KIRI FREE. Quien
+        // llega invitado tiene descuento en su primer mes (lib/planes.ts).
         // Aceptó los Términos y la autorización de datos vigentes (Authoriza guarda la prueba)
         ...consentLocalData(),
       },
@@ -239,6 +239,7 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
     // 2. Estado de acceso (Authoriza manda)
     if (!cred.allowed) {
       await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
+      olvidarSesion(user.id)
       const messages: Record<string, string> = {
         NOT_VERIFIED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
         UNCONFIRMED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
@@ -256,6 +257,7 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
     }
     if (user.isActive === false) {
       await prisma.user.update({ where: { id: user.id }, data: { isActive: true } }).catch(() => {})
+      olvidarSesion(user.id)
       user.isActive = true
       // Primera vez que entra tras verificar el correo: si llegó invitado, ahora
       // sí cuenta para la misión de quien lo invitó (solo la primera sesión).
@@ -401,6 +403,7 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
         tipoIngreso: true,
         ingresoQuincena1: true,
         ingresoQuincena2: true,
+        idioma: true,
         diasPago: true,
         onboardingDone: true,
         metaAhorroGlobal: true,
@@ -541,14 +544,22 @@ router.post('/forgot-password', validate(forgotPasswordSchema), async (req: Requ
     })
 
     const resetLink = `${env.FRONTEND_URL.split(',')[0].trim()}/reset-password?token=${resetToken}&email=${encodeURIComponent(correo)}`
-    const html = `
+    // En el idioma de la cuenta (o el de la pantalla desde donde lo pidió)
+    const enIngles = normalizarIdioma(user.idioma === 'en' ? 'en' : req.headers['x-kiri-idioma']) === 'en'
+    const html = enIngles ? `
+      <h2>Reset your password — Kiri Finance</h2>
+      <p>Hi${user.nombre ? ` ${user.nombre}` : ''},</p>
+      <p>We received a request to reset your account password. Click the link below to choose a new one:</p>
+      <p><a href="${resetLink}">${resetLink}</a></p>
+      <p>This link expires in 1 hour. If you didn't request it, you can ignore this email — your password will stay the same.</p>
+    ` : `
       <h2>Restablecer tu contraseña — Kiri Finance</h2>
       <p>Hola${user.nombre ? ` ${user.nombre}` : ''},</p>
       <p>Recibimos una solicitud para restablecer la contraseña de tu cuenta. Haz clic en el siguiente enlace para elegir una nueva:</p>
       <p><a href="${resetLink}">${resetLink}</a></p>
       <p>Este enlace vence en 1 hora. Si no fuiste tú quien lo solicitó, puedes ignorar este correo — tu contraseña seguirá siendo la misma.</p>
     `
-    const sent = await sendMail({ to: correo, subject: 'Restablece tu contraseña — Kiri Finance', html })
+    const sent = await sendMail({ to: correo, subject: enIngles ? 'Reset your password — Kiri Finance' : 'Restablece tu contraseña — Kiri Finance', html })
     if (!sent) console.warn(`[ForgotPassword] No se pudo enviar el correo a ${correo} (SMTP no configurado o falló el envío)`)
 
     res.json({ message: 'Si el correo está registrado, recibirás un enlace para restablecer tu contraseña.' })
@@ -632,6 +643,7 @@ router.post('/reset-password', validate(resetPasswordSchema), async (req: Reques
       // sesión robada no sigan sirviendo después del reset.
       prisma.refreshToken.deleteMany({ where: { userId: user.id } }),
     ])
+    olvidarSesion(user.id)
 
     res.json({ message: 'Contraseña actualizada. Ya puedes iniciar sesión.' })
   } catch (error) {

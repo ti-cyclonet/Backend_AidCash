@@ -10,6 +10,7 @@ import { recordOnboardingAction } from '../lib/missions.js'
 import { planPocketDeduction, planPocketCredit, planDeduccionEnCascada, WALLET_POCKET_FIELD, type WalletPocket } from '../lib/wallet.js'
 import { AuthorizaRejectedError, setAuthorizaAvatar, setAuthorizaName } from '../lib/authoriza-auth.js'
 import { unirNombre } from '../lib/ingresos.js'
+import { olvidarIdioma } from '../lib/i18n.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -34,14 +35,19 @@ const searchLimiter = rateLimit({
 // ─── Schema ───────────────────────────────────────────────────────────────────
 
 const updateProfileSchema = z.object({
-  nombre: z.string().min(2).optional(),
-  correo: z.string().email().optional(),
+  nombre: z.string().trim().min(2).max(160).optional(),
+  // El correo NO se cambia desde Kiri: es con el que se entra por Authoriza y
+  // del que salen el plan y el contrato. Antes se podía poner cualquiera (ej.
+  // uno de la lista de acceso completo, o el de alguien con KIRI PRO) y quedar
+  // con su plan. Si una app vieja lo manda, zod lo descarta sin error.
   username: z.string().min(3).max(20).regex(/^[a-z0-9_]+$/, 'Solo minúsculas, números y guión bajo').optional(),
   avatarUrl: z.string().max(700_000, 'La imagen es demasiado grande').nullable().optional(),
   ingresoBase: z.number().min(0).optional(),
   frecuenciaIngreso: z.enum(['mensual', 'quincenal']).optional(),
   // fijo = sueldo; variable = sin sueldo fijo (independiente, ventas, comisiones)
   tipoIngreso: z.enum(['fijo', 'variable']).optional(),
+  // Idioma de la app (avisos, push, errores y Kiri Coach también)
+  idioma: z.enum(['es', 'en']).optional(),
   // Quincenal con montos distintos (null = las dos quincenas iguales)
   ingresoQuincena1: z.number().min(0).nullable().optional(),
   ingresoQuincena2: z.number().min(0).nullable().optional(),
@@ -209,6 +215,7 @@ router.patch('/profile', validate(updateProfileSchema), async (req: Request, res
         tipoIngreso: true,
         ingresoQuincena1: true,
         ingresoQuincena2: true,
+        idioma: true,
         onboardingDone: true,
         metaAhorroGlobal: true,
         saldoAhorroTotal: true,
@@ -218,6 +225,8 @@ router.patch('/profile', validate(updateProfileSchema), async (req: Request, res
         cashBalance: true,
       },
     })
+
+    if (localData.idioma !== undefined) olvidarIdioma(userId)
 
     // El nombre también vive en Authoriza (lo ven FactoNet y las demás apps).
     // No bloquea: si Authoriza no responde, en Kiri ya quedó guardado.
@@ -419,9 +428,11 @@ router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async
       }),
     ])
 
-    if (tipo === 'salario') {
-      await recordOnboardingAction(userId, 'registrar_ingreso_real')
-    }
+    // Cualquier ingreso a la billetera cumple "Registra tu sueldo real" (la
+    // misión dice "Registra un ingreso en Billetera"). Antes solo contaba
+    // 'salario': quien registraba su plata como extra, por dictado o desde el
+    // aviso de saldo insuficiente nunca la veía completarse.
+    await recordOnboardingAction(userId, 'registrar_ingreso_real')
 
     res.status(201).json({
       record: { ...record, monto: Number(record.monto) },

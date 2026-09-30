@@ -48,7 +48,7 @@ router.use(authMiddleware)
 // ─── Schemas de validación ────────────────────────────────────────────────────
 
 const createCategorySchema = z.object({
-  nombre: z.string().min(1, 'El nombre es requerido').max(50),
+  nombre: z.string().trim().min(1, 'El nombre es requerido').max(50),
   icono: z.string().default('tag'),
   color: z.string().default('#6366F1'),
   tipo: z.enum(['gasto', 'ingreso', 'ahorro']).default('gasto'),
@@ -57,7 +57,7 @@ const createCategorySchema = z.object({
 })
 
 const updateCategorySchema = z.object({
-  nombre: z.string().min(1).max(50).optional(),
+  nombre: z.string().trim().min(1).max(50).optional(),
   icono: z.string().optional(),
   color: z.string().optional(),
   tipo: z.enum(['gasto', 'ingreso', 'ahorro']).optional(),

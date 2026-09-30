@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { nombreRequerido, fechaDeCorte } from '../lib/validacion.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
 import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
@@ -24,12 +25,12 @@ router.use(authMiddleware)
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
 const createSchema = z.object({
-  nombre: z.string().min(1, 'El nombre es requerido'),
+  nombre: nombreRequerido,
   monto: z.number().min(0),
-  fechaCorte: z.string().min(1),
+  fechaCorte: fechaDeCorte,
   categoria: z.enum(['vivienda', 'servicios', 'internet', 'transporte', 'educacion', 'salud', 'suscripciones', 'otro']).optional(),
   frecuencia: z.enum(['mensual', 'quincenal', 'semanal', 'anual']).optional(),
-  metodoPago: z.string().optional(),
+  metodoPago: z.string().max(60).optional(),
   renovacionAuto: z.boolean().optional(),
   pagoAutomatico: z.boolean().optional(),
   // Si el usuario confirma que la cuota de ESTE periodo ya la pagó (por fuera
@@ -48,12 +49,12 @@ const createSchema = z.object({
 })
 
 const updateSchema = z.object({
-  nombre: z.string().min(1).optional(),
+  nombre: nombreRequerido.optional(),
   monto: z.number().min(0).optional(),
-  fechaCorte: z.string().optional(),
+  fechaCorte: fechaDeCorte.optional(),
   categoria: z.enum(['vivienda', 'servicios', 'internet', 'transporte', 'educacion', 'salud', 'suscripciones', 'otro']).optional(),
   frecuencia: z.enum(['mensual', 'quincenal', 'semanal', 'anual']).optional(),
-  metodoPago: z.string().nullable().optional(),
+  metodoPago: z.string().max(60).nullable().optional(),
   renovacionAuto: z.boolean().optional(),
   tarjetaVinculadaId: z.string().nullable().optional(),
   pagoAutomatico: z.boolean().optional(),

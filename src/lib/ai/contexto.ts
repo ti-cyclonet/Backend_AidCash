@@ -31,8 +31,8 @@ export interface ContextoIA {
     descripcionIngreso: string
   }
   categorias: { id: string; nombre: string; limite: number; gastado: number; disponible: number; estado: string }[]
-  deudas: { id: string; nombre: string; tipo: string; saldo: number; cuota: number; tasaMensual: number | null; frecuencia: string; diasPago: string; pagadaEstePeriodo: boolean; atrasado: number }[]
-  fijos: { id: string; nombre: string; monto: number; frecuencia: string; pagadoEstePeriodo: boolean }[]
+  deudas: { id: string; nombre: string; tipo: string; saldo: number; cuota: number; tasaMensual: number | null; frecuencia: string; diasPago: string; pagadaEstePeriodo: boolean; atrasado: number; empiezaProximoPeriodo?: boolean }[]
+  fijos: { id: string; nombre: string; monto: number; frecuencia: string; pagadoEstePeriodo: boolean; empiezaProximoPeriodo?: boolean }[]
   bolsillos: { id: string; nombre: string; meta: number; actual: number }[]
   meDeben: { id: string; persona: string; saldo: number; fechaCompromiso: string | null }[]
   hogar: { pareja: string; periodo: string; categorias: { id: string; nombre: string; limite: number; gastado: number; disponible: number }[] } | null
@@ -73,11 +73,11 @@ export async function construirContexto(userId: string, now: Date = new Date()):
   const promedioIngreso = user.tipoIngreso === 'variable' ? await ingresoPromedioMensual(userId, now) : 0
   const ctxDeudas = await cargarContextoDeudas(debtsRaw)
   const deudas = debtsRaw.map(d => {
-    const s = serializarDeuda(d, ctxDeudas) as { cuotaPeriodo: number; pagadoEstePeriodo: boolean; montoAtrasado: number; tasaInteres: number | null }
+    const s = serializarDeuda(d, ctxDeudas) as { cuotaPeriodo: number; pagadoEstePeriodo: boolean; montoAtrasado: number; tasaInteres: number | null; pendienteProximoPeriodo?: boolean }
     return {
       id: d.id, nombre: d.nombre, tipo: d.tipoDeuda === 'TARJETA_CREDITO' ? 'tarjeta' : 'préstamo',
       saldo: r(d.saldoRestante), cuota: r(s.cuotaPeriodo), tasaMensual: s.tasaInteres,
-      frecuencia: d.frecuenciaPago, diasPago: d.diasPago, pagadaEstePeriodo: s.pagadoEstePeriodo, atrasado: r(s.montoAtrasado),
+      frecuencia: d.frecuenciaPago, diasPago: d.diasPago, pagadaEstePeriodo: s.pagadoEstePeriodo, atrasado: r(s.montoAtrasado), empiezaProximoPeriodo: !!s.pendienteProximoPeriodo,
     }
   })
 
@@ -87,7 +87,7 @@ export async function construirContexto(userId: string, now: Date = new Date()):
   const fijos = fijosRaw.map(f => {
     const periodo = fixedPeriodo(f, now)
     const pagado = pagosFijosPeriodo.filter(p => p.fixedExpenseId === f.id && p.periodo === periodo).reduce((s, p) => s + Number(p.montoPagado), 0)
-    return { id: f.id, nombre: f.nombre, monto: r(f.monto), frecuencia: f.frecuencia, pagadoEstePeriodo: pagado >= getMontoPorPeriodo(Number(f.monto), f.frecuencia, now) }
+    return { id: f.id, nombre: f.nombre, monto: r(f.monto), frecuencia: f.frecuencia, pagadoEstePeriodo: pagado >= getMontoPorPeriodo(Number(f.monto), f.frecuencia, now), empiezaProximoPeriodo: !!f.activoDesdePeriodo && f.activoDesdePeriodo > periodo }
   })
 
   // Movimientos recientes (para "¿por qué bajó mi saldo?", "explícame este movimiento")
@@ -147,7 +147,7 @@ export function contextoComoTexto(c: ContextoIA): string {
   const u = c.usuario
   const lineas: string[] = []
   lineas.push(`Hoy: ${c.hoy}`)
-  if (c.plan) lineas.push(`Plan: ${c.plan.nombre}${c.plan.fuente === 'prueba' && c.plan.pruebaHasta ? ` (prueba gratis hasta ${c.plan.pruebaHasta})` : c.plan.fuente === 'pareja' ? ' (gracias al KIRI PRO de su pareja)' : ''} · límites: ${c.plan.limites}. Si una acción supera el plan, avísale y sugiérele Mi plan.`)
+  if (c.plan) lineas.push(`Plan: ${c.plan.nombre}${c.plan.fuente === 'prueba' && c.plan.pruebaHasta ? ` (días de PLUS ganados por invitar amigos, hasta ${c.plan.pruebaHasta})` : ''} · límites: ${c.plan.limites}. Si una acción supera el plan, avísale y sugiérele Mi plan.`)
   lineas.push(`Usuario: ${u.nombre} · ${u.descripcionIngreso} · disponible hoy ${$(u.disponible)} · ahorrado en total ${$(u.ahorroTotal)}`)
   lineas.push('\nCATEGORÍAS DE PRESUPUESTO (este periodo) [id | nombre | límite | gastado | disponible | estado]:')
   lineas.push(c.categorias.length ? c.categorias.map(x => `- ${x.id} | ${x.nombre} | ${$(x.limite)} | ${$(x.gastado)} | ${$(x.disponible)} | ${x.estado}`).join('\n') : '- (no tiene categorías)')
@@ -155,6 +155,16 @@ export function contextoComoTexto(c: ContextoIA): string {
   lineas.push(c.deudas.length ? c.deudas.map(d => `- ${d.id} | ${d.nombre} | ${d.tipo} | ${$(d.saldo)} | ${$(d.cuota)} | ${d.tasaMensual != null ? d.tasaMensual + '%' : 'sin tasa'} | ${d.frecuencia} | ${d.diasPago} | ${d.pagadaEstePeriodo ? 'sí' : 'no'} | ${$(d.atrasado)}`).join('\n') : '- (sin deudas)')
   lineas.push('\nGASTOS FIJOS [id | nombre | monto | frecuencia | pagado este periodo]:')
   lineas.push(c.fijos.length ? c.fijos.map(f => `- ${f.id} | ${f.nombre} | ${$(f.monto)} | ${f.frecuencia} | ${f.pagadoEstePeriodo ? 'sí' : 'no'}`).join('\n') : '- (sin gastos fijos)')
+  // Totales ya hechos: probando con la IA real, el modelo sumaba mal cifras
+  // grandes ("debes $8.047.700" con un crédito de $4.800 millones) y daba por
+  // pendiente una tarjeta ya pagada. Usar SIEMPRE estos totales, no recalcular.
+  const pendientes = [
+    ...c.deudas.filter(d => !d.pagadaEstePeriodo && !d.empiezaProximoPeriodo).map(d => ({ n: d.nombre, v: d.cuota })),
+    ...c.fijos.filter(f => !f.pagadoEstePeriodo && !f.empiezaProximoPeriodo).map(f => ({ n: f.nombre, v: f.monto })),
+  ]
+  const nuevas = [...c.deudas.filter(d => d.empiezaProximoPeriodo), ...c.fijos.filter(f => f.empiezaProximoPeriodo)].map(x => x.nombre)
+  const pagadas = [...c.deudas.filter(d => d.pagadaEstePeriodo).map(d => d.nombre), ...c.fijos.filter(f => f.pagadoEstePeriodo).map(f => f.nombre)]
+  lineas.push(`\nTOTALES (ya calculados, úsalos tal cual): saldo total de todas las deudas ${$(c.deudas.reduce((s, d) => s + d.saldo, 0))} · obligaciones YA PAGADAS este periodo: ${pagadas.join(', ') || 'ninguna'} · PENDIENTES por pagar este periodo: ${pendientes.map(p => `${p.n} ${$(p.v)}`).join(', ') || 'ninguna'} (total ${$(pendientes.reduce((s, p) => s + p.v, 0))})${nuevas.length ? ` · NUEVAS, empiezan a cobrarse el próximo periodo (no están pendientes ni vencidas): ${nuevas.join(', ')}` : ''}`)
   lineas.push('\nBOLSILLOS DE AHORRO [id | nombre | meta | ahorrado]:')
   lineas.push(c.bolsillos.length ? c.bolsillos.map(b => `- ${b.id} | ${b.nombre} | ${$(b.meta)} | ${$(b.actual)}`).join('\n') : '- (sin bolsillos)')
   lineas.push('\nME DEBEN [id | persona | saldo pendiente | fecha prometida]:')
