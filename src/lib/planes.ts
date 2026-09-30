@@ -6,8 +6,7 @@
  * La fuente de verdad de lo que incluye cada paquete es Authoriza
  * (Backend_Authoriza/src/seeds/kiri-plan-matrix.ts). Esta es la COPIA que usa
  * Kiri para:
- *   - la prueba de 14 días de PLUS al registrarse (y los 7 días por invitar),
- *   - el PLUS que recibe la pareja de un usuario PRO,
+ *   - los días de PLUS ganados por invitar (10 por amigo que se suscribe, hasta 3),
  *   - cuando Authoriza no responde (se usa lo último conocido o FREE),
  *   - completar variables que un paquete viejo aún no tenga.
  * Si cambias un valor en Authoriza, cámbialo aquí también.
@@ -68,7 +67,8 @@ export const MATRIZ: Record<string, VarDef> = {
 export const NOMBRE_PLAN: Record<Tier, string> = { FREE: 'KIRI FREE', PLUS: 'KIRI PLUS', PRO: 'KIRI PRO' }
 const ORDEN: Tier[] = ['FREE', 'PLUS', 'PRO']
 
-export type FuentePlan = 'contrato' | 'gratis' | 'prueba' | 'pareja' | 'acceso' | 'sin_conexion'
+/** 'prueba' = días de PLUS ganados por invitar (ya no hay prueba al registrarse ni PLUS por la pareja) */
+export type FuentePlan = 'contrato' | 'gratis' | 'prueba' | 'acceso' | 'sin_conexion'
 
 export interface PlanResuelto {
   tier: Tier
@@ -78,10 +78,8 @@ export interface PlanResuelto {
   limites: Record<string, { displayName: string; maxValue: number }>
   contractId?: string
   isBillable?: boolean
-  /** Hasta cuándo dura la prueba de PLUS (si aplica) */
+  /** Hasta cuándo duran los días de PLUS ganados por invitar (si aplica) */
   pruebaHasta?: string | null
-  /** Nombre de la pareja PRO que le da PLUS (si aplica) */
-  parejaNombre?: string | null
 }
 
 /** "KIRI PRO", "CYCLON PLUS" (paquete maestro = PRO), "KIRI PLUS", resto FREE */
@@ -187,7 +185,7 @@ async function planPropio(user: { id: string; correo: string; pruebaPlusHasta: D
 async function parejaDe(userId: string) {
   const conn = await prisma.connection.findFirst({
     where: { status: 'ACCEPTED', role: 'PARTNER', OR: [{ requesterId: userId }, { addresseeId: userId }] },
-    include: { requester: { select: { id: true, nombre: true, correo: true, pruebaPlusHasta: true } }, addressee: { select: { id: true, nombre: true, correo: true, pruebaPlusHasta: true } } },
+    include: { requester: { select: { id: true, nombre: true } }, addressee: { select: { id: true, nombre: true } } },
   })
   if (!conn) return null
   return conn.requesterId === userId ? conn.addressee : conn.requester
@@ -202,15 +200,19 @@ export async function resolverPlan(userId: string): Promise<PlanResuelto> {
 
   let plan = await planPropio(user)
 
-  // Solo se "sube" a quien está en FREE: nunca se baja un plan pago
+  // Solo se "sube" a quien está en FREE: nunca se baja un plan pago. Ya no hay
+  // PLUS gratis para la pareja de un PRO: la única vía son los días ganados
+  // por invitar amigos que se suscriben (pruebaPlusHasta).
   if (plan.tier === 'FREE' && plan.fuente !== 'sin_conexion') {
-    const pareja = await parejaDe(userId)
-    const planPareja = pareja ? await planPropio(pareja) : null
-    if (pareja && planPareja?.tier === 'PRO') {
-      plan = { ...plan, tier: 'PLUS', ...planDeMatriz('PLUS'), planName: 'KIRI PLUS', fuente: 'pareja', parejaNombre: pareja.nombre.split(' ')[0] }
-    } else if (user.pruebaPlusHasta && user.pruebaPlusHasta > new Date()) {
+    if (user.pruebaPlusHasta && user.pruebaPlusHasta > new Date()) {
       plan = { ...plan, tier: 'PLUS', ...planDeMatriz('PLUS'), planName: 'KIRI PLUS', fuente: 'prueba', pruebaHasta: user.pruebaPlusHasta.toISOString() }
     }
+  } else if (plan.fuente === 'sin_conexion' && user.pruebaPlusHasta && user.pruebaPlusHasta > new Date()) {
+    // Sin Authoriza la prueba de PLUS igual vale (vive en Kiri): antes se le
+    // mostraba KIRI FREE y se le escondían las funciones PLUS. Se conserva
+    // `sin_conexion` para que los límites sigan sin bloquear a nadie (un PRO
+    // que paga no queda recortado a PLUS por una caída de Authoriza).
+    plan = { ...plan, tier: 'PLUS', ...planDeMatriz('PLUS'), planName: 'KIRI PLUS', pruebaHasta: user.pruebaPlusHasta.toISOString() }
   }
 
   cachePlan.set(userId, { plan, expira: Date.now() + 60 * 1000 })
@@ -235,8 +237,19 @@ export function inicioHistorial(meses: number, now: Date = new Date()): Date | n
   return new Date(now.getFullYear(), now.getMonth() - Math.max(0, meses - 1), 1)
 }
 
-export const DIAS_PRUEBA_REGISTRO = 14
-export const DIAS_PRUEBA_POR_INVITADO = 7
+// ─── Invitaciones ────────────────────────────────────────────────────────────
+// El amigo invitado: 50% en su primer mes de PLUS o 30% en PRO (solo pago
+// mensual; se aplica en la primera factura, en Authoriza). Quien invitó: 10
+// días de PLUS cuando ese amigo paga su primera factura, hasta 3 amigos.
+export const DESCUENTO_INVITADO: Record<'PLUS' | 'PRO', number> = { PLUS: 50, PRO: 30 }
+export const DIAS_PLUS_POR_REFERIDO = 10
+export const MAX_REFERIDOS_PREMIADOS = 3
+
+/** Descuento de invitado que aún puede usar (null si no llegó invitado o ya lo usó). */
+export async function descuentoInvitadoDisponible(userId: string): Promise<typeof DESCUENTO_INVITADO | null> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { invitedById: true, descuentoReferidoUsado: true, primerPagoEn: true } })
+  return u?.invitedById && !u.descuentoReferidoUsado && !u.primerPagoEn ? DESCUENTO_INVITADO : null
+}
 
 // ─── Insignias exclusivas de KIRI PRO ────────────────────────────────────────
 export const INSIGNIAS_PRO = ['pro_jardin_dorado', 'pro_hogar_equipo', 'pro_estratega'] as const

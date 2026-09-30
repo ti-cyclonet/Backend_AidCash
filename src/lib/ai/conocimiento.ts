@@ -166,6 +166,8 @@ con sus días de pago; se cambia en Perfil).
 ## PERFIL — ruta /perfil
 - Foto (se guarda en la cuenta), datos, frecuencia de ingreso, "Notificaciones del celular"
   (Activar / Probar), Guía de Kiri (volver a ver las guías), plan y cerrar sesión.
+- Idioma (Perfil → Aplicación): Español o English. Cambia toda la app, los avisos, las
+  notificaciones al celular y Kiri Coach; se guarda en la cuenta (sirve en cualquier dispositivo).
 
 ## MI PLAN Y FACTONET — ruta /mi-plan (desde Perfil o Inicio)
 - Muestra el plan actual y los planes disponibles con su precio y lo que incluyen. Para cambiarse
@@ -185,17 +187,21 @@ con sus días de pago; se cambia en Perfil).
   2 ingresos extra, 2 conexiones; proyecciones hasta 3 meses; historial de 3 meses; IA al mes:
   10 mensajes con Kiri Coach, 10 dictados, 3 escaneos. Sin préstamos entre usuarios, deudas ni
   bolsillos compartidos.
-- KIRI PLUS ($12.900/mes o $119.000/año): 20 categorías, 10 bolsillos, deudas, gastos fijos,
+- KIRI PLUS ($14.900/mes o $139.000/año): 20 categorías, 10 bolsillos, deudas, gastos fijos,
   "me deben", ingresos extra ilimitados, 20 conexiones; préstamos y deudas compartidas, 3 bolsillos
   compartidos; proyecciones de 3 a 24 meses con "recortar gastos hormiga"; historial de 24 meses y
   reportes PDF; IA al mes: 150 mensajes, 100 dictados, 30 escaneos; acceso a FactoNet.
-- KIRI PRO ($24.900/mes o $229.000/año): todo ilimitado; presupuesto del hogar (la pareja conectada
-  recibe PLUS gratis); conexión con el banco; escenarios de proyección guardados; historial
+- KIRI PRO ($24.900/mes o $229.000/año): todo ilimitado; presupuesto del hogar (basta con que uno de
+  la pareja tenga PRO para usarlo los dos; la pareja NO recibe PLUS gratis); conexión con el banco;
+  escenarios de proyección guardados; historial
   ilimitado; escáner que separa por productos; insignias exclusivas; soporte prioritario; IA al
   mes: 500 mensajes, 300 dictados, 100 escaneos.
 - Las cuotas de IA se renuevan el día 1 de cada mes; Mi plan muestra "Tu uso este mes".
-- Al registrarse, cada usuario tiene 14 días de KIRI PLUS de prueba. Por cada amigo invitado que se
-  registre y verifique su cuenta, quien invitó gana 7 días más de PLUS.
+- No hay prueba gratis al registrarse: todos empiezan en KIRI FREE.
+- Invitar amigos (enlace en Social o Misiones): el amigo que llega con el enlace tiene 50% de descuento
+  en su primer mes de KIRI PLUS o 30% en KIRI PRO (solo pagando mensual). Quien invitó gana 10 días de
+  KIRI PLUS cuando ese amigo se suscribe y paga su primera factura, hasta 3 amigos (30 días en total).
+  Las misiones "Un amigo se suscribe", "2 amigos" y "3 amigos" avanzan con esos amigos suscritos.
 - Si llega a un límite, Kiri le muestra un aviso con el botón "Ver planes" que lleva a Mi plan.
   Nunca inventes precios ni límites distintos a estos.
 

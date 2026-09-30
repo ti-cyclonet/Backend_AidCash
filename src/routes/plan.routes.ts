@@ -1,14 +1,14 @@
 import { Router, Request, Response } from 'express'
 import { consentPayload, consentLocalData, authorizaInternalHeaders } from '../lib/legal.js'
 import bcrypt from 'bcryptjs'
-import { authMiddleware } from '../middleware/auth.js'
+import { authMiddleware, olvidarSesion } from '../middleware/auth.js'
 import { requireInternalKey } from '../middleware/internal-key.js'
 import { verifyCredentials } from '../lib/authoriza-auth.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
-import { acreditarReferido } from '../lib/invitaciones.js'
-import { resolverPlan, invalidarPlan, otorgarInsigniaPro } from '../lib/planes.js'
+import { acreditarReferido, contarReferidosSuscritos, premiarReferidoPorPago } from '../lib/invitaciones.js'
+import { resolverPlan, invalidarPlan, otorgarInsigniaPro, descuentoInvitadoDisponible, tierDeNombre, DESCUENTO_INVITADO, DIAS_PLUS_POR_REFERIDO, MAX_REFERIDOS_PREMIADOS } from '../lib/planes.js'
 import { avisar } from '../lib/push.js'
 import { z } from 'zod'
 import { Prisma } from '@prisma/client'
@@ -34,14 +34,21 @@ interface TenantLimitsResponse {
 
 /**
  * GET /api/plan — el plan EFECTIVO del usuario (lib/planes.ts):
- * su contrato en Authoriza, la prueba de 14 días de PLUS, el PLUS que da una
- * pareja PRO o el acceso completo de QA. Incluye funciones (features) y topes
- * (limits) con los que el frontend muestra lo que tiene y lo que desbloquea.
+ * su contrato en Authoriza, los días de PLUS ganados por invitar o el acceso
+ * completo de QA. Incluye funciones (features) y topes (limits) con los que el
+ * frontend muestra lo que tiene y lo que desbloquea, más su descuento de
+ * invitado (si llegó con un enlace) y cómo van sus amigos suscritos.
  */
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const plan = await resolverPlan(req.user!.userId)
-    if (plan.features.exclusiveBadges) otorgarInsigniaPro(req.user!.userId, 'pro_jardin_dorado')
+    const userId = req.user!.userId
+    const [plan, descuentoInvitado, suscritos, primerMesInvitado] = await Promise.all([
+      resolverPlan(userId),
+      descuentoInvitadoDisponible(userId),
+      contarReferidosSuscritos(userId),
+      primerMesConDescuento(userId),
+    ])
+    if (plan.features.exclusiveBadges) otorgarInsigniaPro(userId, 'pro_jardin_dorado')
     return res.json({
       planName: plan.planName,
       tier: plan.tier,
@@ -52,13 +59,41 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       limits: plan.limites,
       hasPlan: true,
       pruebaHasta: plan.pruebaHasta ?? null,
-      parejaNombre: plan.parejaNombre ?? null,
+      // { PLUS: 50, PRO: 30 } si llegó invitado y aún no lo ha usado
+      descuentoInvitado,
+      // Ya pagó su primera factura con descuento de invitado: { pct, hasta } durante ese mes
+      primerMesInvitado,
+      referidos: { suscritos, maximo: MAX_REFERIDOS_PREMIADOS, diasPorReferido: DIAS_PLUS_POR_REFERIDO, descuentoAmigo: DESCUENTO_INVITADO },
     })
   } catch (error: any) {
     console.error('[Plan] Error fetching plan:', error.message)
     return res.status(503).json({ error: 'No se pudo obtener la información del plan. Intente más tarde.' })
   }
 })
+
+/**
+ * El invitado ya pagó su primera factura con el descuento: el aviso solo dura
+ * ese primer mes (30 días desde el pago); después paga el precio normal.
+ */
+async function primerMesConDescuento(userId: string): Promise<{ pct: number; hasta: string } | null> {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { invitedById: true, primerPagoEn: true, descuentoPrimerMes: true } })
+  if (!u?.invitedById || !u.primerPagoEn || !u.descuentoPrimerMes) return null
+  const hasta = new Date(u.primerPagoEn.getTime() + 30 * 86_400_000)
+  return hasta > new Date() ? { pct: u.descuentoPrimerMes, hasta: hasta.toISOString() } : null
+}
+
+/** FREE / PLUS / PRO de un paquete de Kiri según el catálogo de Authoriza (null si no responde). */
+async function tierDePaquete(packageId: string): Promise<'FREE' | 'PLUS' | 'PRO' | null> {
+  try {
+    const r = await fetch(`${env.AUTHORIZA_API_URL}/api/packages/landing?application=Kiri`, { signal: AbortSignal.timeout(5000) })
+    if (!r.ok) return null
+    const paquetes = await r.json() as { packageId?: string; id?: string; name?: string; displayName?: string }[]
+    const p = Array.isArray(paquetes) ? paquetes.find(x => (x.packageId ?? x.id) === packageId) : null
+    return p ? tierDeNombre(p.name || p.displayName) : null
+  } catch {
+    return null
+  }
+}
 
 /**
  * GET /api/plan/available
@@ -108,7 +143,19 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
       })
     }
 
-    // Call Authoriza's upgrade-plan endpoint
+    // Invitado por un amigo: 50% en el primer mes de PLUS o 30% en PRO, solo en
+    // pago mensual. El plan sale del catálogo de Authoriza por packageId (no
+    // del nombre que manda el navegador: así nadie pide "PLUS" en un PRO).
+    const anual = billingCycle === 'annual'
+    let descuento = 0
+    const disponible = await descuentoInvitadoDisponible((req as any).user.userId)
+    if (disponible && !anual) {
+      const tier = await tierDePaquete(packageId)
+      if (tier === 'PLUS' || tier === 'PRO') descuento = disponible[tier]
+    }
+
+    // Call Authoriza's upgrade-plan endpoint (con la clave interna: Authoriza
+    // solo acepta el descuento si viene del backend de Kiri)
     const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
     // Al contratar se aceptan de nuevo los documentos vigentes (Authoriza guarda la prueba)
     const aceptaDocumentos = acceptTerms === true && acceptHabeasData === true
@@ -116,6 +163,7 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
       method: 'POST',
       headers: authorizaInternalHeaders(),
       body: JSON.stringify({
+        ...(descuento > 0 ? { firstInvoiceDiscountPct: descuento } : {}),
         email: userEmail,
         password,
         packageId,
@@ -143,14 +191,17 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
     await prisma.user.update({
       where: { id: (req as any).user.userId },
       data: {
-        cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString() },
+        cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString(), ...(descuento > 0 ? { descuentoPrimerMes: descuento } : {}) },
         ...(aceptaDocumentos ? consentLocalData() : {}),
+        // Si aún no ha pagado nada, el % que llevará su primera factura (o nada)
+        ...(disponible ? { descuentoPrimerMes: descuento > 0 ? descuento : null } : {}),
       },
     }).catch(() => {})
 
     return res.json({
       success: true,
       message: upgradeData.message || 'Plan actualizado exitosamente.',
+      descuentoPrimerMes: descuento || null,
     })
   } catch (error: any) {
     console.error('[Plan] Error upgrading plan:', error.message)
@@ -375,6 +426,7 @@ router.post('/set-user-status', requireInternalKey, async (req: Request, res: Re
 
     console.log(`[Plan] User ${user.correo} status updated: isActive=${allowed}`)
     invalidarPlan(user.id, user.correo)
+    olvidarSesion(user.id)
     return res.json({ success: true, message: `User access ${allowed ? 'enabled' : 'disabled'}.` })
   } catch (error: any) {
     console.error('[Plan] Error setting user status:', error.message)
@@ -429,6 +481,7 @@ router.post('/revoke-sessions', requireInternalKey, async (req: Request, res: Re
       prisma.refreshToken.deleteMany({ where: { userId: user.id } }),
     ])
 
+    olvidarSesion(user.id)
     console.log(`[Plan] Sessions revoked for ${user.correo} (credentials changed in Authoriza)`)
     return res.json({ success: true, message: 'Sessions revoked.' })
   } catch (error: any) {
@@ -520,7 +573,11 @@ router.post('/factura-evento', requireInternalKey, async (req: Request, res: Res
     invalidarPlan(user.id, email)
     const { title, body } = avisos[evento]
     await avisar(user.id, { title, body, url: '/mi-plan#factonet', tag: `factura-${factura.codigo}`, tipo: 'factura' })
-    return res.json({ success: true })
+
+    // Primera factura pagada: si llegó invitado, quien lo invitó gana 10 días
+    // de KIRI PLUS (hasta 3 amigos) y avanzan sus misiones de invitar
+    const referido = evento === 'pagada' && factura.valor > 0 ? await premiarReferidoPorPago(user.id) : null
+    return res.json({ success: true, ...(referido ? { referidoPremiado: referido.premiado } : {}) })
   } catch (error: any) {
     console.error('[Plan] Error en factura-evento:', error.message)
     return res.status(500).json({ success: false, error: 'Error al registrar el aviso de factura.' })

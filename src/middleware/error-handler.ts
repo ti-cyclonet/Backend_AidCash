@@ -24,6 +24,18 @@ export function errorHandler(
     return
   }
 
+  // JSON mal formado o demasiado grande (express.json): es culpa de la
+  // petición, no del servidor — antes salía un 500 con el mensaje del parser
+  const tipo = (err as { type?: string }).type
+  if (tipo === 'entity.parse.failed') {
+    res.status(400).json({ error: 'Datos inválidos' })
+    return
+  }
+  if (tipo === 'entity.too.large') {
+    res.status(413).json({ error: 'La información enviada es demasiado grande' })
+    return
+  }
+
   console.error('❌ Error no manejado:', err)
 
   res.status(500).json({

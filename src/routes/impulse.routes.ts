@@ -5,6 +5,7 @@ import { prisma } from '../config/database.js'
 import { categoriaDelUsuario as categoriaHogarDelUsuario, avisarGastoHogar } from '../lib/hogar.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { nombreRequerido, diasDelMes } from '../lib/validacion.js'
 import { hogarHabilitado, resolverPlan } from '../lib/planes.js'
 import { respuestaFuncion } from '../middleware/limit-enforcement.js'
 import { recordMissionAction } from '../lib/missions.js'
@@ -37,8 +38,8 @@ async function currentUserPeriodo(userId: string, now: Date = new Date()): Promi
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
 const createSchema = z.object({
-  nombre: z.string().min(1, 'El nombre es requerido'),
-  monto: z.number().min(0),
+  nombre: nombreRequerido,
+  monto: z.number().min(1, 'El monto debe ser mayor a 0'),
   categoria: z.enum(['cafe', 'comida', 'transporte', 'antojo', 'salida', 'otro']).default('otro'),
   // Si se paga con tarjeta de crédito: mismo mecanismo de cuotas que
   // pay-with-card para deudas/gastos fijos (ver debts.routes.ts).

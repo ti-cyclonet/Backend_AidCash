@@ -37,14 +37,14 @@ export interface CredentialsResult {
   avatarUrl?: string | null
 }
 
-async function callInternal<T>(path: string, body: unknown): Promise<T> {
+async function callInternal<T>(path: string, body: unknown, timeoutMs = 8000): Promise<T> {
   let res: globalThis.Response
   try {
     res = await fetch(`${env.AUTHORIZA_API_URL}/api/auth/internal/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-internal-key': process.env.INTERNAL_API_KEY || '' },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (err) {
     throw new AuthorizaUnavailableError((err as Error).message)
@@ -80,21 +80,41 @@ export function setPassword(email: string, newPassword: string, currentPassword?
 // apps). Kiri guarda una copia de la URL en users.avatar_url para mostrar la
 // foto de otros usuarios (Social) sin consultar Authoriza en cada vista.
 
+/**
+ * Caché corta de las lecturas cosméticas (foto y nombre) que hace GET /auth/me.
+ * Antes cada /auth/me (2 por pantalla) esperaba a Authoriza hasta 8 s: si
+ * Authoriza estaba lenta, toda la app lo estaba. 5 min con respuesta, 1 min si
+ * no respondió; se olvida al cambiar la propia foto o nombre.
+ */
+const cacheLecturas = new Map<string, { valor: unknown; hasta: number }>()
+async function leerConCache<T>(clave: string, leer: () => Promise<T | undefined>): Promise<T | undefined> {
+  const c = cacheLecturas.get(clave)
+  if (c && c.hasta > Date.now()) return c.valor as T | undefined
+  const valor = await leer()
+  if (cacheLecturas.size > 5000) cacheLecturas.clear()
+  cacheLecturas.set(clave, { valor, hasta: Date.now() + (valor === undefined ? 60_000 : 300_000) })
+  return valor
+}
+const olvidar = (email: string) => { cacheLecturas.delete(`avatar:${email}`); cacheLecturas.delete(`nombre:${email}`) }
+
 /** Sube a Authoriza una imagen en data URL base64 y devuelve la URL alojada. */
 export async function setAuthorizaAvatar(email: string, dataUrl: string): Promise<string> {
   const data = await callInternal<{ url: string }>('set-avatar', { email, dataUrl })
   if (!data?.url) throw new AuthorizaRejectedError(502, 'Authoriza no devolvió la foto.')
+  olvidar(email)
   return data.url
 }
 
 /** Avatar vigente en Authoriza: URL, null si no tiene, o undefined si no respondió. */
 export async function getAuthorizaAvatar(email: string): Promise<string | null | undefined> {
-  try {
-    const data = await callInternal<{ url: string | null }>('avatar', { email })
-    return data?.url || null
-  } catch {
-    return undefined
-  }
+  return leerConCache(`avatar:${email}`, async () => {
+    try {
+      const data = await callInternal<{ url: string | null }>('avatar', { email }, 2500)
+      return data?.url || null
+    } catch {
+      return undefined
+    }
+  })
 }
 
 // ─── Nombre en partes ─────────────────────────────────────────────────────────
@@ -106,16 +126,19 @@ export interface NombreAuthoriza { firstName: string; secondName: string | null;
 
 /** Nombre en partes vigente en Authoriza; null si no tiene, undefined si no respondió. */
 export async function getAuthorizaName(email: string): Promise<NombreAuthoriza | null | undefined> {
-  try {
-    const data = await callInternal<{ name: NombreAuthoriza | null }>('person-name', { email })
-    return data?.name ?? null
-  } catch {
-    return undefined
-  }
+  return leerConCache(`nombre:${email}`, async () => {
+    try {
+      const data = await callInternal<{ name: NombreAuthoriza | null }>('person-name', { email }, 2500)
+      return data?.name ?? null
+    } catch {
+      return undefined
+    }
+  })
 }
 
 /** Guarda el nombre en partes en Authoriza (no bloquea: devuelve false si falló). */
 export async function setAuthorizaName(email: string, name: { firstName: string; secondName?: string | null; firstSurname: string; secondSurname?: string | null }): Promise<boolean> {
+  olvidar(email)
   try {
     await callInternal('set-person-name', { email, ...name })
     return true

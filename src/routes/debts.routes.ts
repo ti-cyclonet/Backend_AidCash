@@ -3,13 +3,14 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
+import { nombreRequerido, diasDelMes } from '../lib/validacion.js'
 import { checkLimit, attachUsageWarning, respuestaFuncion } from '../middleware/limit-enforcement.js'
 import { resolverPlan } from '../lib/planes.js'
-import { recordOnboardingAction } from '../lib/missions.js'
+import { recordOnboardingAction, recordMissionAction } from '../lib/missions.js'
 import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { cuotaEfectivaTarjeta, reverseCardPaymentAllocations, buildInstallmentRevertOps } from '../lib/installments.js'
 import { debtPeriodo, debtPeriodoSiguiente, computePeriodStatus, calcularPagoDeuda, calcularAtrasos, cuotaBaseDelPeriodo, periodosRevisables, tasaDelPeriodo } from '../lib/debt-calc.js'
-import { payDebtServer, PeriodoInvalidoError } from '../lib/debt-payments.js'
+import { payDebtServer, PeriodoInvalidoError, PagoExcedeSaldoError } from '../lib/debt-payments.js'
 import { cargarContextoDeudas, serializarDeuda, serializarUnaDeuda } from '../lib/debt-view.js'
 import { randomUUID } from 'crypto'
 import type { Prisma } from '@prisma/client'
@@ -20,14 +21,14 @@ router.use(authMiddleware)
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
 const createDebtSchema = z.object({
-  nombre: z.string().min(1, 'El nombre es requerido'),
+  nombre: nombreRequerido,
   montoTotal: z.number().min(0.01),
   saldoRestante: z.number().min(0).optional(),
   cuotaPeriodo: z.number().min(0.01),
-  acreedor: z.string().default(''),
+  acreedor: z.string().trim().max(120).default(''),
   frecuenciaPago: z.enum(['mensual', 'quincenal']).default('mensual'),
-  diasPago: z.string().default('1'), // "15" o "15,30"
-  tasaInteres: z.number().min(0).optional(),
+  diasPago: diasDelMes.default('1'), // "15" o "15,30"
+  tasaInteres: z.number().min(0).max(999, 'La tasa de interés no puede pasar de 999%').optional(),
   prioridad: z.enum(['alta', 'media', 'baja']).default('media'),
   bankEntityId: z.string().uuid().nullable().optional(),
   tipoDeuda: z.enum(['PRESTAMO', 'TARJETA_CREDITO']).default('PRESTAMO'),
@@ -51,14 +52,14 @@ const createDebtSchema = z.object({
 })
 
 const updateDebtSchema = z.object({
-  nombre: z.string().min(1).optional(),
+  nombre: nombreRequerido.optional(),
   montoTotal: z.number().min(0).optional(),
   saldoRestante: z.number().min(0).optional(),
   cuotaPeriodo: z.number().min(0).optional(),
-  acreedor: z.string().optional(),
+  acreedor: z.string().trim().max(120).optional(),
   frecuenciaPago: z.enum(['mensual', 'quincenal']).optional(),
-  diasPago: z.string().optional(),
-  tasaInteres: z.number().min(0).nullable().optional(),
+  diasPago: diasDelMes.optional(),
+  tasaInteres: z.number().min(0).max(999, 'La tasa de interés no puede pasar de 999%').nullable().optional(),
   prioridad: z.enum(['alta', 'media', 'baja']).optional(),
   estado: z.enum(['activa', 'saldada', 'vencida']).optional(),
   pagoAutomatico: z.boolean().optional(),
@@ -355,6 +356,10 @@ router.post('/:id/pay', validate(payDebtSchema), async (req: Request, res: Respo
   } catch (error) {
     if (error instanceof PeriodoInvalidoError) {
       res.status(400).json({ error: error.message })
+      return
+    }
+    if (error instanceof PagoExcedeSaldoError) {
+      res.status(400).json({ error: error.message, codigo: 'PAGO_EXCEDE_SALDO', maximo: error.maximo })
       return
     }
     console.error('[PayDebt]', error)
@@ -788,6 +793,9 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
         }),
       ])
     }
+
+    // Pagar con la tarjeta también es pagar la obligación (antes no contaba para la misión)
+    await recordMissionAction(userId, 'pagar_obligacion')
 
     // Obtener estado actualizado de la tarjeta + su cuota efectiva (base + planes vigentes)
     const [tarjetaActualizada, installments] = await Promise.all([

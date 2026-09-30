@@ -46,6 +46,7 @@ import openBankingRoutes from './routes/open-banking.routes.js'
 import projectionsRoutes from './routes/projections.routes.js'
 import supportRoutes from './routes/support.routes.js'
 import notificationsRoutes from './routes/notifications.routes.js'
+import { traducirRespuestas } from './lib/i18n.js'
 
 const app = express()
 const httpServer = http.createServer(app)
@@ -71,14 +72,20 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id', 'x-kiri-idioma'],
 }))
 app.use(cookieParser())
 app.use(express.json({ limit: '10mb' }))
+// Errores y mensajes de la API en el idioma de la app (x-kiri-idioma: en)
+app.use(traducirRespuestas)
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 1000,
+  // Por IP. Cada pantalla hace ~25 llamadas y en Colombia los operadores
+  // móviles comparten una IP entre muchos usuarios (CGNAT): con 1000 un grupo
+  // de usuarios activos recibía "Demasiadas solicitudes" sin haber abusado.
+  // El login tiene su propio límite estricto (authLimiter).
+  max: 5000,
   message: { error: 'Demasiadas solicitudes, intenta más tarde.' },
 })
 app.use(limiter)
@@ -86,7 +93,10 @@ app.use(limiter)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 50,
-  keyGenerator: (req) => req.headers['x-forwarded-for'] as string || req.ip || 'unknown',
+  // Por IP real (req.ip, con `trust proxy` = el salto de Nginx). Antes se usaba
+  // la cabecera x-forwarded-for tal cual: quien la cambiara en cada intento
+  // tenía intentos de login ilimitados.
+  keyGenerator: (req) => req.ip || 'unknown',
   message: { error: 'Demasiados intentos, espera 15 minutos.' },
 })
 
@@ -147,7 +157,11 @@ async function bootstrap() {
   initExternalLoansCron()
   initMissionRemindersCron()
 
-  httpServer.listen(env.PORT, () => {
+  // backlog 2048: cola de conexiones por aceptar. Con el valor por defecto, en
+  // la prueba de carga (100 usuarios abriendo el Dashboard a la vez) el sistema
+  // rechazaba conexiones (ECONNREFUSED) en ráfagas. En Linux el tope real es
+  // net.core.somaxconn.
+  httpServer.listen({ port: Number(env.PORT), backlog: 2048 }, () => {
     console.log(`
 🌱 Kiri Finance Backend
 ━━━━━━━━━━━━━━━━━━━━━━━━━

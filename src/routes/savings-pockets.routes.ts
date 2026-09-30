@@ -5,7 +5,8 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
-import type { SavingsPocket } from '@prisma/client'
+import { recordOnboardingAction } from '../lib/missions.js'
+import type { SavingsPocket, Prisma } from '@prisma/client'
 
 const router = Router()
 router.use(authMiddleware)
@@ -168,26 +169,30 @@ router.post('/:id/deposit', validate(pocketTxSchema), async (req: Request, res: 
       return
     }
 
-    const user = await prisma.user.findUnique({ where: { id: userId }, select: { cashBalance: true } })
-    if (!user || Number(user.cashBalance) < monto) {
-      res.status(400).json({ error: 'Saldo insuficiente', disponible: Number(user?.cashBalance ?? 0), requerido: monto })
-      return
-    }
-
-    // El aporte ya se validó contra el cashBalance total, así que se descuenta
-    // completo — y walletAhorro por ese MISMO monto para que cashBalance y el
-    // bolsillo notional no se desincronicen.
-    const walletData = planPocketDeduction('ahorro', monto)
+    // Se descuenta completo del cashBalance — y walletAhorro por ese MISMO
+    // monto para que cashBalance y el bolsillo notional no se desincronicen.
+    // La revisión de saldo va en el mismo UPDATE (cashBalance >= monto): antes
+    // se leía y luego se escribía, y dos toques seguidos pasaban los dos.
+    const walletData = planPocketDeduction('ahorro', monto) as Prisma.UserUpdateManyMutationInput
     const periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
 
-    const [updatedPocket] = await prisma.$transaction([
-      prisma.savingsPocket.update({ where: { id }, data: { montoActual: { increment: monto } } }),
-      prisma.user.update({ where: { id: userId }, data: walletData }),
+    const updatedPocket = await prisma.$transaction(async tx => {
+      const cobro = await tx.user.updateMany({ where: { id: userId, cashBalance: { gte: monto } }, data: walletData })
+      if (cobro.count === 0) return null
       // Antes este endpoint no dejaba NINGÚN rastro en el historial — el
       // depósito era real (la billetera sí bajaba) pero invisible en
       // Balance/PDF. Mismo modelo que usa el registro de ahorro "libre".
-      prisma.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'ahorro' } }),
-    ])
+      await tx.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'ahorro' } })
+      return tx.savingsPocket.update({ where: { id }, data: { montoActual: { increment: monto } } })
+    })
+    if (!updatedPocket) {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { cashBalance: true } })
+      res.status(400).json({ error: 'Saldo insuficiente', disponible: Number(user?.cashBalance ?? 0), requerido: monto })
+      return
+    }
+    // La misión dice "Deposita en un bolsillo de ahorro" y antes solo la
+    // cumplía la ruta vieja /savings: aportar a un bolsillo no contaba
+    await recordOnboardingAction(userId, 'registrar_ahorro')
 
     res.json({ pocket: serializePocket(updatedPocket) })
   } catch (error) {
@@ -212,18 +217,22 @@ router.post('/:id/withdraw', validate(pocketTxSchema), async (req: Request, res:
       res.status(404).json({ error: 'Bolsillo no encontrado' })
       return
     }
-    if (Number(pocket.montoActual) < monto) {
-      res.status(400).json({ error: 'El bolsillo no tiene suficiente saldo', disponible: Number(pocket.montoActual), requerido: monto })
-      return
-    }
-
     const periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
 
-    const [updatedPocket] = await prisma.$transaction([
-      prisma.savingsPocket.update({ where: { id }, data: { montoActual: { decrement: monto } } }),
-      prisma.user.update({ where: { id: userId }, data: planPocketCredit('ahorro', monto) }),
-      prisma.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'retiro' } }),
-    ])
+    // El tope va en el mismo UPDATE (montoActual >= monto): antes se revisaba
+    // y luego se descontaba, y 5 toques rápidos dejaban el bolsillo en negativo.
+    const updatedPocket = await prisma.$transaction(async tx => {
+      const retiro = await tx.savingsPocket.updateMany({ where: { id, userId, montoActual: { gte: monto } }, data: { montoActual: { decrement: monto } } })
+      if (retiro.count === 0) return null
+      await tx.user.update({ where: { id: userId }, data: planPocketCredit('ahorro', monto) })
+      await tx.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'retiro' } })
+      return tx.savingsPocket.findUniqueOrThrow({ where: { id } })
+    })
+    if (!updatedPocket) {
+      const actual = await prisma.savingsPocket.findUnique({ where: { id }, select: { montoActual: true } })
+      res.status(400).json({ error: 'El bolsillo no tiene suficiente saldo', disponible: Number(actual?.montoActual ?? 0), requerido: monto })
+      return
+    }
 
     res.json({ pocket: serializePocket(updatedPocket) })
   } catch (error) {

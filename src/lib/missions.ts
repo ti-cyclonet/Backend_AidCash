@@ -86,9 +86,12 @@ export const ONBOARDING_CATALOG: MissionCatalogEntry[] = [
  * con `invitedById = tú`, así que no se puede inflar desde el cliente.
  */
 export const REFERRAL_CATALOG: (MissionCatalogEntry & { key: ReferralMissionKey; rewardXp: number })[] = [
-  { key: 'referido_1', title: 'Invita a un amigo a Kiri', desc: 'Que se registre con tu enlace de invitación', icon: '💌', target: 1, rewardXp: 25 },
-  { key: 'referido_2', title: 'Invita a 2 amigos a Kiri', desc: 'Dos personas registradas con tu enlace', icon: '🤝', target: 2, rewardXp: 50 },
-  { key: 'referido_3', title: 'Invita a 3 amigos a Kiri', desc: 'Tres personas registradas con tu enlace', icon: '🎉', target: 3, rewardXp: 75 },
+  // Cuentan amigos que llegaron con tu enlace y se suscribieron a PLUS o PRO
+  // (primera factura pagada). Cada uno también te da 10 días de KIRI PLUS
+  // (lib/invitaciones.ts, premiarReferidoPorPago); ellos tienen 50% / 30% en su primer mes.
+  { key: 'referido_1', title: 'Un amigo se suscribe a Kiri', desc: 'Que se suscriba a PLUS o PRO con tu enlace · +10 días de KIRI PLUS', icon: '💌', target: 1, rewardXp: 25 },
+  { key: 'referido_2', title: '2 amigos se suscriben a Kiri', desc: 'Dos amigos suscritos con tu enlace · +10 días de KIRI PLUS más', icon: '🤝', target: 2, rewardXp: 50 },
+  { key: 'referido_3', title: '3 amigos se suscriben a Kiri', desc: 'Tres amigos suscritos con tu enlace · +10 días de KIRI PLUS más', icon: '🎉', target: 3, rewardXp: 75 },
 ]
 export const REFERRAL_PERIODO = 'referidos'
 
@@ -202,13 +205,42 @@ export const ONBOARDING_PERIODO = 'onboarding'
 // ─── Progreso ───────────────────────────────────────────────────────────────
 
 async function getOrCreateProgress(userId: string, missionKey: MissionKey, periodo: string, target: number) {
-  const existing = await prisma.missionProgress.findUnique({
-    where: { userId_missionKey_periodo: { userId, missionKey, periodo } },
-  })
-  if (existing) return existing
-  return prisma.missionProgress.create({
-    data: { userId, missionKey, periodo, target, progress: 0 },
-  })
+  // upsert: antes era buscar y luego crear, y si dos cosas lo hacían a la vez
+  // (abrir Misiones mientras se guardaba un pago, o el Coach guardando varias
+  // acciones juntas) la segunda chocaba con la llave única y ese avance se perdía.
+  const where = { userId_missionKey_periodo: { userId, missionKey, periodo } }
+  try {
+    return await prisma.missionProgress.upsert({ where, update: {}, create: { userId, missionKey, periodo, target, progress: 0 } })
+  } catch (e) {
+    // Prisma no siempre la hace atómica: si otra petición la creó en ese
+    // instante, se usa esa fila
+    if ((e as { code?: string }).code === 'P2002') return prisma.missionProgress.findUniqueOrThrow({ where })
+    throw e
+  }
+}
+
+/**
+ * Las filas de varias misiones de una vez: UNA lectura y, si falta alguna, UNA
+ * inserción en lote. Antes GET /missions hacía ~11 upserts seguidos y, en la
+ * prueba de carga (50 usuarios a la vez), tardaba ~0,8 s.
+ */
+async function asegurarFilas(userId: string, misiones: { key: MissionKey; periodo: string; target: number }[]) {
+  const buscar = () => prisma.missionProgress.findMany({ where: { userId, OR: misiones.map(m => ({ missionKey: m.key, periodo: m.periodo })) } })
+  let filas = await buscar()
+  const faltan = misiones.filter(m => !filas.some(f => f.missionKey === m.key && f.periodo === m.periodo))
+  if (faltan.length) {
+    await prisma.missionProgress.createMany({ data: faltan.map(m => ({ userId, missionKey: m.key, periodo: m.periodo, target: m.target, progress: 0 })), skipDuplicates: true })
+    filas = await buscar()
+  }
+  return (key: MissionKey, periodo: string) => filas.find(f => f.missionKey === key && f.periodo === periodo)!
+}
+
+/** +1 al progreso sin pasar del tope, atómico. true si con esto quedó completa. */
+async function avanzar(id: string, target: number): Promise<boolean> {
+  const r = await prisma.missionProgress.updateMany({ where: { id, progress: { lt: target } }, data: { progress: { increment: 1 } } })
+  if (r.count === 0) return false
+  const row = await prisma.missionProgress.findUnique({ where: { id }, select: { progress: true } })
+  return (row?.progress ?? 0) >= target
 }
 
 /**
@@ -229,14 +261,8 @@ export async function recordMissionAction(userId: string, missionKey: Exclude<Mi
     const row = await getOrCreateProgress(userId, missionKey, periodo, entry.target)
     if (row.progress >= row.target) return
 
-    const newProgress = Math.min(row.progress + 1, row.target)
-    await prisma.missionProgress.update({
-      where: { id: row.id },
-      data: { progress: newProgress },
-    })
-
     // Recién se completó en este mismo llamado — avisar una sola vez.
-    if (newProgress >= row.target) {
+    if (await avanzar(row.id, row.target)) {
       pushMissionReady(userId, entry.title)
     }
   } catch (error) {
@@ -259,13 +285,7 @@ export async function recordOnboardingAction(userId: string, missionKey: Onboard
     const row = await getOrCreateProgress(userId, missionKey, ONBOARDING_PERIODO, entry.target)
     if (row.progress >= row.target) return
 
-    const newProgress = Math.min(row.progress + 1, row.target)
-    await prisma.missionProgress.update({
-      where: { id: row.id },
-      data: { progress: newProgress },
-    })
-
-    if (newProgress >= row.target) {
+    if (await avanzar(row.id, row.target)) {
       pushMissionReady(userId, entry.title)
     }
   } catch (error) {
@@ -274,13 +294,13 @@ export async function recordOnboardingAction(userId: string, missionKey: Onboard
 }
 
 /**
- * Alguien se registró con el enlace de `inviterId`: sincroniza los tres
- * escalones con el conteo real y avisa del que se acaba de completar.
+ * Un amigo invitado por `inviterId` pagó su primera factura: sincroniza los
+ * tres escalones con el conteo real y avisa del que se acaba de completar.
  */
 export async function recordReferral(inviterId: string): Promise<void> {
   try {
-    // Solo cuentan las cuentas nuevas ya activas (correo verificado)
-    const total = await prisma.user.count({ where: { invitedById: inviterId, isActive: true } })
+    // Solo cuentan los amigos suscritos (primera factura de PLUS/PRO pagada)
+    const total = await prisma.user.count({ where: { invitedById: inviterId, primerPagoEn: { not: null } } })
     for (const m of REFERRAL_CATALOG) {
       const row = await getOrCreateProgress(inviterId, m.key, REFERRAL_PERIODO, m.target)
       const nuevo = Math.min(total, m.target)
@@ -295,10 +315,13 @@ export async function recordReferral(inviterId: string): Promise<void> {
 
 /** Misiones de referidos, listas para el frontend (progreso = conteo real). */
 export async function getReferralMissionsForUser(userId: string): Promise<{ misiones: MissionView[]; referidos: number }> {
-  const total = await prisma.user.count({ where: { invitedById: userId, isActive: true } })
+  const [total, fila] = await Promise.all([
+    prisma.user.count({ where: { invitedById: userId, primerPagoEn: { not: null } } }),
+    asegurarFilas(userId, REFERRAL_CATALOG.map(m => ({ key: m.key, periodo: REFERRAL_PERIODO, target: m.target }))),
+  ])
   const misiones = await Promise.all(
     REFERRAL_CATALOG.map(async (m) => {
-      let row = await getOrCreateProgress(userId, m.key, REFERRAL_PERIODO, m.target)
+      let row = fila(m.key, REFERRAL_PERIODO)
       const real = Math.min(total, m.target)
       if (!row.claimedAt && row.progress !== real) {
         row = await prisma.missionProgress.update({ where: { id: row.id }, data: { progress: real } })
@@ -311,27 +334,27 @@ export async function getReferralMissionsForUser(userId: string): Promise<{ misi
 
 /** Misiones de primeros pasos, listas para mostrar en el frontend. */
 export async function getOnboardingMissionsForUser(userId: string): Promise<MissionView[]> {
-  return Promise.all(
-    ONBOARDING_CATALOG.map(async (m) => {
-      const row = await getOrCreateProgress(userId, m.key, ONBOARDING_PERIODO, m.target)
-      return { key: m.key, title: m.title, desc: m.desc, icon: m.icon, target: m.target, progress: row.progress, claimed: !!row.claimedAt }
-    })
-  )
+  const fila = await asegurarFilas(userId, ONBOARDING_CATALOG.map(m => ({ key: m.key, periodo: ONBOARDING_PERIODO, target: m.target })))
+  return ONBOARDING_CATALOG.map(m => {
+    const row = fila(m.key, ONBOARDING_PERIODO)
+    return { key: m.key, title: m.title, desc: m.desc, icon: m.icon, target: m.target, progress: row.progress, claimed: !!row.claimedAt }
+  })
 }
 
 /** Misiones de hoy + la semanal, listas para mostrar en el frontend. */
 export async function getMissionsForUser(userId: string): Promise<{ daily: MissionView[]; weekly: MissionView }> {
   const periodo = todayPeriodo()
 
-  const daily = await Promise.all(
-    MISSION_CATALOG.map(async (m) => {
-      const row = await getOrCreateProgress(userId, m.key, periodo, m.target)
-      return { key: m.key, title: m.title, desc: m.desc, icon: m.icon, target: m.target, progress: row.progress, claimed: !!row.claimedAt }
-    })
-  )
+  const [fila, user] = await Promise.all([
+    asegurarFilas(userId, MISSION_CATALOG.map(m => ({ key: m.key, periodo, target: m.target }))),
+    prisma.user.findUnique({ where: { id: userId }, select: { streakActual: true } }),
+  ])
+  const daily = MISSION_CATALOG.map(m => {
+    const row = fila(m.key, periodo)
+    return { key: m.key, title: m.title, desc: m.desc, icon: m.icon, target: m.target, progress: row.progress, claimed: !!row.claimedAt }
+  })
 
   const week = weekPeriodo()
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { streakActual: true } })
   const weeklyProgress = Math.min(user?.streakActual ?? 0, WEEKLY_MISSION.target)
 
   let weeklyRow = await prisma.missionProgress.findUnique({

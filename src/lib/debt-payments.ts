@@ -65,6 +65,11 @@ const TASA_OBSERVADA_MAX = 15
 /** El periodo pedido no es ni el actual, ni el siguiente, ni una cuota atrasada de esta deuda. */
 export class PeriodoInvalidoError extends Error {}
 
+/** Se intentó pagar más de lo que se debe (saldo + interés del periodo). */
+export class PagoExcedeSaldoError extends Error {
+  constructor(public maximo: number) { super(`Ese pago es mayor que lo que queda de la deuda ($${maximo.toLocaleString('es-CO')}). Revisa el valor.`) }
+}
+
 /**
  * A qué periodo va el pago:
  *  - 'actual' (default): la cuota del periodo en curso, como siempre.
@@ -106,9 +111,6 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
 
   const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId, periodo } })
   const yaPagado = paymentsThisPeriod.reduce((s, p) => s + Number(p.montoPagado), 0)
-  // Sin monto explícito se paga lo que FALTA del periodo, no la cuota completa
-  // de nuevo (una cuota atrasada puede tener un abono parcial previo).
-  const montoPago = montoInput ?? Math.max(0.01, Math.round((cuotaVigente - (esPeriodoActual ? 0 : yaPagado)) * 100) / 100)
   const currentSaldo = Number(existing.saldoRestante)
 
   const tasaMensual = existing.tasaInteresAplicada
@@ -118,8 +120,26 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
       : null
 
   const status = computePeriodStatus(paymentsThisPeriod, periodo, currentSaldo)
+  const tasaPeriodo = tasaDelPeriodo(tasaMensual, existing.frecuenciaPago)
 
-  let { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaDelPeriodo(tasaMensual, existing.frecuenciaPago), status, montoPago)
+  // Lo máximo que tiene sentido pagar: el saldo más el interés pendiente del
+  // periodo. Antes un pago mayor dejaba la deuda en 0 pero descontaba TODO de
+  // la billetera (pagar $99M a una deuda de $2M borraba $97M que no existían).
+  // Con el saldo real del banco se acepta: el saldo de Kiri puede estar atrasado.
+  // Las tarjetas quedan por fuera: pagarle al banco más de lo que Kiri conoce
+  // es normal (compras que no se registraron) y esa plata sí salió.
+  const esPrestamo = existing.tipoDeuda !== 'TARJETA_CREDITO'
+  const maximo = Math.round((currentSaldo + calcularPagoDeuda(currentSaldo, tasaPeriodo, status, Number.MAX_SAFE_INTEGER).pagoInteres) * 100) / 100
+  if (esPrestamo && montoInput !== undefined && opciones.saldoReal === undefined && montoInput > maximo + 1) {
+    throw new PagoExcedeSaldoError(maximo)
+  }
+  // Sin monto explícito se paga lo que FALTA del periodo, no la cuota completa
+  // de nuevo (una cuota atrasada puede tener un abono parcial previo), y en un
+  // préstamo nunca más de lo que queda (la última cuota suele ser menor).
+  const faltaDelPeriodo = Math.round((cuotaVigente - (esPeriodoActual ? 0 : yaPagado)) * 100) / 100
+  const montoPago = montoInput ?? Math.max(0.01, esPrestamo ? Math.min(maximo, faltaDelPeriodo) : faltaDelPeriodo)
+
+  let { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaPeriodo, status, montoPago)
 
   // Saldo real del banco: manda sobre la estimación con la tasa registrada.
   let tasaObservadaMensual: number | null = null

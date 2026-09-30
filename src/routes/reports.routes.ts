@@ -170,14 +170,86 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // transacciones" a partir de fixedExpenses.pagadoEstePeriodo (calculado
     // siempre contra el periodo ACTUAL, sin importar el rango pedido) en vez de
     // este ledger real acotado por from/to.
-    const fixedExpensePayments = await prisma.fixedExpensePayment.findMany({
-      where: { fixedExpense: { userId }, createdAt: { gte: from, lte: to } },
-      include: {
-        fixedExpense: { select: { nombre: true } },
-        tarjeta: { select: { nombre: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-    })
+    //
+    // Todas las demás consultas son independientes entre sí: van en paralelo.
+    // Antes eran ~10 esperas seguidas y, en la prueba de carga (50 usuarios a la
+    // vez, ~350 mil filas), Balance tardaba 1,2–1,5 s.
+    const [
+      fixedExpensePayments,
+      [externalLoansPeriod, externalPaymentsPeriod],
+      [loansSocial, loanPaymentsSocial, depositosCompartidos],
+      allDebtPaymentsEver, interesPorDeuda, primerosPagos,
+      incomeRecordsPeriod, allImpulseEver, allFixedPaymentsEver, incomeRecordsPeriodList,
+    ] = await Promise.all([
+      prisma.fixedExpensePayment.findMany({
+        where: { fixedExpense: { userId }, createdAt: { gte: from, lte: to } },
+        include: {
+          fixedExpense: { select: { nombre: true } },
+          tarjeta: { select: { nombre: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      Promise.all([
+        prisma.externalLoan.findMany({ where: { userId, createdAt: { gte: from, lte: to } } }),
+        prisma.externalLoanPayment.findMany({ where: { loan: { userId }, createdAt: { gte: from, lte: to } }, include: { loan: { select: { persona: true } } } }),
+      ]),
+      // ── Social: préstamos entre usuarios, sus abonos y ahorros compartidos ──
+      // Antes nada de Social quedaba en Balance aunque moviera la billetera.
+      Promise.all([
+        prisma.loan.findMany({
+          where: {
+            OR: [{ lenderId: userId }, { borrowerId: userId }],
+            status: { in: ['ACTIVE', 'PAID'] },
+            activadoEn: { gte: from, lte: to },
+          },
+          include: { lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } },
+        }),
+        prisma.loanPayment.findMany({
+          where: {
+            status: 'CONFIRMED',
+            updatedAt: { gte: from, lte: to },
+            // (ojo: NOT {nota: x} en SQL también descarta las notas vacías)
+            OR: [{ nota: null }, { nota: { not: '__REMINDER__' } }],
+            loan: { OR: [{ lenderId: userId }, { borrowerId: userId }] },
+          },
+          include: { loan: { select: { lenderId: true, lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } } } },
+        }),
+        prisma.sharedDeposit.findMany({
+          where: { userId, createdAt: { gte: from, lte: to } },
+          include: { sharedPocket: { select: { nombre: true } } },
+        }),
+      ]),
+      // Totales históricos de deudas (excluye pagos a tarjetas propias y marcadores)
+      prisma.debtPayment.aggregate({
+        where: { debt: { userId, tipoDeuda: { not: 'TARJETA_CREDITO' } }, esMarcador: false },
+        _sum: { pagoInteres: true, abonoCapital: true, montoPagado: true },
+      }),
+      prisma.debtPayment.groupBy({
+        by: ['debtId'],
+        where: { debt: { userId } },
+        _sum: { pagoInteres: true },
+      }),
+      // Saldo con el que cada deuda empezó a pagarse EN Kiri (ver interés evitado)
+      prisma.debtPayment.findMany({
+        where: { debt: { userId }, esMarcador: false },
+        orderBy: { createdAt: 'asc' },
+        distinct: ['debtId'],
+        select: { debtId: true, saldoAnterior: true },
+      }),
+      prisma.incomeRecord.aggregate({
+        where: { userId, createdAt: { gte: from, lte: to } },
+        _sum: { monto: true },
+      }),
+      prisma.impulseExpense.aggregate({ where: { userId }, _sum: { monto: true } }),
+      prisma.fixedExpensePayment.aggregate({
+        where: { fixedExpense: { userId }, esMarcador: false },
+        _sum: { montoPagado: true },
+      }),
+      prisma.incomeRecord.findMany({
+        where: { userId, createdAt: { gte: from, lte: to } },
+        orderBy: { createdAt: 'desc' },
+      }),
+    ])
 
     // Pagar el SALDO PROPIO de una tarjeta de crédito no es un gasto nuevo — el
     // gasto ya se contó una vez, al momento de cargarlo a la tarjeta (como pago
@@ -192,37 +264,6 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     const debtPaymentsForSpending = debtPayments.filter(p => p.debt.tipoDeuda !== 'TARJETA_CREDITO' && !p.esMarcador)
     const fixedPaymentsForSpending = fixedExpensePayments.filter(p => !p.esMarcador)
 
-    const [externalLoansPeriod, externalPaymentsPeriod] = await Promise.all([
-      prisma.externalLoan.findMany({ where: { userId, createdAt: { gte: from, lte: to } } }),
-      prisma.externalLoanPayment.findMany({ where: { loan: { userId }, createdAt: { gte: from, lte: to } }, include: { loan: { select: { persona: true } } } }),
-    ])
-
-    // ── Social: préstamos entre usuarios, sus abonos y ahorros compartidos ──
-    // Antes nada de Social quedaba en Balance aunque moviera la billetera.
-    const [loansSocial, loanPaymentsSocial, depositosCompartidos] = await Promise.all([
-      prisma.loan.findMany({
-        where: {
-          OR: [{ lenderId: userId }, { borrowerId: userId }],
-          status: { in: ['ACTIVE', 'PAID'] },
-          activadoEn: { gte: from, lte: to },
-        },
-        include: { lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } },
-      }),
-      prisma.loanPayment.findMany({
-        where: {
-          status: 'CONFIRMED',
-          updatedAt: { gte: from, lte: to },
-          // (ojo: NOT {nota: x} en SQL también descarta las notas vacías)
-          OR: [{ nota: null }, { nota: { not: '__REMINDER__' } }],
-          loan: { OR: [{ lenderId: userId }, { borrowerId: userId }] },
-        },
-        include: { loan: { select: { lenderId: true, lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } } } },
-      }),
-      prisma.sharedDeposit.findMany({
-        where: { userId, createdAt: { gte: from, lte: to } },
-        include: { sharedPocket: { select: { nombre: true } } },
-      }),
-    ])
     // Tipo de cada movimiento de un ahorro compartido según su marca en la nota
     const tipoDeposito = (nota: string | null, monto: number): 'aporte' | 'previo' | 'retiro' | null => {
       const n = nota ?? ''
@@ -260,10 +301,6 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // Intereses ahorrados: si el usuario paga más de la cuota mínima, ahorra intereses futuros
     // Cálculo simplificado: por cada peso extra abonado al capital, se evita pagar interés sobre ese peso
     // (excluye pagos a tarjetas propias — mismo motivo que debtPaymentsForSpending)
-    const allDebtPaymentsEver = await prisma.debtPayment.aggregate({
-      where: { debt: { userId, tipoDeuda: { not: 'TARJETA_CREDITO' } }, esMarcador: false },
-      _sum: { pagoInteres: true, abonoCapital: true, montoPagado: true },
-    })
     const totalInteresHistorico = Number(allDebtPaymentsEver._sum.pagoInteres ?? 0)
     const totalCapitalHistorico = Number(allDebtPaymentsEver._sum.abonoCapital ?? 0)
 
@@ -272,12 +309,13 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // amortización completa desde el monto inicial) vs interés real proyectado
     // (lo ya pagado + lo que falta proyectado desde el saldo ACTUAL, que es menor
     // porque hubo abonos extra). La diferencia es interés que ya no se pagará.
-    const interesPorDeuda = await prisma.debtPayment.groupBy({
-      by: ['debtId'],
-      where: { debt: { userId } },
-      _sum: { pagoInteres: true },
-    })
     const interesPagadoPorDeuda = new Map(interesPorDeuda.map(r => [r.debtId, Number(r._sum.pagoInteres ?? 0)]))
+    // Saldo con el que cada deuda empezó a pagarse EN Kiri (el saldo antes de su
+    // primer pago real). Antes la base era el monto original: una deuda de
+    // $6,5M registrada con saldo $2,3M (lo demás pagado por fuera, en cuotas
+    // normales) salía con millones de "interés evitado por tus abonos extra"
+    // sin que el usuario hubiera abonado nada extra.
+    const saldoAlEntrar = new Map(primerosPagos.map(p => [p.debtId, Number(p.saldoAnterior)]))
 
     let interesEvitado = 0
     for (const d of debts) {
@@ -288,8 +326,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       const cuota = Number(d.cuotaPeriodo)
       if (!cuota || cuota <= 0) continue
 
-      const montoInicial = Number(d.montoInicial ?? d.montoTotal)
-      const interesOriginalTotal = generarTablaAmortizacion(montoInicial, tasa, cuota)
+      // Sin pagos en Kiri todavía no hay abonos que comparar
+      const base = saldoAlEntrar.get(d.id)
+      if (base === undefined || base <= 0) continue
+      const interesOriginalTotal = generarTablaAmortizacion(base, tasa, cuota)
         .reduce((s, r) => s + r.pagoInteres, 0)
 
       const interesYaPagado = interesPagadoPorDeuda.get(d.id) ?? 0
@@ -307,11 +347,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // Si no hay registros en el periodo, usamos ingresoBase como referencia
     const ingresoBase = Number(user?.ingresoBase ?? 0)
 
-    // Consultar ingresos reales registrados DENTRO del periodo
-    const incomeRecordsPeriod = await prisma.incomeRecord.aggregate({
-      where: { userId, createdAt: { gte: from, lte: to } },
-      _sum: { monto: true },
-    })
+    // Ingresos reales registrados DENTRO del periodo (consultados arriba)
     const ingresosRealPeriodo = Number(incomeRecordsPeriod._sum.monto ?? 0)
 
     // totalIngreso: si hay registros reales en el periodo, usar esos. Si no, usar base + extra.
@@ -328,11 +364,6 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // usarlo aquí hacía que "histórico" variara según qué rango se pidiera —
     // p. ej. daba $50.000 al pedir un mes sin gastos fijos pagados y $95.000
     // al pedir el mes actual, para la MISMA cuenta.
-    const allImpulseEver = await prisma.impulseExpense.aggregate({ where: { userId }, _sum: { monto: true } })
-    const allFixedPaymentsEver = await prisma.fixedExpensePayment.aggregate({
-      where: { fixedExpense: { userId }, esMarcador: false },
-      _sum: { montoPagado: true },
-    })
     const allDebtPaymentsTotal = Number(allDebtPaymentsEver._sum.montoPagado ?? 0)
     const totalEgresosHistorico = allDebtPaymentsTotal + Number(allFixedPaymentsEver._sum.montoPagado ?? 0) + Number(allImpulseEver._sum.monto ?? 0)
 
@@ -388,10 +419,6 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     fixedPaymentsForSpending.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
 
     // Ingresos reales registrados
-    const incomeRecordsPeriodList = await prisma.incomeRecord.findMany({
-      where: { userId, createdAt: { gte: from, lte: to } },
-      orderBy: { createdAt: 'desc' },
-    })
     incomeRecordsPeriodList.forEach(r => addToMonth(new Date(r.createdAt), 'ingresos', Number(r.monto)))
     extraIncomes.forEach(e => addToMonth(new Date(e.createdAt), 'ingresos', Number(e.monto)))
 

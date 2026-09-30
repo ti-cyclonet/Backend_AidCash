@@ -21,6 +21,26 @@ declare global {
 }
 
 /**
+ * Estado de sesión por usuario, 15 s en memoria. Antes cada petición hacía esta
+ * consulta: en la prueba de carga era la mitad de las consultas de los
+ * endpoints simples. Quien bloquea una cuenta o revoca sesiones llama a
+ * `olvidarSesion` y el cambio aplica al instante en esta instancia (en otras,
+ * a más tardar en 15 s).
+ */
+const cacheSesion = new Map<string, { isActive: boolean; sessionsValidAfter: Date | null; hasta: number }>()
+export function olvidarSesion(userId: string) { cacheSesion.delete(userId) }
+async function estadoSesion(userId: string) {
+  const c = cacheSesion.get(userId)
+  if (c && c.hasta > Date.now()) return c
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { isActive: true, sessionsValidAfter: true } })
+  if (!user) return null
+  if (cacheSesion.size > 20000) cacheSesion.clear()
+  const e = { ...user, hasta: Date.now() + 15_000 }
+  cacheSesion.set(userId, e)
+  return e
+}
+
+/**
  * Middleware de autenticación dual.
  * Intenta validar el token primero con el secret de Kiri (tokens locales),
  * y si falla, intenta con el secret de Authoriza (tokens del ecosistema Cyclonet).
@@ -48,10 +68,7 @@ export async function authMiddleware(req: Request, res: Response, next: NextFunc
     // El JWT dura días: sin esta consulta, un usuario bloqueado o con la
     // contraseña restablecida desde Authoriza seguía dentro hasta que venciera.
     try {
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { isActive: true, sessionsValidAfter: true },
-      })
+      const user = await estadoSesion(userId)
       if (!user || user.isActive === false) {
         res.status(401).json({ error: 'Tu sesión ya no es válida. Inicia sesión de nuevo.', code: 'SESSION_REVOKED' })
         return

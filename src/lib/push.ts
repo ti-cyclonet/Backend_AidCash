@@ -8,6 +8,7 @@
 import webpush from 'web-push'
 import { prisma } from '../config/database.js'
 import { emitToUser, SOCKET_EVENTS } from './socket.js'
+import { idiomaDe, traducir } from './i18n.js'
 
 // ─── Configuración VAPID ──────────────────────────────────────────────────────
 
@@ -46,17 +47,19 @@ export async function sendPushToUser(userId: string, payload: PushPayload): Prom
 
     if (subscriptions.length === 0) return
 
+    // En el idioma de la cuenta (los mensajes se escriben en español)
+    const idioma = await idiomaDe(userId)
     const pushPayload = JSON.stringify({
-      title: payload.title,
-      body: payload.body,
+      title: traducir(payload.title, idioma),
+      body: traducir(payload.body, idioma),
       icon: payload.icon ?? '/icons/icon-192x192.png',
       badge: payload.badge ?? '/icons/icon-96x96.png',
       tag: payload.tag ?? 'kiri-notification',
       url: payload.url ?? '/dashboard',
-      actions: payload.actions ?? [
+      actions: (payload.actions ?? [
         { action: 'open', title: 'Ver' },
         { action: 'dismiss', title: 'Cerrar' },
-      ],
+      ]).map(a => ({ ...a, title: traducir(a.title, idioma) })),
     })
 
     // Enviar a cada suscripción (el usuario puede tener múltiples dispositivos)

@@ -10,6 +10,14 @@ import { MANUAL_KIRI } from '../lib/ai/conocimiento.js'
 import { prisma } from '../config/database.js'
 import { resolverPlan, mejoraPara, ILIMITADO, type PlanResuelto } from '../lib/planes.js'
 import { periodoIA } from '../middleware/limit-enforcement.js'
+import { idiomaDe, normalizarIdioma } from '../lib/i18n.js'
+
+/** Instrucción de idioma para la IA (la app en inglés → todo en inglés). */
+async function enIdioma(req: Request, sistema: string): Promise<string> {
+  const idioma = req.headers['x-kiri-idioma'] ? normalizarIdioma(req.headers['x-kiri-idioma']) : await idiomaDe(req.user!.userId)
+  if (idioma !== 'en') return sistema
+  return `${sistema}\n\nIDIOMA: el usuario usa Kiri en INGLÉS. Responde SIEMPRE en inglés natural: la respuesta, el resumen, las sugerencias y los nombres de cada acción (ej. "Lunch", "Salary"). Los nombres de la app en inglés: Billetera=Wallet, Presupuesto=Budget, Proyecciones=Projections, Obligaciones=Obligations, Me deben=Owed to me, Bolsillos=Pockets, Gasto hormiga=Small expense, Árbol Kiri=Kiri Tree, Misiones=Missions, Gestión=Manage, Mi plan=My plan. Los ids y los tipos de acción se dejan igual.`
+}
 
 // ─── Cuotas mensuales de IA por plan ──────────────────────────────────────────
 // Cada uso cuesta en Google: FREE 10 mensajes / 10 dictados / 3 escaneos al
@@ -167,7 +175,7 @@ ${contextoComoTexto(ctx)}`
       { role: 'user', parts: [{ text: mensaje }] },
     ]
     const out = await generarJSON<{ respuesta?: string; acciones?: unknown; sugerencias?: unknown; ir?: { ruta?: string; etiqueta?: string } | null }>({
-      sistema, turnos, esquema: ESQUEMA_COACH, temperatura: 0.5,
+      sistema: await enIdioma(req, sistema), turnos, esquema: ESQUEMA_COACH, temperatura: 0.5,
     })
     const uso = await sumarUso(req.user!.userId, 'coach')
     res.json({
@@ -189,7 +197,8 @@ const dictadoSchema = z.object({ transcripcion: z.string().trim().min(1).max(300
 const ESQUEMA_EXTRACCION = {
   type: 'OBJECT',
   properties: {
-    resumen: { type: 'STRING', description: 'Qué entendiste y a dónde va cada cosa, en 1-3 frases cálidas' },
+    // Nada se guarda hasta que el usuario confirma: antes decía "¡Listo! Ya registré…"
+    resumen: { type: 'STRING', description: 'Qué entendiste y a dónde va cada cosa, en 1-3 frases cálidas. Todavía NO está guardado: el usuario lo revisa y confirma, así que di "te preparé" o "revisa y confirma", nunca "ya registré" ni "listo, guardado"' },
     acciones: { type: 'ARRAY', items: ESQUEMA_ACCION },
     confianza: { type: 'STRING', enum: ['alta', 'media', 'baja'] },
   },
@@ -213,7 +222,7 @@ ${REGLAS_ACCIONES}
 ═══ DATOS REALES DEL USUARIO ═══
 ${contextoComoTexto(ctx)}`
     const out = await generarJSON<{ resumen?: string; acciones?: unknown; confianza?: string }>({
-      sistema, turnos: [{ role: 'user', parts: [{ text: `Dictado: "${transcripcion}"` }] }], esquema: ESQUEMA_EXTRACCION, temperatura: 0.2,
+      sistema: await enIdioma(req, sistema), turnos: [{ role: 'user', parts: [{ text: `Dictado: "${transcripcion}"` }] }], esquema: ESQUEMA_EXTRACCION, temperatura: 0.2,
     })
     const uso = await sumarUso(req.user!.userId, 'dictado')
     res.json({
@@ -272,7 +281,7 @@ ${REGLAS_ACCIONES}
 ═══ DATOS REALES DEL USUARIO ═══
 ${contextoComoTexto(ctx)}`
     const out = await generarJSON<{ esRecibo?: boolean; establecimiento?: string; fecha?: string | null; total?: number; items?: { descripcion?: string; monto?: number }[]; nombreClaro?: boolean; confianza?: string; acciones?: unknown }>({
-      sistema,
+      sistema: await enIdioma(req, sistema),
       turnos: [{ role: 'user', parts: [{ inlineData: { mimeType, data: imageBase64 } }, { text: 'Lee este recibo.' }] }],
       esquema: ESQUEMA_RECIBO, temperatura: 0.1, timeoutMs: 60000,
     })

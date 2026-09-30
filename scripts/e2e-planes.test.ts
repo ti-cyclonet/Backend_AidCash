@@ -9,15 +9,26 @@ import 'dotenv/config'
 
 const MOCK_PORT = 4198
 const APP_PORT = 4197
+const CLAVE = 'clave-interna-de-prueba-1234567890'
 process.env.AUTHORIZA_API_URL = `http://127.0.0.1:${MOCK_PORT}`
+process.env.INTERNAL_API_KEY = CLAVE
 
 // correo → paquete en Authoriza ('caido' = Authoriza responde 500)
 const contratos = new Map<string, string>()
+// Lo que Kiri le pidió a Authoriza al cambiar de plan (body + si mandó la clave interna)
+const upgrades: { body: Record<string, any>; conClave: boolean }[] = []
 const mock = http.createServer((req, res) => {
   let data = ''
   req.on('data', c => { data += c })
   req.on('end', () => {
     const json = (status: number, body: unknown) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (req.url?.startsWith('/api/packages/landing')) {
+      return json(200, [{ packageId: 'pkg-free', name: 'KIRI FREE', price: 0 }, { packageId: 'pkg-plus', name: 'KIRI PLUS', price: 14900 }, { packageId: 'pkg-pro', name: 'KIRI PRO', price: 24900 }])
+    }
+    if (req.url === '/api/auth/upgrade-plan') {
+      upgrades.push({ body: JSON.parse(data || '{}'), conClave: req.headers['x-internal-key'] === CLAVE })
+      return json(200, { message: 'Contrato creado' })
+    }
     if (req.url === '/api/auth/check-email') {
       const { email } = JSON.parse(data || '{}')
       if (contratos.get(email) === 'caido') return json(500, {})
@@ -70,7 +81,7 @@ async function main() {
 
   try {
     const F = await crear('Felipe')                                                     // FREE
-    const T = await crear('Tania', { pruebaPlusHasta: new Date(Date.now() + 14 * 86400000) }) // prueba de PLUS
+    const T = await crear('Tania', { pruebaPlusHasta: new Date(Date.now() + 10 * 86400000) }) // días de PLUS ganados por invitar
     const P = await crear('Paula')                                                      // PRO por contrato
     const M = await crear('Mario')                                                      // FREE, pareja de Paula
     const X = await crear('Ximena')                                                     // Authoriza caído
@@ -83,11 +94,11 @@ async function main() {
     const pf = await call(F, 'GET', '/plan')
     check('Felipe sin contrato → KIRI FREE (gratis)', pf.tier === 'FREE' && pf.fuente === 'gratis' && pf.limits.nCategorias.maxValue === 5, { tier: pf.tier, fuente: pf.fuente })
     const pt = await call(T, 'GET', '/plan')
-    check('Tania recién registrada → KIRI PLUS de prueba con fecha de fin', pt.tier === 'PLUS' && pt.fuente === 'prueba' && !!pt.pruebaHasta)
+    check('Tania con días de PLUS ganados por invitar → KIRI PLUS con fecha de fin', pt.tier === 'PLUS' && pt.fuente === 'prueba' && !!pt.pruebaHasta)
     const pp = await call(P, 'GET', '/plan')
     check('Paula con contrato KIRI PRO → PRO', pp.tier === 'PRO' && pp.fuente === 'contrato' && pp.features.householdBudget === true)
     const pm = await call(M, 'GET', '/plan')
-    check('Mario, pareja de Paula (PRO) → KIRI PLUS gratis', pm.tier === 'PLUS' && pm.fuente === 'pareja' && pm.parejaNombre === 'Paula', { tier: pm.tier, fuente: pm.fuente })
+    check('Mario, pareja de Paula (PRO) → sigue en KIRI FREE (ya no hay PLUS gratis por la pareja)', pm.tier === 'FREE' && pm.fuente === 'gratis', { tier: pm.tier, fuente: pm.fuente })
     const px = await call(X, 'GET', '/plan')
     check('Authoriza caído → "sin conexión" (no se bloquea a nadie)', px.fuente === 'sin_conexion')
     await new Promise(r => setTimeout(r, 300))
@@ -164,19 +175,67 @@ async function main() {
     const ia = uso.variables?.find((v: any) => v.variableName === 'iaMensajesMes')
     check('Tu uso este mes: 5/5 categorías y 10/10 mensajes', cats?.currentCount === 5 && cats?.maxValue === 5 && cats?.usagePercentage === 100 && ia?.currentCount === 10, { cats, ia })
 
-    // ── Invitar amigos: 7 días de PLUS ──
+    // ── Invitar amigos: el amigo tiene descuento; quien invita gana 10 días cuando el amigo paga ──
+    const diasDe = async (u: { id: string }) => { const x = await prisma.user.findUnique({ where: { id: u.id }, select: { pruebaPlusHasta: true } }); return x?.pruebaPlusHasta ? (x.pruebaPlusHasta.getTime() - Date.now()) / 86400000 : 0 }
+    const pagada = (u: { correo: string }, codigo: string) => fetch(`http://127.0.0.1:${APP_PORT}/api/plan/factura-evento`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-internal-key': CLAVE },
+      body: JSON.stringify({ email: u.correo, evento: 'pagada', factura: { codigo, valor: 7450 } }),
+    }).then(r => r.json() as Promise<Record<string, any>>)
+    const mision = async (u: { id: string }, key: string) => (await prisma.missionProgress.findUnique({ where: { userId_missionKey_periodo: { userId: u.id, missionKey: key, periodo: 'referidos' } } }))?.progress ?? 0
+
     const N = await crear('Nico', { invitedById: I.id, isActive: true })
     await prisma.connection.create({ data: { requesterId: I.id, addresseeId: N.id, status: 'ACCEPTED', role: 'FRIEND' } })
     await acreditarReferido(N.id)
-    const iris = await prisma.user.findUnique({ where: { id: I.id }, select: { pruebaPlusHasta: true } })
-    const dias = iris?.pruebaPlusHasta ? (iris.pruebaPlusHasta.getTime() - Date.now()) / 86400000 : 0
-    check('Iris invitó a Nico → gana 7 días de KIRI PLUS', dias > 6.9 && dias <= 7.01, dias.toFixed(2))
+    check('Registrarse con el enlace ya NO da días gratis a quien invita', (await diasDe(I)) === 0)
+    const planN = await call(N, 'GET', '/plan')
+    check('Nico llegó invitado → tiene 50% en PLUS y 30% en PRO para su primer mes', planN.descuentoInvitado?.PLUS === 50 && planN.descuentoInvitado?.PRO === 30, planN.descuentoInvitado)
+    check('Felipe (sin invitación) no tiene descuento', (await call(F, 'GET', '/plan')).descuentoInvitado === null)
+
+    upgrades.length = 0
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    check('Nico se pasa a PLUS mensual → Kiri pide a Authoriza 50% en la primera factura, con la clave interna', upgrades[0]?.body.firstInvoiceDiscountPct === 50 && upgrades[0]?.conClave, upgrades[0])
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-pro', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    check('PRO (aunque el navegador diga "PLUS") → 30%: el plan sale del catálogo de Authoriza', upgrades[1]?.body.firstInvoiceDiscountPct === 30, upgrades[1]?.body)
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'annual' })
+    check('Pago anual → sin descuento de invitado', upgrades[2] && upgrades[2].body.firstInvoiceDiscountPct === undefined, upgrades[2]?.body)
+    check('…y no queda ningún % guardado para su primera factura', (await prisma.user.findUnique({ where: { id: N.id } }))?.descuentoPrimerMes === null)
+    await call(F, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    check('Felipe (no invitado) → sin descuento', upgrades[3] && upgrades[3].body.firstInvoiceDiscountPct === undefined)
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    check('Nico vuelve a elegir PLUS mensual → queda el 50% para su primera factura', (await prisma.user.findUnique({ where: { id: N.id } }))?.descuentoPrimerMes === 50)
+    check('Antes de pagar, Mi plan aún no muestra "tu primer mes tuvo descuento"', (await call(N, 'GET', '/plan')).primerMesInvitado === null)
+
+    const r1 = await pagada(N, 'F-1')
+    const d1 = await diasDe(I)
+    check('Nico paga su primera factura → Iris gana 10 días de KIRI PLUS', r1.referidoPremiado === true && d1 > 9.9 && d1 <= 10.01, d1.toFixed(2))
+    check('…avanza su misión "Un amigo se suscribe"', (await mision(I, 'referido_1')) === 1)
+    const planNPago = await call(N, 'GET', '/plan')
+    check('…y Nico ya no tiene descuento de invitado', planNPago.descuentoInvitado === null)
+    check('…durante ese mes, Mi plan le recuerda que su primer mes tuvo 50%', planNPago.primerMesInvitado?.pct === 50, planNPago.primerMesInvitado)
+    await prisma.user.update({ where: { id: N.id }, data: { primerPagoEn: new Date(Date.now() - 31 * 86_400_000) } })
+    check('Pasado el mes, el aviso desaparece (ya paga precio normal)', (await call(N, 'GET', '/plan')).primerMesInvitado === null)
     invalidarPlan(I.id)
     const planI = await resolverPlan(I.id)
-    check('…y ahora tiene PLUS de prueba', planI.tier === 'PLUS' && planI.fuente === 'prueba')
+    check('Iris ahora tiene KIRI PLUS por invitar', planI.tier === 'PLUS' && planI.fuente === 'prueba')
+    await pagada(N, 'F-2')
+    check('Una segunda factura de Nico no vuelve a premiar', Math.abs((await diasDe(I)) - d1) < 0.01)
+
+    for (const nombre of ['Olga', 'Pablo', 'Quique']) {
+      const amigo = await crear(nombre, { invitedById: I.id, isActive: true })
+      await pagada(amigo, `F-${nombre}`)
+    }
+    const d4 = await diasDe(I)
+    check('Solo los 3 primeros amigos suscritos dan días: 4 amigos → 30 días, no 40', d4 > 29.9 && d4 <= 30.02, d4.toFixed(2))
+    check('…y las 3 misiones de invitar quedan completas', (await mision(I, 'referido_3')) === 3)
+    const planIris = await call(I, 'GET', '/plan')
+    check('Mi plan de Iris muestra 4 amigos suscritos (tope de premio 3, 10 días c/u)', planIris.referidos?.suscritos === 4 && planIris.referidos?.maximo === 3 && planIris.referidos?.diasPorReferido === 10, planIris.referidos)
+
     await prisma.user.update({ where: { id: I.id }, data: { pruebaPlusHasta: new Date(Date.now() - 1000) } })
     invalidarPlan(I.id)
-    check('Al vencerse la prueba vuelve a FREE', (await resolverPlan(I.id)).tier === 'FREE')
+    check('Al vencerse los días vuelve a FREE', (await resolverPlan(I.id)).tier === 'FREE')
+
+    const nuevo = await prisma.user.findUnique({ where: { id: F.id }, select: { pruebaPlusHasta: true } })
+    check('Registrarse ya no da prueba de PLUS (sin días por defecto)', nuevo?.pruebaPlusHasta === null)
   } finally {
     await prisma.user.deleteMany({ where: { id: { in: ids } } })
     const quedan = await prisma.user.count({ where: { id: { in: ids } } })

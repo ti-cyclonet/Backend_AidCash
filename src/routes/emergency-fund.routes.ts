@@ -4,6 +4,8 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
+import type { Prisma } from '@prisma/client'
+import { recordOnboardingAction } from '../lib/missions.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -52,46 +54,43 @@ router.post('/transaction', validate(transactionSchema), async (req: Request, re
 
     const periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
 
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { fondoEmergenciaActual: true, cashBalance: true },
-    })
-    const fondoActual = Number(user?.fondoEmergenciaActual ?? 0)
-
     // Antes: el navegador descontaba la billetera en una llamada y sumaba al
     // fondo en otra (si una fallaba quedaban descuadrados), un retiro mayor
     // que el fondo se recortaba a 0 en silencio, y nada quedaba en el
     // historial de ahorro (ni en Balance ni en "Ahorros"). Ahora todo va en
     // una sola transacción y con validación.
-    if (tipo === 'aporte' && Number(user?.cashBalance ?? 0) < monto) {
-      res.status(400).json({ error: 'Saldo insuficiente', disponible: Number(user?.cashBalance ?? 0), requerido: monto })
-      return
-    }
-    if (tipo === 'retiro' && fondoActual < monto) {
-      res.status(400).json({ error: 'El fondo de emergencia no tiene ese saldo', disponible: fondoActual, requerido: monto })
-      return
-    }
-    const nuevoFondo = tipo === 'aporte' ? fondoActual + monto : fondoActual - monto
-
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: userId },
+    // La validación va dentro del mismo UPDATE y el fondo se mueve con
+    // increment/decrement: antes se guardaba un valor calculado con una lectura
+    // previa, y dos aportes seguidos cobraban dos veces pero sumaban uno.
+    const aporte = tipo === 'aporte'
+    const nuevoFondo = await prisma.$transaction(async tx => {
+      const r = await tx.user.updateMany({
+        where: aporte ? { id: userId, cashBalance: { gte: monto } } : { id: userId, fondoEmergenciaActual: { gte: monto } },
         data: {
-          fondoEmergenciaActual: nuevoFondo,
-          ...(tipo === 'aporte' ? planPocketDeduction('ahorro', monto) : planPocketCredit('ahorro', monto)),
+          fondoEmergenciaActual: aporte ? { increment: monto } : { decrement: monto },
+          ...((aporte ? planPocketDeduction('ahorro', monto) : planPocketCredit('ahorro', monto)) as Prisma.UserUpdateManyMutationInput),
         },
-      }),
-      prisma.emergencyFundHistory.create({
-        data: { userId, periodo, monto, tipo, nota },
-      }),
-      prisma.savingsHistory.create({
-        data: { userId, periodo, monto, tipo: tipo === 'aporte' ? 'ahorro' : 'retiro' },
-      }),
-    ])
+      })
+      if (r.count === 0) return null
+      await tx.emergencyFundHistory.create({ data: { userId, periodo, monto, tipo, nota } })
+      await tx.savingsHistory.create({ data: { userId, periodo, monto, tipo: aporte ? 'ahorro' : 'retiro' } })
+      const u = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { fondoEmergenciaActual: true } })
+      return Number(u.fondoEmergenciaActual)
+    })
+
+    if (nuevoFondo === null) {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { fondoEmergenciaActual: true, cashBalance: true } })
+      res.status(400).json(aporte
+        ? { error: 'Saldo insuficiente', disponible: Number(user?.cashBalance ?? 0), requerido: monto }
+        : { error: 'El fondo de emergencia no tiene ese saldo', disponible: Number(user?.fondoEmergenciaActual ?? 0), requerido: monto })
+      return
+    }
+
+    if (aporte) await recordOnboardingAction(userId, 'registrar_ahorro')
 
     res.status(201).json({
       fondoActual: nuevoFondo,
-      message: tipo === 'aporte' ? 'Aporte registrado' : 'Retiro registrado',
+      message: aporte ? 'Aporte registrado' : 'Retiro registrado',
     })
   } catch (error) {
     console.error('[EmergencyTransaction]', error)
