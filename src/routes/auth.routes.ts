@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import { LEGAL_VERSIONS, aceptaVersionesVigentes, consentimientoPendiente, consentPayload, consentLocalData, authorizaInternalHeaders } from '../lib/legal.js'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
 import { z } from 'zod'
@@ -37,6 +38,18 @@ const registerSchema = z.object({
   secondSurname: z.string().optional(),
   // Código del enlace de invitación con el que llegó (ver lib/invitaciones.ts)
   invitacion: z.string().max(40).optional(),
+  // Términos y autorización de datos: obligatorios, en su versión vigente
+  acceptTerms: z.literal(true, { errorMap: () => ({ message: 'Debes aceptar los Términos y Condiciones.' }) }),
+  acceptHabeasData: z.literal(true, { errorMap: () => ({ message: 'Debes autorizar el tratamiento de tus datos personales.' }) }),
+  termsVersion: z.string().max(60),
+  habeasDataVersion: z.string().max(60),
+})
+
+const consentimientoSchema = z.object({
+  acceptTerms: z.literal(true),
+  acceptHabeasData: z.literal(true),
+  termsVersion: z.string().max(60),
+  habeasDataVersion: z.string().max(60),
 })
 
 const loginSchema = z.object({
@@ -66,6 +79,11 @@ function getRefreshExpiry(): Date {
 router.post('/register', validate(registerSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const { nombre, correo, password, documentType, documentNumber, firstName, secondName, firstSurname, secondSurname, invitacion } = req.body
+    if (!aceptaVersionesVigentes(req.body)) {
+      // Versión distinta = la app tiene un texto viejo en caché: que recargue
+      res.status(409).json({ error: 'Los Términos o la autorización de datos se actualizaron. Recarga la página y acéptalos de nuevo.', code: 'LEGAL_VERSION' })
+      return
+    }
 
     // Verificar si el correo ya existe
     const existing = await prisma.user.findUnique({ where: { correo } })
@@ -99,6 +117,8 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
         fondoEmergenciaActual: 0,
         // 14 días de KIRI PLUS para conocer todo (lib/planes.ts)
         pruebaPlusHasta: new Date(Date.now() + DIAS_PRUEBA_REGISTRO * 86400000),
+        // Aceptó los Términos y la autorización de datos vigentes (Authoriza guarda la prueba)
+        ...consentLocalData(),
       },
     })
 
@@ -108,8 +128,11 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
       const authorizaUrl = env.AUTHORIZA_API_URL || 'http://localhost:3000'
       const authRes = await fetch(`${authorizaUrl}/api/auth/register-kiri`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        // Como servicio: así Authoriza registra la IP y el navegador del usuario
+        // (consentMeta) y no los del servidor de Kiri
+        headers: authorizaInternalHeaders(),
         body: JSON.stringify({
+          ...consentPayload(req),
           email: correo,
           password,
           firstName: firstName || nombre,
@@ -446,6 +469,50 @@ router.get('/me', authMiddleware, async (req: Request, res: Response): Promise<v
 
 const forgotPasswordSchema = z.object({
   correo: z.string().email('Correo electrónico inválido'),
+})
+
+// ─── Términos y autorización de datos ─────────────────────────────────────────
+
+/** ¿Debe aceptar (de nuevo) los documentos? Lo consulta la app al entrar. */
+router.get('/consentimiento', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  const user = await prisma.user.findUnique({
+    where: { id: req.user!.userId },
+    select: { terminosVersion: true, datosVersion: true, consentimientoAt: true },
+  })
+  if (!user) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+  res.json({
+    pendiente: consentimientoPendiente(user),
+    vigentes: LEGAL_VERSIONS,
+    aceptadas: { terms: user.terminosVersion, habeasData: user.datosVersion, fecha: user.consentimientoAt },
+  })
+})
+
+/** Aceptar las versiones vigentes (cuentas anteriores o cuando cambia el texto). */
+router.post('/consentimiento', authMiddleware, validate(consentimientoSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    if (!aceptaVersionesVigentes(req.body)) {
+      res.status(409).json({ error: 'Los documentos se actualizaron. Recarga la página y acéptalos de nuevo.', code: 'LEGAL_VERSION' })
+      return
+    }
+    const user = await prisma.user.findUnique({ where: { id: req.user!.userId }, select: { id: true, correo: true } })
+    if (!user) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+    // Primero la prueba legal en Authoriza; sin ella no se marca como aceptado
+    const r = await fetch(`${env.AUTHORIZA_API_URL}/api/auth/internal/consents`, {
+      method: 'POST',
+      headers: authorizaInternalHeaders(),
+      body: JSON.stringify({ email: user.correo, application: 'Kiri', source: 'KIRI_ACCEPT', ...consentPayload(req) }),
+    }).catch(() => null)
+    if (!r || !r.ok) {
+      console.warn('[Consentimiento] Authoriza no registró la aceptación:', r?.status)
+      res.status(503).json({ error: 'No pudimos registrar tu aceptación en este momento. Intenta de nuevo.' })
+      return
+    }
+    await prisma.user.update({ where: { id: user.id }, data: consentLocalData() })
+    res.json({ ok: true })
+  } catch (error) {
+    console.error('[Consentimiento]', error)
+    res.status(500).json({ error: 'No se pudo registrar la aceptación.' })
+  }
 })
 
 router.post('/forgot-password', validate(forgotPasswordSchema), async (req: Request, res: Response): Promise<void> => {

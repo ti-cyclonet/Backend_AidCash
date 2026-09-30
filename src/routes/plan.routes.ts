@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express'
+import { consentPayload, consentLocalData, authorizaInternalHeaders } from '../lib/legal.js'
 import bcrypt from 'bcryptjs'
 import { authMiddleware } from '../middleware/auth.js'
 import { requireInternalKey } from '../middleware/internal-key.js'
@@ -109,16 +110,16 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
 
     // Call Authoriza's upgrade-plan endpoint
     const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
+    // Al contratar se aceptan de nuevo los documentos vigentes (Authoriza guarda la prueba)
+    const aceptaDocumentos = acceptTerms === true && acceptHabeasData === true
     const upgradeResponse = await fetch(upgradeUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authorizaInternalHeaders(),
       body: JSON.stringify({
         email: userEmail,
         password,
         packageId,
-        // Aceptación de términos y tratamiento de datos al contratar (Authoriza la registra)
-        ...(acceptTerms ? { acceptTerms: true } : {}),
-        ...(acceptHabeasData ? { acceptHabeasData: true } : {}),
+        ...(aceptaDocumentos ? consentPayload(req) : {}),
         // Mensual o anual (el anual es una sola factura por el año, con descuento)
         billingCycle: billingCycle === 'annual' ? 'annual' : 'monthly',
       }),
@@ -141,7 +142,10 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
     // Recordarlo para mostrar en Mi plan "tu contrato está listo en FactoNet"
     await prisma.user.update({
       where: { id: (req as any).user.userId },
-      data: { cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString() } },
+      data: {
+        cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString() },
+        ...(aceptaDocumentos ? consentLocalData() : {}),
+      },
     }).catch(() => {})
 
     return res.json({
