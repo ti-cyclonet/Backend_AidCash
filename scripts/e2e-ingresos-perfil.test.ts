@@ -130,6 +130,24 @@ async function main() {
     await prisma.incomeRecord.create({ data: { userId: N.id, monto: 250000, tipo: 'salario' } })
     me = (await call(N, 'GET', '/auth/me')).user
     check('Primer mes (sin meses completos): el promedio es lo que lleva este mes', me.ingresoPromedio === 250000, me.ingresoPromedio)
+
+    // ── Saldo inicial del test ("¿cuánta plata tienes hoy?") ──
+    const S = await crear('Samuel Saldo', { tipoIngreso: 'fijo', ingresoBase: 3000000, cashBalance: 0 })
+    await prisma.fixedExpense.create({ data: { userId: S.id, nombre: 'Arriendo', monto: 900000, fechaCorte: '5' } })
+    const si = await call(S, 'POST', '/users/wallet/saldo-inicial', { monto: 2350000 })
+    const sDb = await prisma.user.findUnique({ where: { id: S.id } })
+    check('Saldo inicial: queda como Sueldo Real (cashBalance)', si.status === 201 && Number(sDb?.cashBalance) === 2350000, si)
+    const bolsillos = Number(sDb?.walletAhorro) + Number(sDb?.walletObligaciones) + Number(sDb?.walletLibre) + Number(sDb?.walletEndeudamiento)
+    check('…repartido en la billetera (obligaciones primero) y cuadra al peso', Math.abs(bolsillos - 2350000) < 1 && Number(sDb?.walletObligaciones) > 0, { bolsillos, obligaciones: Number(sDb?.walletObligaciones) })
+    check('…NO es un ingreso (no va al historial ni al promedio)', (await prisma.incomeRecord.count({ where: { userId: S.id } })) === 0)
+    const mision = await prisma.missionProgress.findFirst({ where: { userId: S.id, missionKey: 'registrar_ingreso_real' } })
+    check('…y cumple "Registra tu sueldo real"', !!mision && mision.progress >= mision.target, mision)
+    const si2 = await call(S, 'POST', '/users/wallet/saldo-inicial', { monto: 100000 })
+    check('Con saldo ya puesto no se puede pisar (409)', si2.status === 409 && Number((await prisma.user.findUnique({ where: { id: S.id } }))?.cashBalance) === 2350000, si2)
+    const C = await crear('Carla Doble', { cashBalance: 0 })
+    const dobles = await Promise.all([1, 2, 3].map(() => call(C, 'POST', '/users/wallet/saldo-inicial', { monto: 500000 })))
+    check('Triple envío a la vez: solo cuenta uno', dobles.filter(d => d.status === 201).length === 1 && Number((await prisma.user.findUnique({ where: { id: C.id } }))?.cashBalance) === 500000, dobles.map(d => d.status))
+    check('Monto 0 o negativo → 400', (await call(S, 'POST', '/users/wallet/saldo-inicial', { monto: 0 })).status === 400 && (await call(S, 'POST', '/users/wallet/saldo-inicial', { monto: -5 })).status === 400)
   } finally {
     await prisma.user.deleteMany({ where: { id: { in: ids } } })
     const quedan = await prisma.user.count({ where: { id: { in: ids } } })

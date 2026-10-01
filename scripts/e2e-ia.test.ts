@@ -102,6 +102,25 @@ async function main() {
     check('Ahorro sin bolsillo → el único bolsillo (Viaje a Cartagena)', ahorro?.bolsilloId === viaje.id)
     check('Categoría inexistente se descarta (no se inventan ids) y "5.000" → 5000', rara?.categoriaId === null && rara.monto === 5000)
     check('Acciones con monto 0 se descartan', c.acciones.length === 4)
+    check('Sin escenario que simular → simulacion null', c.simulacion === null)
+
+    // ── Simulaciones desde el chat (las cifras las calcula el frontend) ──
+    check('El coach sabe simular (reglas y esquema de "simulacion")', sis.includes('CÓMO SIMULAR ESCENARIOS') && !!(ultimo?.generationConfig.responseSchema as any)?.properties?.simulacion)
+    const sim = async (simulacion: unknown) => {
+      siguiente = { body: { respuesta: 'Mira la tarjeta.', acciones: [], sugerencias: [], ir: null, simulacion } }
+      return (await ia('POST', '/coach', { mensaje: 'simula' })).simulacion
+    }
+    const enUnAno = `${new Date().getFullYear() + 1}-06-30`
+    const s1 = await sim({ tipo: 'ahorro_futuro', nombre: null, monto: null, aporte: '300000', meses: 12, fecha: null, inicial: null, tasaAnual: 9.5 })
+    check('ahorro_futuro: aporte "300000" → número, 12 meses, tasa', s1?.tipo === 'ahorro_futuro' && s1.aporte === 300000 && s1.meses === 12 && s1.tasaAnual === 9.5, s1)
+    const s2 = await sim({ tipo: 'ahorro_meta', nombre: '  Celular  ', monto: 2500000, aporte: null, meses: null, fecha: enUnAno, inicial: 200000, tasaAnual: null })
+    check('ahorro_meta: nombre, precio, fecha futura y lo que ya tiene', s2?.nombre === 'Celular' && s2.monto === 2500000 && s2.fecha === enUnAno && s2.inicial === 200000, s2)
+    const s3 = await sim({ tipo: 'ahorro_meta', nombre: 'Viaje', monto: 3000000, fecha: '2020-12-31' })
+    check('Fecha pasada → se descarta la fecha (el usuario la elige)', s3?.monto === 3000000 && s3.fecha === null, s3)
+    check('Meta sin precio o ahorro sin aporte → sin simulación (la IA debe preguntar)', (await sim({ tipo: 'ahorro_meta', nombre: 'Viaje' })) === null && (await sim({ tipo: 'ahorro_futuro', meses: 12 })) === null)
+    const s4 = await sim({ tipo: 'compra_cuotas', nombre: 'Moto', monto: 8000000, meses: 9999, tasaAnual: 500 })
+    check('compra_cuotas con topes (meses ≤ 600, tasa ≤ 50%)', s4?.tipo === 'compra_cuotas' && s4.monto === 8000000 && s4.meses === 600 && s4.tasaAnual === 50, s4)
+    check('Tipo desconocido → null', (await sim({ tipo: 'hackear', monto: 1 })) === null)
 
     // ── Dictado ──
     siguiente = { body: {

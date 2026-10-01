@@ -93,7 +93,7 @@ export async function runAutoPay(now: Date = new Date()): Promise<AutoPayRunSumm
       // Para tarjetas, el monto real de esta cuota incluye lo financiado con
       // ella (pay-with-card) — no solo la columna base (ver cuotaEfectivaTarjeta).
       const montoPago = debt.tipoDeuda === 'TARJETA_CREDITO'
-        ? cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(debt, debtPeriodo(debt)), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debt.id } }))
+        ? cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(debt, debtPeriodo(debt)), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debt.id } }), { tarjeta: debt, periodo: debtPeriodo(debt) })
         : cuotaBaseDelPeriodo(debt, debtPeriodo(debt))
 
       const user = await prisma.user.findUnique({ where: { id: debt.userId }, select: { cashBalance: true } })

@@ -48,7 +48,7 @@ export function serializarDeuda(
 
   const cuotaDe = (p: string) => {
     const base = cuotaBaseDelPeriodo(d, p)
-    return d.tipoDeuda === 'TARJETA_CREDITO' ? cuotaEfectivaTarjeta(base, installments) : base
+    return d.tipoDeuda === 'TARJETA_CREDITO' ? cuotaEfectivaTarjeta(base, installments, { tarjeta: d, periodo: p }) : base
   }
   const cuotaPeriodo = cuotaDe(periodo)
   const status = computePeriodStatus(payments, periodo, Number(d.saldoRestante))
