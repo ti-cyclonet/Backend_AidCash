@@ -189,6 +189,14 @@ router.post('/register', validate(registerSchema), async (req: Request, res: Res
   }
 })
 
+// ─── GET /auth/legal-versiones ────────────────────────────────────────────────
+// Versiones vigentes de los Términos y la autorización de datos. Las usa la
+// landing (cyclonet.com.co/kiri-finance) para registrar cuentas sin tener los
+// textos copiados: el registro exige exactamente estas versiones.
+router.get('/legal-versiones', (_req: Request, res: Response) => {
+  res.json(LEGAL_VERSIONS)
+})
+
 // ─── POST /auth/login ─────────────────────────────────────────────────────────
 
 router.post('/login', validate(loginSchema), async (req: Request, res: Response): Promise<void> => {

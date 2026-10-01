@@ -154,6 +154,15 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
       if (tier === 'PLUS' || tier === 'PRO') descuento = disponible[tier]
     }
 
+    // La aceptación de Términos + autorización de datos ES la firma del cliente
+    // en el nuevo contrato (Authoriza la registra así): sin ella no se contrata.
+    if (acceptTerms !== true || acceptHabeasData !== true) {
+      return res.status(400).json({
+        success: false,
+        error: 'Debes aceptar los Términos y Condiciones y autorizar el tratamiento de tus datos para cambiar de plan.',
+      })
+    }
+
     // Call Authoriza's upgrade-plan endpoint (con la clave interna: Authoriza
     // solo acepta el descuento si viene del backend de Kiri)
     const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
@@ -191,7 +200,7 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
     await prisma.user.update({
       where: { id: (req as any).user.userId },
       data: {
-        cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString(), ...(descuento > 0 ? { descuentoPrimerMes: descuento } : {}) },
+        cambioPlan: { packageId, plan: typeof packageName === 'string' ? packageName.slice(0, 80) : null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString(), firmado: aceptaDocumentos, ...(descuento > 0 ? { descuentoPrimerMes: descuento } : {}) },
         ...(aceptaDocumentos ? consentLocalData() : {}),
         // Si aún no ha pagado nada, el % que llevará su primera factura (o nada)
         ...(disponible ? { descuentoPrimerMes: descuento > 0 ? descuento : null } : {}),
@@ -219,10 +228,15 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
  */
 router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
   try {
-    const { email, password, packageId } = req.body
+    const { email, password, packageId, acceptTerms, acceptHabeasData, billingCycle } = req.body
 
     if (!email || !password || !packageId) {
       return res.status(400).json({ success: false, error: 'Todos los campos son requeridos.' })
+    }
+    // Igual que en Mi plan: aceptar Términos + autorización de datos es la
+    // firma del cliente en el contrato nuevo (solo falta la del administrador)
+    if (acceptTerms !== true || acceptHabeasData !== true) {
+      return res.status(400).json({ success: false, error: 'Debes aceptar los Términos y Condiciones y autorizar el tratamiento de tus datos para contratar el plan.' })
     }
 
     // 1. Validate user exists locally and password is correct
@@ -272,13 +286,26 @@ router.post('/upgrade-from-landing', async (req: Request, res: Response) => {
       const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
       const upgradeRes = await fetch(upgradeUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, packageId }),
+        // Como servicio: Authoriza guarda la IP/navegador del usuario con la aceptación
+        headers: authorizaInternalHeaders(),
+        body: JSON.stringify({
+          email, password, packageId,
+          ...consentPayload(req),
+          billingCycle: billingCycle === 'annual' ? 'annual' : 'monthly',
+        }),
       })
       const upgradeData = await upgradeRes.json() as any
 
       if (upgradeRes.ok && upgradeData.success) {
-        // User keeps access while contract is pending — do NOT deactivate
+        // User keeps access while contract is pending — do NOT deactivate.
+        // Se recuerda para Mi plan ("ya firmaste, falta el administrador").
+        await prisma.user.update({
+          where: { id: user.id },
+          data: {
+            cambioPlan: { packageId, plan: null, ciclo: billingCycle === 'annual' ? 'anual' : 'mensual', fecha: new Date().toISOString(), firmado: true },
+            ...consentLocalData(),
+          },
+        }).catch(() => {})
         return res.json({ success: true, message: upgradeData.message })
       }
 
