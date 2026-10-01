@@ -106,7 +106,7 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
   // aunque quedara pendiente todo lo financiado con ella ese periodo.
   const cuotaBase = cuotaBaseDelPeriodo(existing, periodo)
   const cuotaVigente = existing.tipoDeuda === 'TARJETA_CREDITO'
-    ? cuotaEfectivaTarjeta(cuotaBase, await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }))
+    ? cuotaEfectivaTarjeta(cuotaBase, await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }), { tarjeta: existing, periodo })
     : cuotaBase
 
   const paymentsThisPeriod = await prisma.debtPayment.findMany({ where: { debtId, periodo } })
@@ -212,7 +212,7 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
   await recordMissionAction(userId, 'pagar_obligacion')
 
   const cuotaPeriodoRespuesta = debt.tipoDeuda === 'TARJETA_CREDITO'
-    ? cuotaEfectivaTarjeta(cuotaBase, await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }))
+    ? cuotaEfectivaTarjeta(cuotaBase, await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debtId } }), { tarjeta: existing, periodo })
     : cuotaBase
 
   const debtName = existing.nombre

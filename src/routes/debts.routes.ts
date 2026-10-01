@@ -610,7 +610,7 @@ router.patch('/:id', validate(updateDebtSchema), async (req: Request, res: Respo
 
       if (yaPagoEstePeriodo) {
         const cuotaVigente = updated.tipoDeuda === 'TARJETA_CREDITO'
-          ? cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(updated, periodo), installments)
+          ? cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(updated, periodo), installments, { tarjeta: updated, periodo })
           : cuotaBaseDelPeriodo(updated, periodo)
         const prev = await tx.debtPayment.findMany({ where: { debtId: id, periodo } })
         const falta = Math.round((cuotaVigente - prev.reduce((s, p) => s + Number(p.montoPagado), 0)) * 100) / 100
@@ -809,7 +809,7 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
         id: tarjetaActualizada.id,
         nombre: tarjetaActualizada.nombre,
         saldoRestante: Number(tarjetaActualizada.saldoRestante),
-        cuotaPeriodo: cuotaEfectivaTarjeta(Number(tarjetaActualizada.cuotaPeriodo), installments),
+        cuotaPeriodo: cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(tarjetaActualizada, debtPeriodo(tarjetaActualizada)), installments, { tarjeta: tarjetaActualizada, periodo: debtPeriodo(tarjetaActualizada) }),
       } : null,
       cuotasAgregadas: cuotas,
       incrementoCuota,

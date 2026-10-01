@@ -2,6 +2,7 @@
  * Crea (o borra) un usuario temporal con datos realistas para revisar la app
  * en el navegador sin tocar cuentas reales. Siembra por la API normal (:4000).
  *   npx tsx scripts/qa-usuario-navegador.ts crear   → imprime tokens para localStorage
+ *   npx tsx scripts/qa-usuario-navegador.ts nuevo   → recién registrado, con el test inicial por hacer
  *   npx tsx scripts/qa-usuario-navegador.ts borrar <userId>
  */
 import 'dotenv/config'
@@ -9,6 +10,7 @@ import crypto from 'node:crypto'
 
 async function main() {
   const { prisma } = await import('../src/config/database.js')
+  const { consentLocalData } = await import('../src/lib/legal.js')
   const jwt = (await import('jsonwebtoken')).default
   const [accion, idBorrar] = process.argv.slice(2)
   if (accion === 'borrar') {
@@ -19,6 +21,17 @@ async function main() {
   }
 
   const stamp = Date.now()
+  // "nuevo": recién registrado, sin datos y con el test inicial por hacer
+  if (accion === 'nuevo') {
+    const correo = `nuevo-${stamp}@qa-navegador.test`
+    const u = await prisma.user.create({ data: { nombre: 'Nico Nuevo', primerNombre: 'Nico', correo, username: `nuevo${String(stamp).slice(-8)}`, passwordHash: 'x', onboardingDone: false, isActive: true, ...consentLocalData() } })
+    const token = jwt.sign({ userId: u.id, correo }, process.env.JWT_SECRET!, { expiresIn: '12h' })
+    const refresh = crypto.randomBytes(40).toString('hex')
+    await prisma.refreshToken.create({ data: { userId: u.id, token: refresh, expiresAt: new Date(Date.now() + 86400000) } })
+    console.log(JSON.stringify({ userId: u.id, correo, token, refresh }))
+    await prisma.$disconnect()
+    return
+  }
   const correo = `laura-${stamp}@qa-navegador.test`
   const u = await prisma.user.create({ data: {
     nombre: 'Laura Sofía Gómez Restrepo', primerNombre: 'Laura', segundoNombre: 'Sofía', primerApellido: 'Gómez', segundoApellido: 'Restrepo',
@@ -26,6 +39,8 @@ async function main() {
     ingresoBase: 3800000, frecuenciaIngreso: 'quincenal', tipoIngreso: 'fijo', diasPago: [15, 30],
     cashBalance: 2150000, walletLibre: 2150000, pruebaPlusHasta: new Date(Date.now() + 10 * 86400000),
     guiasVistas: ['dashboard', 'gestion', 'obligaciones', 'ahorro', 'balance', 'social', 'misiones', 'jardin'],
+    // Ya aceptó los Términos vigentes (si no, la app pide aceptarlos antes de seguir)
+    ...consentLocalData(),
   } })
   const token = jwt.sign({ userId: u.id, correo }, process.env.JWT_SECRET!, { expiresIn: '12h' })
   const refresh = crypto.randomBytes(40).toString('hex')

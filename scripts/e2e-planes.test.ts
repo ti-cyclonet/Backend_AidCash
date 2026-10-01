@@ -192,16 +192,18 @@ async function main() {
     check('Felipe (sin invitación) no tiene descuento', (await call(F, 'GET', '/plan')).descuentoInvitado === null)
 
     upgrades.length = 0
-    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    const sinFirma = await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    check('Sin aceptar Términos y datos no se contrata (es la firma del contrato)', sinFirma.status === 400 && upgrades.length === 0, sinFirma.status)
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly', acceptTerms: true, acceptHabeasData: true })
     check('Nico se pasa a PLUS mensual → Kiri pide a Authoriza 50% en la primera factura, con la clave interna', upgrades[0]?.body.firstInvoiceDiscountPct === 50 && upgrades[0]?.conClave, upgrades[0])
-    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-pro', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-pro', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly', acceptTerms: true, acceptHabeasData: true })
     check('PRO (aunque el navegador diga "PLUS") → 30%: el plan sale del catálogo de Authoriza', upgrades[1]?.body.firstInvoiceDiscountPct === 30, upgrades[1]?.body)
-    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'annual' })
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'annual', acceptTerms: true, acceptHabeasData: true })
     check('Pago anual → sin descuento de invitado', upgrades[2] && upgrades[2].body.firstInvoiceDiscountPct === undefined, upgrades[2]?.body)
     check('…y no queda ningún % guardado para su primera factura', (await prisma.user.findUnique({ where: { id: N.id } }))?.descuentoPrimerMes === null)
-    await call(F, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    await call(F, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly', acceptTerms: true, acceptHabeasData: true })
     check('Felipe (no invitado) → sin descuento', upgrades[3] && upgrades[3].body.firstInvoiceDiscountPct === undefined)
-    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly' })
+    await call(N, 'POST', '/plan/upgrade', { packageId: 'pkg-plus', password: 'x', packageName: 'KIRI PLUS', billingCycle: 'monthly', acceptTerms: true, acceptHabeasData: true })
     check('Nico vuelve a elegir PLUS mensual → queda el 50% para su primera factura', (await prisma.user.findUnique({ where: { id: N.id } }))?.descuentoPrimerMes === 50)
     check('Antes de pagar, Mi plan aún no muestra "tu primer mes tuvo descuento"', (await call(N, 'GET', '/plan')).primerMesInvitado === null)
 

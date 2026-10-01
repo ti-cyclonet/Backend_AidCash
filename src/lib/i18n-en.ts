@@ -579,4 +579,6 @@ export const EN: Record<string, string> = {
   "El valor es demasiado grande. Revisa el monto.": "That amount is too large. Please check it.",
   "Ese pago es mayor que lo que queda de la deuda ({0}). Revisa el valor.": "That payment is more than what's left on the debt ({0}). Please check the amount.",
   "La información enviada es demasiado grande": "The information sent is too large",
+  "Tu billetera ya tiene saldo: registra lo que te entre como un ingreso.": "Your wallet already has a balance: record new money as income.",
+  "Error al guardar tu saldo inicial": "Couldn't save your starting balance",
 }

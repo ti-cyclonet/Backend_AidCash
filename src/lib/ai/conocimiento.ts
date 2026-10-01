@@ -55,7 +55,9 @@ con sus días de pago; se cambia en Perfil).
 ### Billetera
 - "Sueldo base" = lo que planeas recibir por periodo (quincena o mes). "Sueldo real / Disponible"
   = la plata que de verdad tienes; baja al pagar obligaciones o registrar gastos y sube al
-  registrar ingresos.
+  registrar ingresos. Arranca con lo que el usuario dijo en el test inicial que tenía ese día en
+  total (bancos, Nequi, Daviplata, efectivo, monedas; sin el cupo de las tarjetas). Si su plata
+  real no cuadra con la de Kiri, es que no registró algún gasto o ingreso.
 - Cómo recibes tu plata (lápiz de la tarjeta Sueldo base, y en el test inicial). Tres casos:
   1) Sueldo fijo mensual, o quincenal con las dos quincenas iguales.
   2) Sueldo fijo quincenal que cambia: se pone lo que pagan cada día de pago (ej. $1.000.000 el 15
@@ -105,7 +107,9 @@ con sus días de pago; se cambia en Perfil).
 - Atrasos: marca cuotas de periodos anteriores sin pagar. Se puede adelantar la próxima cuota y
   deshacer el último abono o todo el pago del periodo.
 - Tarjetas de crédito: pagar una deuda o gasto fijo con tarjeta lo convierte en consumo a cuotas
-  (el interés se calcula igual y la cuota de la tarjeta sube; baja sola cuando termina).
+  (el interés se calcula igual y la cuota de la tarjeta sube desde el PRÓXIMO periodo, como en el
+  extracto del banco; baja sola cuando termina). Comprar con la tarjeta no cambia la cuota del mes en
+  curso: si ya la pagaste, sigue "Pagada".
 - Registrar gasto (botón en Obligaciones): nombre, monto, categoría de presupuesto, si es hormiga,
   y si tienes pareja, "Del hogar" para sumarlo al presupuesto compartido. También puede pagarse
   con tarjeta de crédito.
@@ -114,6 +118,10 @@ con sus días de pago; se cambia en Perfil).
   recordarle por WhatsApp. Se puede ampliar, perdonar o reabrir.
 - Estrategias de deuda: Bola de Nieve (primero la más pequeña) y Avalancha (primero la de tasa
   más alta).
+- Simulador de Escenarios (tarjeta morada en Obligaciones): "¿qué pasa si me compro X a
+  cuotas?". Con tu capacidad de endeudamiento del periodo da 3 planes (Conservadora 25%, Moderada
+  50%, Total 100%) con cuota y plazo, y el impacto en tu ahorro, gasto libre y fecha libre de
+  deudas. "Aceptar escenario" lo crea como deuda.
 
 ## BALANCE — ruta /balance
 - Filtra por periodo; 6 indicadores (balance neto, total recibido, total gastado, ahorro del
@@ -132,6 +140,11 @@ con sus días de pago; se cambia en Perfil).
 ## AHORRO — ruta /ahorro
 - Bolsillos de ahorro con nombre, color, ícono y meta (libre o con fecha límite). "Depositar"
   pasa plata del disponible al bolsillo (el árbol llueve); "Retirar" la devuelve.
+- Simulador de Ahorro (tarjeta verde bajo el total ahorrado), con dos preguntas:
+  "¿Cuánto tendré?" (ahorrando X cada quincena o mes durante N meses) y "Quiero comprar algo"
+  (precio y fecha → cuánto ahorrar por quincena/mes). Opcional: lo que ya tienes y el rendimiento
+  anual (cuenta de ahorro, CDT). Lo compara con tu ahorro sugerido del periodo y, si no alcanza,
+  dice cuándo lo lograrías con ese ahorro. "Crear bolsillo con esta meta" lo vuelve un bolsillo.
 - Fondo de emergencia: meta mínima 3 meses de obligaciones, ideal 6.
 - Los bolsillos compartidos de Social también aparecen aquí.
 
@@ -215,7 +228,11 @@ con sus días de pago; se cambia en Perfil).
   tarjetas que el usuario revisa, corrige y confirma antes de guardar.
 - Escáner de recibos: foto de una factura; Kiri lee el total, el comercio y los ítems. Si entiende
   el valor pero no a qué corresponde, el usuario elige a dónde va.
-- Simulador: prueba escenarios de deuda/abonos.
+- Simulador (atajo del botón de Kiri): elige entre comprar a cuotas (Obligaciones) o ahorro.
+- Simulaciones en el chat: "si ahorro 200 mil por quincena, ¿cuánto tengo en un año?", "quiero un
+  celular de 3 millones en diciembre, ¿cuánto ahorro?", "¿qué pasa si compro una moto de 8
+  millones a cuotas?". Kiri muestra la tarjeta del escenario con las cifras y un botón para
+  abrirlo en el simulador completo.
 - En el chat, Kiri Coach también puede proponer acciones (registrar gasto o ingreso, crear
   categoría, deuda, gasto fijo o bolsillo, ahorrar, pagar una obligación, registrar un "Me deben").
   Nada se guarda sin que el usuario toque "Confirmar".

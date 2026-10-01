@@ -1,5 +1,6 @@
 import { prisma } from '../config/database.js'
 import { planPocketCredit } from './wallet.js'
+import { debtPeriodo } from './debt-calc.js'
 import type { Prisma } from '@prisma/client'
 
 /**
@@ -9,12 +10,20 @@ import type { Prisma } from '@prisma/client'
  * sin importar si de verdad se había pagado — el saldo real seguía debiéndose
  * pero la cuota sugerida lo "olvidaba" en silencio. Ahora solo deja de sumar
  * cuando montoAbonado alcanza el total del plan.
+ *
+ * Una compra con la tarjeta empieza a cobrarse en el periodo SIGUIENTE al de
+ * la compra (llega en el próximo extracto). Antes sumaba de inmediato a la
+ * cuota del periodo en curso: si ya se había pagado la tarjeta este mes, al
+ * comprar algo volvía a "Pago parcial" y le faltaba la cuota de esa compra.
  */
 export function cuotaEfectivaTarjeta(
   cuotaBase: number,
-  installments: { cuotaMensual: Prisma.Decimal | number; cuotasTotal: number; montoAbonado: Prisma.Decimal | number }[],
+  installments: { cuotaMensual: Prisma.Decimal | number; cuotasTotal: number; montoAbonado: Prisma.Decimal | number; createdAt: Date }[],
+  cobro: { tarjeta: { frecuenciaPago: string; diasPago: string }; periodo: string },
 ): number {
-  const activos = installments.filter(p => Number(p.montoAbonado) < Number(p.cuotaMensual) * p.cuotasTotal)
+  const activos = installments.filter(p =>
+    Number(p.montoAbonado) < Number(p.cuotaMensual) * p.cuotasTotal
+    && debtPeriodo(cobro.tarjeta, p.createdAt) < cobro.periodo)
   const sumaActivos = activos.reduce((s, p) => s + Number(p.cuotaMensual), 0)
   return Math.round((cuotaBase + sumaActivos) * 100) / 100
 }

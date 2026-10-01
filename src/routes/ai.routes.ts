@@ -7,6 +7,7 @@ import { generarJSON, iaConfigurada, IAError, MENSAJE_IA, type TurnoIA } from '.
 import { construirContexto, contextoComoTexto } from '../lib/ai/contexto.js'
 import { ESQUEMA_ACCION, REGLAS_ACCIONES, normalizarAcciones } from '../lib/ai/acciones.js'
 import { MANUAL_KIRI } from '../lib/ai/conocimiento.js'
+import { ESQUEMA_SIMULACION, REGLAS_SIMULACION, normalizarSimulacion } from '../lib/ai/simulacion.js'
 import { prisma } from '../config/database.js'
 import { resolverPlan, mejoraPara, ILIMITADO, type PlanResuelto } from '../lib/planes.js'
 import { periodoIA } from '../middleware/limit-enforcement.js'
@@ -137,6 +138,7 @@ const ESQUEMA_COACH = {
       required: ['ruta', 'etiqueta'],
       description: 'Pantalla de Kiri a la que conviene ir (ej. para ver o hacer lo que explicaste). null si no aplica.',
     },
+    simulacion: ESQUEMA_SIMULACION,
   },
   required: ['respuesta', 'acciones', 'sugerencias'],
 }
@@ -164,6 +166,8 @@ ${pantalla ? `- El usuario está ahora en la pantalla: ${pantalla}` : ''}
 
 ${REGLAS_ACCIONES}
 
+${REGLAS_SIMULACION}
+
 ═══ MANUAL DE LA APP ═══
 ${MANUAL_KIRI}
 
@@ -174,7 +178,7 @@ ${contextoComoTexto(ctx)}`
       ...historial.slice(-10).map(h => ({ role: (h.rol === 'coach' ? 'model' : 'user') as 'user' | 'model', parts: [{ text: h.texto }] })),
       { role: 'user', parts: [{ text: mensaje }] },
     ]
-    const out = await generarJSON<{ respuesta?: string; acciones?: unknown; sugerencias?: unknown; ir?: { ruta?: string; etiqueta?: string } | null }>({
+    const out = await generarJSON<{ respuesta?: string; acciones?: unknown; sugerencias?: unknown; ir?: { ruta?: string; etiqueta?: string } | null; simulacion?: unknown }>({
       sistema: await enIdioma(req, sistema), turnos, esquema: ESQUEMA_COACH, temperatura: 0.5,
     })
     const uso = await sumarUso(req.user!.userId, 'coach')
@@ -184,7 +188,8 @@ ${contextoComoTexto(ctx)}`
       acciones: normalizarAcciones(out.acciones, ctx),
       sugerencias: Array.isArray(out.sugerencias) ? out.sugerencias.filter((s): s is string => typeof s === 'string').slice(0, 3) : [],
       ir: out.ir?.ruta && RUTAS.includes(out.ir.ruta) ? { ruta: out.ir.ruta, etiqueta: String(out.ir.etiqueta ?? 'Ir') } : null,
-    })
+      // Escenario de ahorro o de compra a cuotas: el frontend calcula las cifras
+      simulacion: normalizarSimulacion(out.simulacion),    })
   } catch (error) {
     responderError(res, error, 'coach')
   }
