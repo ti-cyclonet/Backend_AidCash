@@ -74,6 +74,43 @@ function getRefreshExpiry(): Date {
   return date
 }
 
+/**
+ * Perfil de Kiri para una cuenta CycloNet que ya existe en Authoriza (con su
+ * contraseña verificada). Sin Términos aceptados: la app los pide al entrar.
+ */
+async function crearPerfilDesdeCycloNet(correo: string) {
+  const partes = await getAuthorizaName(correo)
+  const nombre = (partes ? unirNombre({
+    primerNombre: partes.firstName, segundoNombre: partes.secondName ?? undefined,
+    primerApellido: partes.firstSurname, segundoApellido: partes.secondSurname ?? undefined,
+  }) : '').trim() || correo.split('@')[0]
+  try {
+    return await prisma.user.create({
+      data: {
+        nombre,
+        ...(partes?.firstName && partes?.firstSurname ? {
+          primerNombre: partes.firstName, segundoNombre: partes.secondName,
+          primerApellido: partes.firstSurname, segundoApellido: partes.secondSurname,
+        } : {}),
+        correo,
+        username: await generateUniqueUsername(nombre),
+        passwordHash: AUTHORIZA_MANAGED_PASSWORD,
+        isActive: true,
+        frecuenciaIngreso: 'mensual',
+        ingresoBase: 0,
+        onboardingDone: false,
+        metaAhorroGlobal: 5000,
+        saldoAhorroTotal: 0,
+        fondoEmergenciaActual: 0,
+      },
+    })
+  } catch (err: any) {
+    // Dos inicios de sesión simultáneos: el otro ya lo creó
+    if (err?.code === 'P2002') return prisma.user.findUnique({ where: { correo } })
+    throw err
+  }
+}
+
 // ─── POST /auth/register ──────────────────────────────────────────────────────
 
 router.post('/register', validate(registerSchema), async (req: Request, res: Response): Promise<void> => {
@@ -218,7 +255,7 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
       return
     }
 
-    const user = await prisma.user.findUnique({ where: { correo } })
+    let user = await prisma.user.findUnique({ where: { correo } })
 
     if (!cred.exists && user) {
       // Cuenta antigua que solo existía en Kiri: su contraseña local ya no se
@@ -235,19 +272,19 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
       return
     }
 
-    if (!user) {
-      // Cuenta CycloNet válida pero aún sin perfil en Kiri
-      res.status(403).json({
-        error: 'Tu cuenta CycloNet aún no está habilitada en Kiri. Regístrate en Kiri con este correo y tu misma contraseña.',
-        code: 'NOT_IN_KIRI',
-      })
-      return
+    if (!user && cred.allowed) {
+      // Cuenta CycloNet válida (p. ej. con rol de Kiri asignado desde Authoriza)
+      // pero aún sin perfil en Kiri: se crea al entrar, como en Shotra. Los
+      // Términos los acepta en la app (ConsentGate) y luego hace el onboarding.
+      user = await crearPerfilDesdeCycloNet(correo)
     }
 
     // 2. Estado de acceso (Authoriza manda)
     if (!cred.allowed) {
-      await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
-      olvidarSesion(user.id)
+      if (user) {
+        await prisma.user.update({ where: { id: user.id }, data: { isActive: false } }).catch(() => {})
+        olvidarSesion(user.id)
+      }
       const messages: Record<string, string> = {
         NOT_VERIFIED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
         UNCONFIRMED: 'Debes verificar tu correo antes de iniciar sesión. Revisa tu bandeja de entrada.',
@@ -261,6 +298,11 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
         code: 'ACCESS_DENIED',
         reason: cred.reason,
       })
+      return
+    }
+    if (!user) {
+      // No debería pasar (se acaba de crear); por si la creación falló
+      res.status(503).json({ error: 'No pudimos preparar tu cuenta de Kiri. Intenta de nuevo en unos minutos.' })
       return
     }
     if (user.isActive === false) {
