@@ -44,25 +44,56 @@ export function rangoDePeriodo(periodoDe: (d: Date) => string, now: Date = new D
   return { inicio, fin, diasTotales, diasTranscurridos }
 }
 
-export async function rangoUsuario(userId: string, alcance: Alcance, now: Date = new Date()): Promise<{ rango: Rango; frecuencia: string }> {
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { frecuenciaIngreso: true, diasPago: true } })
-  const frecuencia = user?.frecuenciaIngreso ?? 'mensual'
-  const periodoDe = alcance === 'mes'
-    ? (d: Date) => getPeriodo('mensual', [], d)
-    : (d: Date) => getPeriodo(frecuencia, user?.diasPago ?? [], d)
-  return { rango: rangoDePeriodo(periodoDe, now), frecuencia }
+/**
+ * Cada categoría dice si su límite es del MES o de la QUINCENA (el usuario lo
+ * elige al crearla). Antes el límite siempre era mensual y, si el usuario
+ * cobraba quincenal, se partía a la mitad: un mercado del mes entero hecho en
+ * una quincena salía "excedido". Ahora el límite se usa tal cual y lo que
+ * cambia es el rango en el que se suma el gasto:
+ *   - mensual: el mes de pago del usuario (sus dos quincenas juntas, o su mes);
+ *   - quincenal: la quincena actual (la de sus días de cobro; si cobra mensual,
+ *     1–15 y 16–fin de mes).
+ */
+export type FrecuenciaLimite = 'mensual' | 'quincenal'
+export const esFrecuenciaLimite = (v: unknown): v is FrecuenciaLimite => v === 'mensual' || v === 'quincenal'
+
+interface PeriodosUsuario {
+  frecuencia: string
+  /** Periodo de ingreso del usuario (lo que la app llama "este periodo") */
+  usuario: (d: Date) => string
+  mes: (d: Date) => string
+  quincena: (d: Date) => string
 }
 
-/**
- * El límite de una categoría se define MENSUAL (así lo pide el formulario).
- * Para un usuario quincenal el gasto se reinicia cada quincena, así que su
- * límite del periodo es la parte proporcional — antes se comparaba el gasto de
- * media quincena contra el límite del mes entero y nunca saltaba la alerta.
- */
-export function limiteDelRango(limiteMensual: number, rango: Rango): number {
-  const diasMes = new Date(rango.inicio.getFullYear(), rango.inicio.getMonth() + 1, 0).getDate()
-  if (rango.diasTotales >= diasMes - 1) return limiteMensual
-  return Math.round((limiteMensual * rango.diasTotales / diasMes) * 100) / 100
+async function periodosUsuario(userId: string): Promise<PeriodosUsuario> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { frecuenciaIngreso: true, diasPago: true } })
+  const frecuencia = user?.frecuenciaIngreso ?? 'mensual'
+  const diasPago = user?.diasPago ?? []
+  const usuario = (d: Date) => getPeriodo(frecuencia, diasPago, d)
+  return {
+    frecuencia,
+    usuario,
+    // "2026-10-Q1" y "2026-10-Q2" son el mismo mes de pago
+    mes: frecuencia === 'quincenal' ? (d: Date) => usuario(d).slice(0, 7) : (d: Date) => getPeriodo('mensual', [], d),
+    quincena: frecuencia === 'quincenal' ? usuario : (d: Date) => getPeriodo('quincenal', [], d),
+  }
+}
+
+/** Rango donde se suma el gasto de una categoría según cómo maneja su límite. */
+function rangoCategoria(p: PeriodosUsuario, frecuenciaLimite: string, alcance: Alcance, now: Date): Rango {
+  if (alcance === 'mes') return rangoDePeriodo(d => getPeriodo('mensual', [], d), now)
+  return rangoDePeriodo(frecuenciaLimite === 'quincenal' ? p.quincena : p.mes, now)
+}
+
+/** Límite comparable con ese rango: en la vista de mes calendario una categoría quincenal cuenta dos quincenas. */
+function limiteCategoria(montoLimite: number, frecuenciaLimite: string, alcance: Alcance): number {
+  return alcance === 'mes' && frecuenciaLimite === 'quincenal' ? montoLimite * 2 : montoLimite
+}
+
+export async function rangoUsuario(userId: string, alcance: Alcance, now: Date = new Date()): Promise<{ rango: Rango; frecuencia: string }> {
+  const p = await periodosUsuario(userId)
+  const periodoDe = alcance === 'mes' ? (d: Date) => getPeriodo('mensual', [], d) : p.usuario
+  return { rango: rangoDePeriodo(periodoDe, now), frecuencia: p.frecuencia }
 }
 
 export interface Movimiento {
@@ -114,26 +145,38 @@ function agruparItems(movs: Movimiento[], max = 8) {
 const suma = (movs: Movimiento[]) => Math.round(movs.reduce((s, m) => s + m.monto, 0) * 100) / 100
 
 export async function resumenCategorias(userId: string, alcance: Alcance = 'periodo', now: Date = new Date()) {
-  const { rango, frecuencia } = await rangoUsuario(userId, alcance, now)
-  // Periodo anterior del mismo largo lógico (el que termina justo donde empieza este).
-  const { rango: rangoAnterior } = await rangoUsuario(userId, alcance, new Date(rango.inicio.getTime() - DIA))
+  const p = await periodosUsuario(userId)
+  const frecuencia = p.frecuencia
+  // Rango del periodo del usuario: para "Sin categoría" y para la cabecera
+  const rango = rangoDePeriodo(alcance === 'mes' ? (d: Date) => getPeriodo('mensual', [], d) : p.usuario, now)
 
-  const [categorias, actual, anterior] = await Promise.all([
+  // Cada categoría suma en su propio rango (mes o quincena); los movimientos de
+  // un mismo rango se consultan una sola vez.
+  const cache = new Map<string, ReturnType<typeof movimientosEnRango>>()
+  const movsDe = (r: Rango) => {
+    const k = `${r.inicio.getTime()}:${r.fin.getTime()}`
+    if (!cache.has(k)) cache.set(k, movimientosEnRango(userId, r.inicio, r.fin))
+    return cache.get(k)!
+  }
+
+  const [categorias, actualUsuario] = await Promise.all([
     prisma.budgetCategory.findMany({ where: { userId }, orderBy: { nombre: 'asc' } }),
-    movimientosEnRango(userId, rango.inicio, rango.fin),
-    movimientosEnRango(userId, rangoAnterior.inicio, rangoAnterior.fin),
+    movsDe(rango),
   ])
 
-  const enCurso = now < rango.fin
-  const categoriasOut = categorias.map(c => {
+  const categoriasOut = await Promise.all(categorias.map(async c => {
+    const r = rangoCategoria(p, c.frecuenciaLimite, alcance, now)
+    // Periodo anterior del mismo tipo (el que termina justo donde empieza este)
+    const rAnt = rangoCategoria(p, c.frecuenciaLimite, alcance, new Date(r.inicio.getTime() - DIA))
+    const [actual, anterior] = await Promise.all([movsDe(r), movsDe(rAnt)])
     const movs = actual.get(c.id) ?? []
     const gastado = suma(movs)
-    const limiteMensual = Number(c.montoLimite)
-    const limite = limiteDelRango(limiteMensual, rango)
+    const limiteConfigurado = Number(c.montoLimite)
+    const limite = limiteCategoria(limiteConfigurado, c.frecuenciaLimite, alcance)
     const porcentaje = limite > 0 ? Math.round((gastado / limite) * 100) : 0
-    // Proyección lineal al cierre del periodo según el ritmo de gasto actual.
-    const proyeccion = enCurso && rango.diasTranscurridos > 0
-      ? Math.round(gastado / rango.diasTranscurridos * rango.diasTotales)
+    // Proyección lineal al cierre del rango según el ritmo de gasto actual.
+    const proyeccion = now < r.fin && r.diasTranscurridos > 0
+      ? Math.round(gastado / r.diasTranscurridos * r.diasTotales)
       : gastado
     const gastadoAnterior = suma(anterior.get(c.id) ?? [])
     const estado: 'sin_limite' | 'ok' | 'alerta' | 'excedido' =
@@ -143,7 +186,9 @@ export async function resumenCategorias(userId: string, alcance: Alcance = 'peri
       nombre: c.nombre,
       icono: c.icono,
       color: c.color,
-      limiteMensual,
+      frecuenciaLimite: esFrecuenciaLimite(c.frecuenciaLimite) ? c.frecuenciaLimite : 'mensual' as FrecuenciaLimite,
+      periodo: { inicio: r.inicio, fin: r.fin },
+      limiteConfigurado,
       limite,
       gastado,
       disponible: Math.max(0, Math.round((limite - gastado) * 100) / 100),
@@ -156,9 +201,9 @@ export async function resumenCategorias(userId: string, alcance: Alcance = 'peri
       items: agruparItems(movs),
       movimientos: movs.map(m => ({ monto: m.monto, fecha: m.fecha })),
     }
-  })
+  }))
 
-  const sinCat = actual.get(null) ?? []
+  const sinCat = actualUsuario.get(null) ?? []
   const totalLimite = categoriasOut.reduce((s, c) => s + c.limite, 0)
   const totalGastado = Math.round(categoriasOut.reduce((s, c) => s + c.gastado, 0) * 100) / 100
 
@@ -191,14 +236,15 @@ export async function resumenCategorias(userId: string, alcance: Alcance = 'peri
 export async function alertaTrasGasto(userId: string, categoryId: string, montoNuevo: number) {
   const cat = await prisma.budgetCategory.findFirst({ where: { id: categoryId, userId } })
   if (!cat || Number(cat.montoLimite) <= 0) return null
-  const { rango } = await rangoUsuario(userId, 'periodo')
+  const p = await periodosUsuario(userId)
+  const rango = rangoCategoria(p, cat.frecuenciaLimite, 'periodo', new Date())
   const movs = (await movimientosEnRango(userId, rango.inicio, rango.fin)).get(categoryId) ?? []
   const gastado = suma(movs)
-  const limite = limiteDelRango(Number(cat.montoLimite), rango)
+  const limite = Number(cat.montoLimite)
   if (limite <= 0) return null
   const antes = (gastado - montoNuevo) / limite
   const ahora = gastado / limite
   const nivel = antes < 1 && ahora >= 1 ? 'excedido' : antes < 0.8 && ahora >= 0.8 ? 'alerta' : null
   if (!nivel) return null
-  return { nivel, categoria: cat.nombre, categoryId, gastado, limite, porcentaje: Math.round(ahora * 100) }
+  return { nivel, categoria: cat.nombre, categoryId, gastado, limite, porcentaje: Math.round(ahora * 100), frecuenciaLimite: cat.frecuenciaLimite }
 }

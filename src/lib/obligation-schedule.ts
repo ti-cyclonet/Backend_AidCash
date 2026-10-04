@@ -7,7 +7,7 @@
  */
 import type { Debt, DebtPayment, FixedExpense, FixedExpensePayment } from '@prisma/client'
 import { getPeriodo, getMontoPorPeriodo, esPendienteProximoPeriodo } from './period.js'
-import { cuotaBaseDelPeriodo } from './debt-calc.js'
+import { cuotaBaseDelPeriodo, esLineaCredito } from './debt-calc.js'
 
 export function parseDays(value: string | null | undefined): number[] {
   if (!value) return []
@@ -43,7 +43,9 @@ export function isDebtPending(debt: Debt, payments: DebtPayment[]): boolean {
   const paid = payments
     .filter(p => p.debtId === debt.id && p.periodo === periodo)
     .reduce((s, p) => s + Number(p.montoPagado), 0)
-  return paid < cuotaBaseDelPeriodo(debt, periodo)
+  // Una tarjeta o crédito de compras nunca pide más de lo que se debe (en $0 no hay nada pendiente)
+  const cuota = esLineaCredito(debt.tipoDeuda) ? Math.min(cuotaBaseDelPeriodo(debt, periodo), Number(debt.saldoRestante)) : cuotaBaseDelPeriodo(debt, periodo)
+  return cuota > 0 && paid < cuota
 }
 
 export function isFixedExpensePending(fe: FixedExpense, payments: FixedExpensePayment[]): boolean {

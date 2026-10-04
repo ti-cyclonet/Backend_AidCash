@@ -4,7 +4,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { resolverPlan, inicioHistorial, mejoraPara } from '../lib/planes.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
 import { generarTablaAmortizacion } from '../lib/amortization.js'
-import { cuotaBaseDelPeriodo, tasaDelPeriodo } from '../lib/debt-calc.js'
+import { cuotaBaseDelPeriodo, tasaDelPeriodo, esLineaCredito, TIPOS_LINEA_CREDITO } from '../lib/debt-calc.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -221,7 +221,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       ]),
       // Totales históricos de deudas (excluye pagos a tarjetas propias y marcadores)
       prisma.debtPayment.aggregate({
-        where: { debt: { userId, tipoDeuda: { not: 'TARJETA_CREDITO' } }, esMarcador: false },
+        where: { debt: { userId, tipoDeuda: { notIn: [...TIPOS_LINEA_CREDITO] } }, esMarcador: false },
         _sum: { pagoInteres: true, abonoCapital: true, montoPagado: true },
       }),
       prisma.debtPayment.groupBy({
@@ -261,7 +261,13 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     // Los pagos "marcador" (el usuario declaró que esa cuota ya la había pagado
     // por fuera de Kiri) solo existen para que la obligación no salga vencida:
     // ese dinero nunca salió de la billetera en Kiri, así que no es un egreso.
-    const debtPaymentsForSpending = debtPayments.filter(p => p.debt.tipoDeuda !== 'TARJETA_CREDITO' && !p.esMarcador)
+    const debtPaymentsForSpending = debtPayments.filter(p => !esLineaCredito(p.debt.tipoDeuda) && !p.esMarcador)
+    // Los intereses y cargos de una tarjeta (detectados con el saldo del banco)
+    // sí son un costo real que no se contó en ninguna compra: van al indicador
+    // de interés pagado.
+    const interesLineasCredito = debtPayments
+      .filter(p => esLineaCredito(p.debt.tipoDeuda) && !p.esMarcador)
+      .reduce((s, p) => s + Number(p.pagoInteres), 0)
     const fixedPaymentsForSpending = fixedExpensePayments.filter(p => !p.esMarcador)
 
     // Tipo de cada movimiento de un ahorro compartido según su marca en la nota
@@ -294,7 +300,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     const totalFixed   = fixedPaymentsForSpending.reduce((s, p) => s + Number(p.montoPagado), 0)
 
     // ── Amortización: intereses pagados vs capital abonado ────────────────────
-    const totalInteresPagado = debtPaymentsForSpending.reduce((s, p) => s + Number(p.pagoInteres), 0)
+    const totalInteresPagado = debtPaymentsForSpending.reduce((s, p) => s + Number(p.pagoInteres), 0) + interesLineasCredito
     const totalCapitalAbonado = debtPaymentsForSpending.reduce((s, p) => s + Number(p.abonoCapital), 0)
     const totalPagosDeuda = debtPaymentsForSpending.reduce((s, p) => s + Number(p.montoPagado), 0)
 

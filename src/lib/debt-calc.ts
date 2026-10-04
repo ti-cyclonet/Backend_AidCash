@@ -3,6 +3,31 @@ import type { DebtPayment, Prisma } from '@prisma/client'
 
 type DebtSchedule = { frecuenciaPago: string; diasPago: string }
 
+/**
+ * Tarjetas de crédito y créditos de compras (Addi, Sistecrédito, cupos de
+ * almacén): líneas de crédito con CUPO que se reutiliza. Comparten todo el
+ * comportamiento de tarjeta — compras a cuotas que se cobran desde el próximo
+ * periodo, cuota que cambia con cada compra, sin "atrasos" de cuota fija — y,
+ * sobre todo, NUNCA se terminan: con saldo $0 siguen activas y disponibles.
+ * Antes una tarjeta pagada por completo quedaba "saldada" y desaparecía de
+ * los selectores de pago con tarjeta.
+ */
+export const TIPOS_LINEA_CREDITO = ['TARJETA_CREDITO', 'CREDITO_COMPRAS'] as const
+export function esLineaCredito(tipoDeuda: string | null | undefined): boolean {
+  return tipoDeuda === 'TARJETA_CREDITO' || tipoDeuda === 'CREDITO_COMPRAS'
+}
+
+/** Estado tras un pago: un préstamo en $0 queda saldado; una línea de crédito sigue activa. */
+export function estadoTrasPago(tipoDeuda: string, nuevoSaldo: number): 'activa' | 'saldada' {
+  return nuevoSaldo <= 0 && !esLineaCredito(tipoDeuda) ? 'saldada' : 'activa'
+}
+
+/** Cupo disponible de una línea de crédito (null si no tiene cupo registrado). */
+export function cupoDisponible(cupoTotal: number | null | undefined, ocupado: number): number | null {
+  if (cupoTotal == null || !(Number(cupoTotal) > 0)) return null
+  return Math.round((Number(cupoTotal) - ocupado) * 100) / 100
+}
+
 /** Periodo inmediatamente siguiente de la deuda — destino de "Adelantar próxima cuota". */
 export function debtPeriodoSiguiente(debt: DebtSchedule, now: Date = new Date()): string {
   return periodoSiguienteDe(d => debtPeriodo(debt, d), now)
@@ -63,7 +88,7 @@ export function calcularAtrasos(
   payments: { periodo: string; montoPagado: Prisma.Decimal | number }[],
   now: Date = new Date(),
 ): Atraso[] {
-  if (debt.tipoDeuda === 'TARJETA_CREDITO' || debt.estado !== 'activa') return []
+  if (esLineaCredito(debt.tipoDeuda) || debt.estado !== 'activa') return []
   const atrasos: Atraso[] = []
   for (const periodo of periodosRevisables(debt, now)) {
     const cuota = cuotaBaseDelPeriodo(debt, periodo)

@@ -166,9 +166,13 @@ model RefreshToken {
 
 // ─── Tipo de deuda ─────────────────────────────────────────────────────────────
 
+// PRESTAMO: saldo que baja hasta 0 y se termina.
+// TARJETA_CREDITO y CREDITO_COMPRAS (Addi, Sistecrédito, cupos de almacén):
+// líneas de crédito con cupo que se reutiliza — en $0 siguen activas.
 enum TipoDeuda {
   PRESTAMO
   TARJETA_CREDITO
+  CREDITO_COMPRAS
 }
 
 model Debt {
@@ -181,6 +185,9 @@ model Debt {
   saldoRestante     Decimal    @map("saldo_restante") @db.Decimal(12, 2)
   saldoPrincipal    Decimal?   @map("saldo_principal") @db.Decimal(12, 2)
   cuotaPeriodo      Decimal    @map("cuota_periodo") @db.Decimal(12, 2)
+  // Cupo total de una tarjeta o crédito de compras (null en préstamos, o si
+  // el usuario todavía no lo puso). Ocupado = saldoRestante; disponible = cupo − ocupado.
+  cupoTotal         Decimal?   @map("cupo_total") @db.Decimal(14, 2)
   tasaInteres       Decimal?   @map("tasa_interes") @db.Decimal(5, 2)
   tasaInteresAplicada Decimal? @map("tasa_interes_aplicada") @db.Decimal(7, 4)
   tasaInteresMensual Decimal?  @map("tasa_interes_mensual") @db.Decimal(7, 4)
@@ -226,6 +233,7 @@ model Debt {
   budgetCategory   BudgetCategory? @relation(fields: [budgetCategoryId], references: [id], onDelete: SetNull)
   connection       Connection?     @relation(fields: [connectionId], references: [id], onDelete: SetNull)
   payments         DebtPayment[]
+  ajustes          DebtAjuste[]
   gastosVinculados FixedExpense[] @relation("TarjetaVinculada")
   cardInstallments DebtCardInstallment[] @relation("TarjetaInstallments")
   // Pagos de OTRAS deudas/gastos fijos que se financiaron con ESTA tarjeta
@@ -313,6 +321,9 @@ model DebtPayment {
   // del periodo (no sale vencida), pero nunca salió dinero de la billetera:
   // undo-pay no debe devolver nada y Balance no debe contarlo como egreso.
   esMarcador     Boolean  @default(false) @map("es_marcador")
+  // Saldo que dijo el banco después de este pago (si el usuario lo dio): con él
+  // se separan los intereses y cargos reales de una tarjeta.
+  saldoBanco     Decimal? @map("saldo_banco") @db.Decimal(12, 2)
   createdAt      DateTime @default(now()) @map("created_at")
 
   debt        Debt                 @relation(fields: [debtId], references: [id], onDelete: Cascade)
@@ -323,6 +334,27 @@ model DebtPayment {
   @@index([debtId, periodo])
   @@index([tarjetaId])
   @@map("debt_payments")
+}
+
+// ─── Ajuste de saldo de una línea de crédito ("Actualizar saldo") ─────────────
+// El usuario dice cuánto debe según el banco y Kiri registra la diferencia:
+//   interes    → intereses y cargos que cobró el banco (sube el saldo)
+//   compras    → compras que no se registraron (sube el saldo; además se crea el gasto)
+//   correccion → el banco dice menos de lo que Kiri tenía (baja el saldo)
+model DebtAjuste {
+  id             String   @id @default(uuid())
+  debtId         String   @map("debt_id")
+  tipo           String
+  monto          Decimal  @db.Decimal(12, 2)
+  saldoAnterior  Decimal  @map("saldo_anterior") @db.Decimal(12, 2)
+  saldoPosterior Decimal  @map("saldo_posterior") @db.Decimal(12, 2)
+  periodo        String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  debt Debt @relation(fields: [debtId], references: [id], onDelete: Cascade)
+
+  @@index([debtId, periodo])
+  @@map("debt_ajustes")
 }
 
 // ─── Entidades Bancarias (colaborativa) ───────────────────────────────────────
@@ -696,6 +728,8 @@ model BudgetCategory {
   color                 String   @default("#6366F1")
   tipo                  String   @default("gasto") // gasto | ingreso | ahorro
   montoLimite           Decimal  @default(0) @map("monto_limite") @db.Decimal(12, 2)
+  // mensual: el límite es para todo el mes de pago | quincenal: es por quincena
+  frecuenciaLimite      String   @default("mensual") @map("frecuencia_limite")
   linkedFixedExpenseIds String[] @default([]) @map("linked_fixed_expense_ids")
 
   user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)

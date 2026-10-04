@@ -21,8 +21,9 @@ con sus días de pago; se cambia en Perfil).
 ## NAVEGACIÓN
 - En PC: barra lateral con Árbol Kiri, Gestión, Obligaciones, Balance, Ahorro, Social, Misiones y
   el perfil abajo. La campana de notificaciones está arriba en la barra lateral.
-- En celular: barra superior (Social, campana, foto de perfil) y barra inferior con Gestión,
-  Obligaciones, botón "+" (acciones rápidas), Balance y Ahorro.
+- En celular: barra superior (Social, campana, foto de perfil) y barra inferior flotante con
+  Gestión, Obligaciones, botón "+" elevado en el centro (Registrar: acciones rápidas), Balance y
+  Ahorro. La barra inferior se esconde al bajar la página y vuelve al subir.
 - Botón flotante de Kiri Coach 🌱 (abajo a la derecha): abre el chat. En PC, al pasar el mouse
   muestra tres atajos: Dictar datos (voz), Simulador y Escanear recibo. En celular esos atajos
   salen en el "+" de la barra inferior. Dentro del chat también están el micrófono y el escáner.
@@ -76,8 +77,10 @@ con sus días de pago; se cambia en Perfil).
   el sueldo.
 - Ingresos extra: pueden ser de una vez, por unos meses (definido) o indefinidos.
 ### Presupuesto
-- Categorías de gasto (ej. Comida, Transporte, Salidas) con un límite mensual; en quincenal Kiri
-  lo reparte por quincena. Se pueden vincular gastos fijos a una categoría.
+- Categorías de gasto (ej. Comida, Transporte, Salidas) con un límite. Al crearla o editarla se
+  elige "¿Cómo manejas este límite?": Mensual (el monto es para todo el mes de pago; NO se divide
+  por quincenas y se suma todo lo gastado en el mes) o Quincenal (el monto es para cada quincena y
+  se reinicia en cada una). Se pueden vincular gastos fijos a una categoría.
 - Cada gasto registrado puede ir a una categoría; Kiri sugiere la categoría según tu historial y
   palabras clave. Avisa al llegar al 80% y al pasar el 100% del límite.
 - Tocar una categoría abre su detalle (lo gastado, movimientos); el lápiz la edita y el botón
@@ -97,13 +100,37 @@ con sus días de pago; se cambia en Perfil).
   datos se calcula?". Horizonte de 3, 6, 12 o 24 meses.
 
 ## OBLIGACIONES — ruta /obligaciones
-- Todo lo que debes pagar: deudas (préstamos y tarjetas de crédito) y gastos fijos (arriendo,
-  servicios, internet, suscripciones; frecuencia mensual, quincenal, semanal o anual).
-- Para cada una: cuota, día de pago, saldo, tasa de interés MENSUAL (ej. 1,85% mes vencido) y
-  pago automático ⚡. Se paga con el check/botón de pagar.
-- Al pagar puedes escribir el "saldo real del banco": Kiri calcula el interés real que pagaste y
-  ajusta la tasa. Si pagaste un poco menos (ej. llegó $180.000 y no $182.000), marca "Con este
-  valor quedó pagada la cuota".
+- Todo lo que debes pagar: deudas y gastos fijos (arriendo, servicios, internet, suscripciones;
+  frecuencia mensual, quincenal, semanal o anual).
+- "Agregar deuda" pregunta primero "¿Qué quieres registrar?" con tres tipos:
+  1) Tarjeta de crédito (Nu, Bancolombia, Falabella, RappiCard…) y 2) Crédito de compras (Addi,
+     Sistecrédito, Brilla, cupos de almacén): son LÍNEAS DE CRÉDITO. Solo piden nombre, cupo total,
+     cuánto tiene ocupado hoy (puede ser $0) y cuánto paga al mes. La tasa es opcional y se puede
+     escribir mensual o anual (E.A.; Kiri la convierte a mensual). En "Más opciones": día de pago
+     opcional (vacío = fin de mes) y categoría. NO piden número de tarjeta ni fechas de corte.
+  3) Préstamo (libre inversión, carro, moto, un amigo): cuánto debe hoy, cuota, cada cuánto paga,
+     días de pago, tasa opcional y, opcional, cuánto le prestaron al inicio.
+- Las tarjetas y créditos de compras NUNCA se terminan ni desaparecen: al dejarlas en $0 Kiri
+  celebra "¡quedó en ceros!" y siguen disponibles para compras. Ocupado = lo que debe; disponible =
+  cupo − ocupado. La cuota del mes nunca pasa de lo que debía al empezar el periodo (las compras
+  del mes no suben la cuota de ese mes).
+- "Tus cupos" (arriba de las deudas cuando hay tarjetas): cupo total, ocupado, disponible y % de
+  uso entre todas. Lo sano es usar menos del 30% del cupo. Las que no tienen cupo no se suman ahí;
+  el cupo se agrega con el lápiz de la tarjeta.
+- Al pagar o comprar con tarjeta, Kiri muestra el disponible de cada una y avisa si quedarías por
+  encima del 80% o te pasarías del cupo; es solo un aviso: igual se puede registrar (si el banco
+  le subió el cupo, que lo actualice con el lápiz).
+- Para cada deuda: cuota, día de pago, saldo, tasa de interés MENSUAL (ej. 1,85% mes vencido) y
+  pago automático ⚡. Se paga con el check/botón de pagar. Con el lápiz también se puede cambiar el
+  tipo (tarjeta, crédito de compras o préstamo).
+- Intereses detectados: al pagar puedes escribir el "saldo real del banco", o en cualquier momento
+  usar "Actualizar saldo" en cada tarjeta y escribir cuánto dice el banco que debes. Si es más de
+  lo que Kiri tenía, el usuario elige si fueron "Intereses y cargos" (cuota de manejo, seguros…)
+  o "Compras que no registré" (se agregan como gasto, sin mover la billetera); si es menos, Kiri
+  corrige el saldo. Con los intereses Kiri calcula la tasa real mensual, la muestra en la tarjeta
+  y la usa en sus estimaciones; los intereses de tarjetas suman al interés pagado de Balance.
+- Si pagaste un poco menos (ej. llegó $180.000 y no $182.000), marca "Con este valor quedó pagada
+  la cuota".
 - Atrasos: marca cuotas de periodos anteriores sin pagar. Se puede adelantar la próxima cuota y
   deshacer el último abono o todo el pago del periodo.
 - Tarjetas de crédito: pagar una deuda o gasto fijo con tarjeta lo convierte en consumo a cuotas

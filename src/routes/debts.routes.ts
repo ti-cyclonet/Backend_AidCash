@@ -9,9 +9,9 @@ import { resolverPlan } from '../lib/planes.js'
 import { recordOnboardingAction, recordMissionAction } from '../lib/missions.js'
 import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { cuotaEfectivaTarjeta, reverseCardPaymentAllocations, buildInstallmentRevertOps } from '../lib/installments.js'
-import { debtPeriodo, debtPeriodoSiguiente, computePeriodStatus, calcularPagoDeuda, calcularAtrasos, cuotaBaseDelPeriodo, periodosRevisables, tasaDelPeriodo } from '../lib/debt-calc.js'
+import { debtPeriodo, debtPeriodoSiguiente, computePeriodStatus, calcularPagoDeuda, calcularAtrasos, cuotaBaseDelPeriodo, periodosRevisables, tasaDelPeriodo, esLineaCredito, estadoTrasPago } from '../lib/debt-calc.js'
 import { payDebtServer, PeriodoInvalidoError, PagoExcedeSaldoError } from '../lib/debt-payments.js'
-import { cargarContextoDeudas, serializarDeuda, serializarUnaDeuda } from '../lib/debt-view.js'
+import { cargarContextoDeudas, serializarDeuda, serializarUnaDeuda, avisoDeCupo } from '../lib/debt-view.js'
 import { randomUUID } from 'crypto'
 import type { Prisma } from '@prisma/client'
 
@@ -22,16 +22,19 @@ router.use(authMiddleware)
 
 const createDebtSchema = z.object({
   nombre: nombreRequerido,
-  montoTotal: z.number().min(0.01),
+  // En una tarjeta o crédito de compras pueden ser 0 (cupo sin usar); en un
+  // préstamo deben ser mayores que 0 (ver superRefine al final).
+  montoTotal: z.number().min(0),
   saldoRestante: z.number().min(0).optional(),
-  cuotaPeriodo: z.number().min(0.01),
+  cuotaPeriodo: z.number().min(0),
+  cupoTotal: z.number().min(0).nullable().optional(),
   acreedor: z.string().trim().max(120).default(''),
   frecuenciaPago: z.enum(['mensual', 'quincenal']).default('mensual'),
   diasPago: diasDelMes.default('1'), // "15" o "15,30"
   tasaInteres: z.number().min(0).max(999, 'La tasa de interés no puede pasar de 999%').optional(),
   prioridad: z.enum(['alta', 'media', 'baja']).default('media'),
   bankEntityId: z.string().uuid().nullable().optional(),
-  tipoDeuda: z.enum(['PRESTAMO', 'TARJETA_CREDITO']).default('PRESTAMO'),
+  tipoDeuda: z.enum(['PRESTAMO', 'TARJETA_CREDITO', 'CREDITO_COMPRAS']).default('PRESTAMO'),
   // Si el usuario confirma que la cuota de ESTE periodo ya la pagó (por fuera
   // de Kiri, antes de registrar la deuda), sembramos un DebtPayment marcador
   // para que no salga "vencida" con una fecha que ya está resuelta — ver
@@ -49,6 +52,10 @@ const createDebtSchema = z.object({
   connectionId: z.string().uuid().optional(),
   montoParticipanteA: z.number().min(0).optional(),
   montoParticipanteB: z.number().min(0).optional(),
+}).superRefine((d, ctx) => {
+  if (esLineaCredito(d.tipoDeuda)) return
+  if (!(d.montoTotal > 0)) ctx.addIssue({ code: 'custom', path: ['montoTotal'], message: 'El monto de la deuda debe ser mayor que 0' })
+  if (!(d.cuotaPeriodo > 0)) ctx.addIssue({ code: 'custom', path: ['cuotaPeriodo'], message: 'La cuota debe ser mayor que 0' })
 })
 
 const updateDebtSchema = z.object({
@@ -62,6 +69,9 @@ const updateDebtSchema = z.object({
   tasaInteres: z.number().min(0).max(999, 'La tasa de interés no puede pasar de 999%').nullable().optional(),
   prioridad: z.enum(['alta', 'media', 'baja']).optional(),
   estado: z.enum(['activa', 'saldada', 'vencida']).optional(),
+  // Reclasificar (ej. una "Nu" que quedó como préstamo) y el cupo de una línea de crédito
+  tipoDeuda: z.enum(['PRESTAMO', 'TARJETA_CREDITO', 'CREDITO_COMPRAS']).optional(),
+  cupoTotal: z.number().min(0).nullable().optional(),
   pagoAutomatico: z.boolean().optional(),
   budgetCategoryId: z.string().uuid().nullable().optional(),
   // Respuesta a "¿ya pagaste la cuota de este periodo?" — el formulario de
@@ -213,7 +223,7 @@ router.get('/shared', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda, yaPagoEstePeriodo, nuevaProximoPeriodo, budgetCategoryId, esCompartida, connectionId, montoParticipanteA, montoParticipanteB } = req.body
+    const { nombre, montoTotal, saldoRestante, cuotaPeriodo, cupoTotal, acreedor, frecuenciaPago, diasPago, tasaInteres, prioridad, bankEntityId, tipoDeuda, yaPagoEstePeriodo, nuevaProximoPeriodo, budgetCategoryId, esCompartida, connectionId, montoParticipanteA, montoParticipanteB } = req.body
     const frecuenciaFinal = frecuenciaPago || 'mensual'
 
     // Deuda compartida — la deuda sigue siendo 100% de `userId` (mismos pagos
@@ -264,6 +274,7 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
       saldoRestante: saldoRestante ?? montoTotal,
       montoInicial: montoTotal,
       cuotaPeriodo,
+      cupoTotal: esLineaCredito(tipoDeuda) && cupoTotal ? cupoTotal : null,
       acreedor: acreedor || '',
       frecuenciaPago: frecuenciaFinal,
       diasPago: diasPago || '1',
@@ -309,23 +320,8 @@ router.post('/', validate(createDebtSchema), checkLimit('nDeudas'), async (req: 
 
     await recordOnboardingAction(userId, 'registrar_obligacion')
 
-    res.status(201).json({
-      debt: {
-        ...debt,
-        montoTotal: Number(debt.montoTotal),
-        saldoRestante: Number(debt.saldoRestante),
-        cuotaPeriodo: Number(debt.cuotaPeriodo),
-        tasaInteres: debt.tasaInteres ? Number(debt.tasaInteres) : null,
-        pagadoEstePeriodo: !!yaPagoEstePeriodo,
-        montoPagadoEstePeriodo: yaPagoEstePeriodo ? Number(cuotaPeriodo) : null,
-        montoParticipanteA: debt.montoParticipanteA ? Number(debt.montoParticipanteA) : null,
-        montoParticipanteB: debt.montoParticipanteB ? Number(debt.montoParticipanteB) : null,
-        pendienteProximoPeriodo: esPendienteProximoPeriodo(debt.activoDesdePeriodo, debtPeriodo(debt)),
-        pagosPeriodo: yaPagoEstePeriodo
-          ? { cantidad: 1, ultimoMonto: Number(cuotaPeriodo), ultimoEsMarcador: true }
-          : { cantidad: 0, ultimoMonto: null, ultimoEsMarcador: false },
-      },
-    })
+    // Misma forma que GET /debts (cupo, disponible, cuota exigible, marcador…)
+    res.status(201).json({ debt: await serializarUnaDeuda(debt.id) })
   } catch (error) {
     console.error('[CreateDebt]', error)
     res.status(500).json({ error: 'Error al crear deuda' })
@@ -501,7 +497,7 @@ router.post('/:id/undo-pay', validate(undoPaySchema), async (req: Request, res: 
     // vigentes al registrarse — hay que devolverles ese montoAbonado antes de
     // borrar los DebtPayment (una vez borrados, la asignación se va en cascada
     // pero ya no se puede reconstruir cuánto corresponde a cada plan).
-    if (existing.tipoDeuda === 'TARJETA_CREDITO') {
+    if (esLineaCredito(existing.tipoDeuda)) {
       ops.push(...(await reverseCardPaymentAllocations(cashPayments.map(p => p.id))))
     }
     ops.push(prisma.debtPayment.deleteMany({ where: { id: { in: aDeshacer.map(p => p.id) } } }))
@@ -593,7 +589,13 @@ router.patch('/:id', validate(updateDebtSchema), async (req: Request, res: Respo
       data.cuotaOverridePeriodo = periodo
     }
 
-    const installments = existing.tipoDeuda === 'TARJETA_CREDITO'
+    const tipoFinal = fields.tipoDeuda ?? existing.tipoDeuda
+    // Un préstamo no tiene cupo; al pasar una línea de crédito a préstamo se borra
+    if ('tipoDeuda' in fields && !esLineaCredito(tipoFinal)) data.cupoTotal = null
+    // Si la deuda pasa a ser línea de crédito y estaba "saldada", vuelve a estar disponible
+    if (esLineaCredito(tipoFinal) && existing.estado === 'saldada') data.estado = 'activa'
+
+    const installments = esLineaCredito(tipoFinal)
       ? await prisma.debtCardInstallment.findMany({ where: { tarjetaId: id } })
       : []
 
@@ -609,7 +611,7 @@ router.patch('/:id', validate(updateDebtSchema), async (req: Request, res: Respo
       }
 
       if (yaPagoEstePeriodo) {
-        const cuotaVigente = updated.tipoDeuda === 'TARJETA_CREDITO'
+        const cuotaVigente = esLineaCredito(updated.tipoDeuda)
           ? cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(updated, periodo), installments, { tarjeta: updated, periodo })
           : cuotaBaseDelPeriodo(updated, periodo)
         const prev = await tx.debtPayment.findMany({ where: { debtId: id, periodo } })
@@ -637,6 +639,90 @@ router.patch('/:id', validate(updateDebtSchema), async (req: Request, res: Respo
   } catch (error) {
     console.error('[UpdateDebt]', error)
     res.status(500).json({ error: 'Error al actualizar deuda' })
+  }
+})
+
+// ─── POST /debts/:id/ajustar-saldo ("Actualizar saldo") ─────────────────────
+// "Mi banco dice que debo $X": Kiri registra la diferencia con su saldo.
+//   - Sube y el motivo es 'interes' (default): intereses, cuota de manejo,
+//     seguros… quedan como interés de la tarjeta (y se aprende la tasa).
+//   - Sube y el motivo es 'compras': compras que no se registraron; además se
+//     crea el gasto (sin tocar la billetera: se pagó con crédito).
+//   - Baja: 'correccion' (el banco dice menos de lo que Kiri tenía).
+
+const ajustarSaldoSchema = z.object({
+  saldoBanco: z.number().min(0),
+  motivo: z.enum(['interes', 'compras']).default('interes'),
+})
+
+router.post('/:id/ajustar-saldo', validate(ajustarSaldoSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+    const { saldoBanco, motivo } = req.body as z.infer<typeof ajustarSaldoSchema>
+
+    const debt = await prisma.debt.findFirst({ where: { id, userId, estado: 'activa' } })
+    if (!debt) {
+      res.status(404).json({ error: 'Deuda activa no encontrada' })
+      return
+    }
+    const esLinea = esLineaCredito(debt.tipoDeuda)
+    if (motivo === 'compras' && !esLinea) {
+      res.status(400).json({ error: 'Solo una tarjeta o crédito de compras puede tener compras sin registrar' })
+      return
+    }
+
+    const saldoAnterior = Number(debt.saldoRestante)
+    const diferencia = Math.round((saldoBanco - saldoAnterior) * 100) / 100
+    if (Math.abs(diferencia) < 1) {
+      res.json({ debt: await serializarUnaDeuda(id), ajuste: null })
+      return
+    }
+    const tipo = diferencia < 0 ? 'correccion' : motivo
+    const periodo = debtPeriodo(debt)
+
+    // Tasa observada: intereses del mes / saldo que venía (sin compras de este periodo)
+    let tasaObservada: number | null = null
+    if (tipo === 'interes' && saldoAnterior > 0) {
+      const installments = esLinea ? await prisma.debtCardInstallment.findMany({ where: { tarjetaId: id } }) : []
+      const compras = installments
+        .filter(p => debtPeriodo(debt, p.createdAt) === periodo)
+        .reduce((s, p) => s + Math.max(0, Number(p.cuotaMensual) * p.cuotasTotal - Number(p.montoAbonado)), 0)
+      const base = saldoAnterior - compras
+      if (base > 0) {
+        const t = (diferencia / base) * 100
+        const mensual = Math.round((debt.frecuenciaPago === 'quincenal' ? t * 2 : t) * 10000) / 10000
+        if (mensual <= 15) tasaObservada = mensual
+      }
+    }
+
+    const ops: Prisma.PrismaPromise<unknown>[] = [
+      prisma.debt.update({
+        where: { id },
+        data: {
+          saldoRestante: saldoBanco,
+          ...(tipo === 'compras' ? { saldoPrincipal: { increment: diferencia } } : {}),
+          ...(tasaObservada !== null ? { tasaInteresAplicada: tasaObservada } : {}),
+        },
+      }),
+      prisma.debtAjuste.create({ data: { debtId: id, tipo, monto: diferencia, saldoAnterior, saldoPosterior: saldoBanco, periodo } }),
+    ]
+    if (tipo === 'compras') {
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { frecuenciaIngreso: true, diasPago: true } })
+      ops.push(prisma.impulseExpense.create({
+        data: {
+          userId, nombre: `Compras sin registrar · ${debt.nombre}`.slice(0, 120), monto: diferencia, categoria: 'otro',
+          periodo: getPeriodo(user?.frecuenciaIngreso ?? 'mensual', user?.diasPago ?? []), esHormiga: false, tarjetaId: id,
+        },
+      }))
+    }
+    await prisma.$transaction(ops)
+
+    const vista = await serializarUnaDeuda(id)
+    res.json({ debt: vista, ajuste: { tipo, monto: diferencia, tasaObservadaMensual: tasaObservada }, avisoCupo: avisoDeCupo(vista) })
+  } catch (error) {
+    console.error('[AjustarSaldoDebt]', error)
+    res.status(500).json({ error: 'Error al actualizar el saldo' })
   }
 })
 
@@ -717,7 +803,9 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
       // financiero de esa deuda depende de su saldo y tasa, no de cómo se pagó.
       // Misma función que usa /pay, para que partir/completar con tarjeta calce
       // exactamente igual que hacerlo en efectivo.
-      const { pagoInteres, abonoCapital, nuevoSaldo, nuevoEstado } = calcularPagoDeuda(currentSaldo, tasaDelPeriodo(tasaMensual, deuda.frecuenciaPago), status, montoPago)
+      const { pagoInteres, abonoCapital, nuevoSaldo } = calcularPagoDeuda(currentSaldo, tasaDelPeriodo(tasaMensual, deuda.frecuenciaPago), status, montoPago)
+      // Pagar una tarjeta con otra tarjeta no la "salda": su cupo sigue disponible
+      const nuevoEstado = estadoTrasPago(deuda.tipoDeuda, nuevoSaldo)
 
       // El id del plan de cuotas se genera ANTES de la transacción para poder
       // enlazarlo desde el mismo DebtPayment que lo originó — así undo-pay
@@ -797,20 +885,13 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
     // Pagar con la tarjeta también es pagar la obligación (antes no contaba para la misión)
     await recordMissionAction(userId, 'pagar_obligacion')
 
-    // Obtener estado actualizado de la tarjeta + su cuota efectiva (base + planes vigentes)
-    const [tarjetaActualizada, installments] = await Promise.all([
-      prisma.debt.findUnique({ where: { id: tarjetaId } }),
-      prisma.debtCardInstallment.findMany({ where: { tarjetaId } }),
-    ])
+    // Estado actualizado de la tarjeta (cuota exigible, cupo y disponible)
+    const tarjetaActualizada = await serializarUnaDeuda(tarjetaId)
 
     res.json({
       success: true,
-      tarjeta: tarjetaActualizada ? {
-        id: tarjetaActualizada.id,
-        nombre: tarjetaActualizada.nombre,
-        saldoRestante: Number(tarjetaActualizada.saldoRestante),
-        cuotaPeriodo: cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(tarjetaActualizada, debtPeriodo(tarjetaActualizada)), installments, { tarjeta: tarjetaActualizada, periodo: debtPeriodo(tarjetaActualizada) }),
-      } : null,
+      tarjeta: tarjetaActualizada,
+      avisoCupo: avisoDeCupo(tarjetaActualizada),
       cuotasAgregadas: cuotas,
       incrementoCuota,
       montoTotalAgregado: monto,

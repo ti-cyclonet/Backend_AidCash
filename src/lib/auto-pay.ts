@@ -28,8 +28,8 @@
 import { prisma } from '../config/database.js'
 import { getMontoPorPeriodo } from './period.js'
 import { parseDays, fixedExpenseDay, isDebtPending, isFixedExpensePending } from './obligation-schedule.js'
-import { cuotaEfectivaTarjeta } from './installments.js'
-import { cuotaBaseDelPeriodo, debtPeriodo } from './debt-calc.js'
+import { cuotaBaseDelPeriodo, debtPeriodo, esLineaCredito } from './debt-calc.js'
+import { serializarUnaDeuda } from './debt-view.js'
 import { payDebtServer } from './debt-payments.js'
 import { payFixedExpenseServer } from './fixed-expense-payments.js'
 import { sendPushToUser, avisar } from './push.js'
@@ -92,9 +92,11 @@ export async function runAutoPay(now: Date = new Date()): Promise<AutoPayRunSumm
 
       // Para tarjetas, el monto real de esta cuota incluye lo financiado con
       // ella (pay-with-card) — no solo la columna base (ver cuotaEfectivaTarjeta).
-      const montoPago = debt.tipoDeuda === 'TARJETA_CREDITO'
-        ? cuotaEfectivaTarjeta(cuotaBaseDelPeriodo(debt, debtPeriodo(debt)), await prisma.debtCardInstallment.findMany({ where: { tarjetaId: debt.id } }), { tarjeta: debt, periodo: debtPeriodo(debt) })
+      // Línea de crédito: la cuota exigible (nunca más de lo que se debe; en $0 no hay nada que cobrar)
+      const montoPago = esLineaCredito(debt.tipoDeuda)
+        ? (await serializarUnaDeuda(debt.id)).cuotaPeriodo
         : cuotaBaseDelPeriodo(debt, debtPeriodo(debt))
+      if (!(montoPago > 0)) continue
 
       const user = await prisma.user.findUnique({ where: { id: debt.userId }, select: { cashBalance: true } })
       if (!user || Number(user.cashBalance) < montoPago) {

@@ -29,6 +29,28 @@ export function cuotaEfectivaTarjeta(
 }
 
 /**
+ * Cuota que de verdad se exige a una línea de crédito en el periodo: la cuota
+ * efectiva, pero nunca más de lo que se debía al arrancar el periodo sin
+ * contar las compras hechas EN este periodo (esas llegan en el próximo
+ * extracto). Así una tarjeta en $0 queda "Al día" en vez de pedir su cuota
+ * habitual, y una con poco saldo pide solo ese saldo.
+ */
+export function cuotaExigibleLinea(
+  cuotaEfectiva: number,
+  saldoAlIniciarPeriodo: number,
+  installments: { cuotaMensual: Prisma.Decimal | number; cuotasTotal: number; montoAbonado: Prisma.Decimal | number; createdAt: Date }[],
+  cobro: { tarjeta: { frecuenciaPago: string; diasPago: string }; periodo: string },
+  /** Fecha del primer pago del periodo: las compras posteriores no están en `saldoAlIniciarPeriodo`. */
+  primerPagoEn: Date | null = null,
+): number {
+  const comprasDelPeriodo = installments
+    .filter(p => debtPeriodo(cobro.tarjeta, p.createdAt) === cobro.periodo && (!primerPagoEn || p.createdAt < primerPagoEn))
+    .reduce((s, p) => s + Math.max(0, Number(p.cuotaMensual) * p.cuotasTotal - Number(p.montoAbonado)), 0)
+  const facturado = Math.max(0, saldoAlIniciarPeriodo - comprasDelPeriodo)
+  return Math.round(Math.min(cuotaEfectiva, facturado) * 100) / 100
+}
+
+/**
  * Reparte el abono a capital de un pago sobre la propia tarjeta entre sus
  * planes de cuotas vigentes — el más antiguo primero — hasta agotar el pago o
  * los planes. Cada porción queda registrada en DebtPaymentAllocation para que

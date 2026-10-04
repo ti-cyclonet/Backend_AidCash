@@ -13,6 +13,7 @@ import { getPeriodo } from '../lib/period.js'
 import { planPocketCredit, planPocketDeduction } from '../lib/wallet.js'
 import { sugerirCategoria, extraerEtiquetaCategoria } from '../lib/categorias.js'
 import { alertaTrasGasto } from '../lib/category-summary.js'
+import { avisoDeCupo, serializarUnaDeuda } from '../lib/debt-view.js'
 import { sendPushToUser } from '../lib/push.js'
 import { buildInstallmentRevertOps } from '../lib/installments.js'
 import { esGastoHormiga, nombreBaseGasto } from '../lib/hormiga.js'
@@ -244,7 +245,7 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
     if (alertaCategoria) {
       sendPushToUser(userId, {
         title: alertaCategoria.nivel === 'excedido' ? `🚨 Te pasaste en ${alertaCategoria.categoria}` : `⚠️ Vas en el ${alertaCategoria.porcentaje}% de ${alertaCategoria.categoria}`,
-        body: `Llevas $${Math.round(alertaCategoria.gastado).toLocaleString('es-CO')} de $${Math.round(alertaCategoria.limite).toLocaleString('es-CO')} en este periodo.`,
+        body: `Llevas $${Math.round(alertaCategoria.gastado).toLocaleString('es-CO')} de $${Math.round(alertaCategoria.limite).toLocaleString('es-CO')} ${alertaCategoria.frecuenciaLimite === 'quincenal' ? 'esta quincena' : 'este mes'}.`,
         tag: `categoria-${alertaCategoria.categoryId}`,
         url: '/gestion',
       }).catch(() => {})
@@ -253,7 +254,10 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
     // Hogar: aviso a la pareja (y a los dos si se cruza el 80% / 100%)
     const hogar = sharedCategoryId ? await avisarGastoHogar(userId, sharedCategoryId, monto, nombre) : null
 
-    res.status(201).json({ expense, categoriaAutomatica, alertaCategoria, hogar, billeteraDescontada: !!descontarBilletera && !tarjetaId })
+    // Con tarjeta o crédito de compras: ¿quedó cerca o por encima del cupo? (solo aviso)
+    const avisoCupo = tarjetaId ? avisoDeCupo(await serializarUnaDeuda(tarjetaId)) : null
+
+    res.status(201).json({ expense, categoriaAutomatica, alertaCategoria, hogar, avisoCupo, billeteraDescontada: !!descontarBilletera && !tarjetaId })
   } catch (error) {
     console.error('[CreateImpulse]', error)
     res.status(500).json({ error: 'Error al registrar gasto hormiga' })
@@ -327,6 +331,13 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
       // ya se había abonado algo, lo que dejaba el saldo de la tarjeta mal
       // calculado en ese caso.
       ops.push(...(await buildInstallmentRevertOps(userId, [existing.installmentId])))
+    } else if (existing.tarjetaId) {
+      // "Compras sin registrar" (Actualizar saldo): subieron el saldo de la
+      // tarjeta sin plan de cuotas ni billetera — se le quitan a la tarjeta.
+      ops.push(prisma.debt.update({
+        where: { id: existing.tarjetaId },
+        data: { saldoRestante: { decrement: Number(existing.monto) }, saldoPrincipal: { decrement: Number(existing.monto) } },
+      }))
     } else {
       // Se pagó en efectivo del bolsillo "libre" al crearlo (ver POST /,
       // rama sin tarjetaId en el frontend) — devolver ese monto.

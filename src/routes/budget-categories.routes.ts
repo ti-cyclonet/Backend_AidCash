@@ -53,6 +53,7 @@ const createCategorySchema = z.object({
   color: z.string().default('#6366F1'),
   tipo: z.enum(['gasto', 'ingreso', 'ahorro']).default('gasto'),
   montoLimite: z.number().min(0).optional().default(0),
+  frecuenciaLimite: z.enum(['mensual', 'quincenal']).optional().default('mensual'),
   linkedFixedExpenseIds: z.array(z.string()).optional().default([]),
 })
 
@@ -62,6 +63,7 @@ const updateCategorySchema = z.object({
   color: z.string().optional(),
   tipo: z.enum(['gasto', 'ingreso', 'ahorro']).optional(),
   montoLimite: z.number().min(0).optional(),
+  frecuenciaLimite: z.enum(['mensual', 'quincenal']).optional(),
   linkedFixedExpenseIds: z.array(z.string()).optional(),
 })
 
@@ -123,10 +125,10 @@ router.get('/sugerir', async (req: Request, res: Response): Promise<void> => {
 router.post('/', validate(createCategorySchema), checkLimit('nCategorias'), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { nombre, icono, color, tipo, montoLimite, linkedFixedExpenseIds } = req.body
+    const { nombre, icono, color, tipo, montoLimite, frecuenciaLimite, linkedFixedExpenseIds } = req.body
 
     const category = await prisma.budgetCategory.create({
-      data: { userId, nombre, icono, color, tipo, montoLimite },
+      data: { userId, nombre, icono, color, tipo, montoLimite, frecuenciaLimite },
     })
     if (linkedFixedExpenseIds.length > 0) await sincronizarFijos(userId, category.id, linkedFixedExpenseIds)
 

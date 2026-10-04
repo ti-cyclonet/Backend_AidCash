@@ -46,6 +46,10 @@ export interface Accion {
   diaPago?: number | null
   tasaMensual?: number | null
   esTarjeta?: boolean | null
+  /** Crédito de compras (Addi, Sistecrédito, Brilla…): cupo como una tarjeta */
+  esCreditoCompras?: boolean | null
+  /** Cupo total de una tarjeta o crédito de compras */
+  cupo?: number | null
   frecuencia?: 'mensual' | 'quincenal' | 'semanal' | 'anual' | null
   // crear_categoria
   icono?: string | null
@@ -75,6 +79,8 @@ export const ESQUEMA_ACCION = {
     diaPago: { type: 'INTEGER', nullable: true },
     tasaMensual: { type: 'NUMBER', nullable: true, description: 'Tasa de interés MENSUAL en %' },
     esTarjeta: { type: 'BOOLEAN', nullable: true },
+    esCreditoCompras: { type: 'BOOLEAN', nullable: true, description: 'true si es Addi, Sistecrédito, Brilla u otro crédito para compras con cupo' },
+    cupo: { type: 'NUMBER', nullable: true, description: 'Cupo total de la tarjeta o crédito de compras, si lo dice' },
     frecuencia: { type: 'STRING', enum: ['mensual', 'quincenal', 'semanal', 'anual'], nullable: true },
     icono: { type: 'STRING', enum: [...ICONOS_CATEGORIA], nullable: true },
     persona: { type: 'STRING', nullable: true },
@@ -102,10 +108,13 @@ CÓMO PROPONER ACCIONES (campo "acciones"):
   solo hay uno, usa ese; si hay varios y no se sabe, bolsilloId null.
 - crear_bolsillo: quiere empezar a ahorrar para una meta nueva ("quiero ahorrar 2 millones para
   un viaje") → nombre de la meta, monto = la meta.
-- crear_categoria: pide crear una categoría de presupuesto → nombre, monto = límite mensual
-  (0 si no lo dice), icono del listado.
+- crear_categoria: pide crear una categoría de presupuesto → nombre, monto = límite (0 si no lo
+  dice), icono del listado, frecuencia "quincenal" si dice que el límite es por quincena; si no,
+  "mensual" (límite para todo el mes, no se divide).
 - crear_deuda: tiene una deuda nueva (préstamo, crédito, tarjeta) que NO está en el contexto →
-  monto = saldo total, cuota, diaPago, tasaMensual si la dice, esTarjeta si es tarjeta de crédito.
+  monto = lo que debe hoy (en una tarjeta: lo que tiene ocupado, puede ser 0), cuota, diaPago,
+  tasaMensual si la dice, esTarjeta si es tarjeta de crédito, esCreditoCompras si es Addi,
+  Sistecrédito, Brilla o un cupo de almacén, y cupo = el cupo total si lo dice.
 - crear_gasto_fijo: un pago recurrente nuevo que NO está en el contexto (arriendo, internet,
   gimnasio, suscripción) → monto, diaPago, frecuencia.
 - me_deben: le prestó plata a alguien → persona, monto, fechaCompromiso si dice cuándo le pagan.
@@ -150,7 +159,9 @@ export function normalizarAcciones(raw: unknown, ctx: ContextoIA): Accion[] {
     const a = item as Record<string, unknown>
     const tipo = (TIPOS_ACCION as readonly string[]).includes(String(a.tipo)) ? a.tipo as TipoAccion : 'sin_destino'
     const monto = Math.round(Math.abs(num(a.monto)))
-    if (monto <= 0 && tipo !== 'crear_categoria') continue
+    // Una tarjeta o crédito de compras sin usar se registra con $0 ocupado (pero con cupo)
+    const lineaConCupo = tipo === 'crear_deuda' && (a.esTarjeta === true || a.esCreditoCompras === true) && num(a.cupo) > 0
+    if (monto <= 0 && tipo !== 'crear_categoria' && !lineaConCupo) continue
     const nombre = String(a.nombre ?? '').trim().slice(0, 80) || NOMBRE_POR_DEFECTO[tipo]
     const acc: Accion = { id: uid(), tipo, nombre, monto, faltan: [] }
 
@@ -201,6 +212,7 @@ export function normalizarAcciones(raw: unknown, ctx: ContextoIA): Accion[] {
       }
       case 'crear_categoria': {
         acc.icono = (ICONOS_CATEGORIA as readonly string[]).includes(String(a.icono)) ? String(a.icono) : 'more'
+        acc.frecuencia = a.frecuencia === 'quincenal' ? 'quincenal' : 'mensual'
         // Ya existe una con ese nombre: no duplicar
         if (ctx.categorias.some(c => norm(c.nombre) === norm(nombre))) continue
         break
@@ -209,9 +221,13 @@ export function normalizarAcciones(raw: unknown, ctx: ContextoIA): Accion[] {
         acc.cuota = numONull(a.cuota)
         acc.diaPago = clampDia(a.diaPago)
         acc.tasaMensual = numONull(a.tasaMensual)
-        acc.esTarjeta = a.esTarjeta === true
-        acc.frecuencia = a.frecuencia === 'quincenal' ? 'quincenal' : 'mensual'
-        if (!acc.cuota) acc.faltan.push('cuota')
+        acc.esCreditoCompras = a.esCreditoCompras === true
+        acc.esTarjeta = a.esTarjeta === true && !acc.esCreditoCompras
+        const cupo = numONull(a.cupo)
+        acc.cupo = (acc.esTarjeta || acc.esCreditoCompras) && cupo && cupo > 0 ? cupo : null
+        acc.frecuencia = a.frecuencia === 'quincenal' && !acc.esTarjeta && !acc.esCreditoCompras ? 'quincenal' : 'mensual'
+        // En una tarjeta en $0 no hay cuota que pedir
+        if (!acc.cuota && monto > 0) acc.faltan.push('cuota')
         break
       }
       case 'crear_gasto_fijo': {
