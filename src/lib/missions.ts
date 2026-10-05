@@ -39,7 +39,7 @@ export type MissionKey =
   | 'gasto_hormiga' | 'pagar_obligacion' | 'categorizar' | 'racha_semanal'
   | 'registrar_obligacion' | 'registrar_ingreso_real' | 'registrar_ahorro' | 'invitar_amigo'
   | ReferralMissionKey
-export type ReferralMissionKey = 'referido_1' | 'referido_2' | 'referido_3'
+export type ReferralMissionKey = 'referido_1' | 'referido_3' | 'referido_5' | 'referido_10' | 'referido_25'
 export type OnboardingMissionKey = 'registrar_obligacion' | 'registrar_ingreso_real' | 'registrar_ahorro' | 'invitar_amigo'
 export type RewardType = 'xp' | 'boost'
 
@@ -81,17 +81,17 @@ export const ONBOARDING_CATALOG: MissionCatalogEntry[] = [
 
 /**
  * Misiones de referidos — traer gente NUEVA a Kiri con tu enlace de
- * invitación (ver lib/invitaciones.ts). Tres escalones (1, 2 y 3 personas),
- * cada uno se reclama una sola vez. El progreso es el conteo real de usuarios
- * con `invitedById = tú`, así que no se puede inflar desde el cliente.
+ * invitación: cada amigo que de verdad usa Kiri hace crecer tu árbol. Los
+ * escalones son los mismos niveles de "Invita y gana" (lib/referidos.ts), y
+ * cada uno se reclama una sola vez. El progreso es el conteo real de amigos
+ * activos (3 movimientos en 2 días, o ya suscritos), no se infla desde el cliente.
  */
 export const REFERRAL_CATALOG: (MissionCatalogEntry & { key: ReferralMissionKey; rewardXp: number })[] = [
-  // Cuentan amigos que llegaron con tu enlace y se suscribieron a PLUS o PRO
-  // (primera factura pagada). Cada uno también te da 10 días de KIRI PLUS
-  // (lib/invitaciones.ts, premiarReferidoPorPago); ellos tienen 50% / 30% en su primer mes.
-  { key: 'referido_1', title: 'Un amigo se suscribe a Kiri', desc: 'Que se suscriba a PLUS o PRO con tu enlace · +10 días de KIRI PLUS', icon: '💌', target: 1, rewardXp: 25 },
-  { key: 'referido_2', title: '2 amigos se suscriben a Kiri', desc: 'Dos amigos suscritos con tu enlace · +10 días de KIRI PLUS más', icon: '🤝', target: 2, rewardXp: 50 },
-  { key: 'referido_3', title: '3 amigos se suscriben a Kiri', desc: 'Tres amigos suscritos con tu enlace · +10 días de KIRI PLUS más', icon: '🎉', target: 3, rewardXp: 75 },
+  { key: 'referido_1', title: 'Tu primer amigo usa Kiri', desc: 'Un amigo que llegó con tu enlace registra sus primeros movimientos', icon: '💌', target: 1, rewardXp: 50 },
+  { key: 'referido_3', title: '3 amigos usan Kiri', desc: 'Tres amigos activos con tu enlace · 1 mes gratis de tu plan', icon: '🤝', target: 3, rewardXp: 100 },
+  { key: 'referido_5', title: '5 amigos usan Kiri', desc: 'Cinco amigos activos con tu enlace · insignia Jardinero social', icon: '🌳', target: 5, rewardXp: 200 },
+  { key: 'referido_10', title: '10 amigos usan Kiri', desc: 'Diez amigos activos · camino a Embajador Kiri', icon: '👑', target: 10, rewardXp: 400 },
+  { key: 'referido_25', title: '25 amigos usan Kiri', desc: 'Veinticinco amigos activos · camino a KIRI PRO por 1 año', icon: '🏆', target: 25, rewardXp: 800 },
 ]
 export const REFERRAL_PERIODO = 'referidos'
 
@@ -248,11 +248,21 @@ async function avanzar(id: string, target: number): Promise<boolean> {
  * tope en `target`). Se llama desde las rutas que ya hacen la acción — nunca
  * falla la operación que la disparó: cualquier error acá solo se loguea.
  */
+/**
+ * Después de cada movimiento real: si quien lo hizo llegó invitado, ¿ya "usa
+ * Kiri"? (lib/referidos.ts). Import dinámico para no crear un ciclo entre
+ * módulos; nunca hace fallar la acción.
+ */
+function revisarReferido(userId: string): Promise<unknown> {
+  return import('./referidos.js').then(m => m.revisarActivacionReferido(userId)).catch(() => {})
+}
+
 export async function recordMissionAction(userId: string, missionKey: Exclude<MissionKey, 'racha_semanal'>): Promise<void> {
   // Va ANTES del early-return de "esta misión ya llegó a su tope hoy": la
   // racha de días debe contar el check-in aunque esta misión puntual ya
   // estuviera completa, mientras sea una acción real del catálogo.
   await recordDailyStreak(userId)
+  if (missionKey !== 'categorizar') await revisarReferido(userId)
   try {
     const entry = MISSION_CATALOG.find((m) => m.key === missionKey)
     if (!entry) return
@@ -278,6 +288,7 @@ export async function recordMissionAction(userId: string, missionKey: Exclude<Mi
  */
 export async function recordOnboardingAction(userId: string, missionKey: OnboardingMissionKey): Promise<void> {
   await recordDailyStreak(userId)
+  if (missionKey === 'registrar_ingreso_real' || missionKey === 'registrar_ahorro') await revisarReferido(userId)
   try {
     const entry = ONBOARDING_CATALOG.find((m) => m.key === missionKey)
     if (!entry) return
@@ -293,14 +304,18 @@ export async function recordOnboardingAction(userId: string, missionKey: Onboard
   }
 }
 
+/** Amigos que llegaron con tu enlace y ya usan Kiri (activos o suscritos). */
+function contarAmigosActivos(inviterId: string): Promise<number> {
+  return prisma.user.count({ where: { invitedById: inviterId, OR: [{ referidoActivadoEn: { not: null } }, { primerPagoEn: { not: null } }] } })
+}
+
 /**
- * Un amigo invitado por `inviterId` pagó su primera factura: sincroniza los
- * tres escalones con el conteo real y avisa del que se acaba de completar.
+ * Un amigo invitado por `inviterId` empezó a usar Kiri o pagó: sincroniza los
+ * escalones con el conteo real y avisa del que se acaba de completar.
  */
-export async function recordReferral(inviterId: string): Promise<void> {
+export async function syncReferralMissions(inviterId: string): Promise<void> {
   try {
-    // Solo cuentan los amigos suscritos (primera factura de PLUS/PRO pagada)
-    const total = await prisma.user.count({ where: { invitedById: inviterId, primerPagoEn: { not: null } } })
+    const total = await contarAmigosActivos(inviterId)
     for (const m of REFERRAL_CATALOG) {
       const row = await getOrCreateProgress(inviterId, m.key, REFERRAL_PERIODO, m.target)
       const nuevo = Math.min(total, m.target)
@@ -316,7 +331,7 @@ export async function recordReferral(inviterId: string): Promise<void> {
 /** Misiones de referidos, listas para el frontend (progreso = conteo real). */
 export async function getReferralMissionsForUser(userId: string): Promise<{ misiones: MissionView[]; referidos: number }> {
   const [total, fila] = await Promise.all([
-    prisma.user.count({ where: { invitedById: userId, primerPagoEn: { not: null } } }),
+    contarAmigosActivos(userId),
     asegurarFilas(userId, REFERRAL_CATALOG.map(m => ({ key: m.key, periodo: REFERRAL_PERIODO, target: m.target }))),
   ])
   const misiones = await Promise.all(

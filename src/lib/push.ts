@@ -197,9 +197,9 @@ export function pushSplitRequested(userId: string, fromName: string, monto: numb
 export function pushReferralJoined(userId: string, nombre: string, rolLabel: string) {
   return sendPushToUser(userId, {
     title: `🎉 ${nombre} se unió a Kiri`,
-    body: `Entró con tu enlace y ya está en tus conexiones como ${rolLabel}. Tu misión de invitar avanzó.`,
+    body: `Entró con tu enlace y ya está en tus conexiones como ${rolLabel}. Cuando registre sus primeros movimientos, los dos ganan más mensajes con Kiri Coach.`,
     tag: 'referral-joined',
-    url: '/misiones',
+    url: '/mi-plan#invita',
   })
 }
 

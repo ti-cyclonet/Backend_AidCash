@@ -59,6 +59,9 @@ model User {
   // /connections/:id/water) — a diferencia de la salud (0-100%, un "mood"),
   // esto suma directo al XP real del árbol (ver calculateGardenXP).
   xpFromWatering        Int      @default(0) @map("xp_from_watering")
+  // XP del minijuego del árbol: frutos cosechados, sacudida y riego del día
+  // (ver lib/jardin-juego.ts). Lo valida el servidor, nunca el cliente.
+  xpFromJardin          Int      @default(0) @map("xp_from_jardin")
   cashBalance           Decimal  @default(0) @map("cash_balance") @db.Decimal(12, 2)
   // Wallet — saldo real distribuido en 4 bolsillos
   walletAhorro          Decimal  @default(0) @map("wallet_ahorro") @db.Decimal(12, 2)
@@ -73,9 +76,17 @@ model User {
   facturaPendiente      Json?    @map("factura_pendiente")
   // Cambio de plan pedido desde Kiri y aún no activado (contrato por firmar/pagar)
   cambioPlan            Json?    @map("cambio_plan")
-  // Días de KIRI PLUS ganados: 10 por cada amigo invitado que se suscribe y paga
-  // (hasta 3). Ya no hay prueba de 14 días al registrarse.
+  // Días de KIRI PLUS: 14 de prueba si llegó con el enlace de un amigo, y 30
+  // por cada premio "1 mes de tu plan" mientras esté en FREE (lib/referidos.ts).
+  // Quien se registra solo no tiene prueba.
   pruebaPlusHasta       DateTime? @map("prueba_plus_hasta")
+  // Meses de KIRI PRO ganados por invitar (10 y 25 amigos activos). Sube el
+  // plan mientras dure; a quien ya paga PRO se le dan como meses gratis en su
+  // factura (Authoriza) en vez de esto.
+  pruebaProHasta        DateTime? @map("prueba_pro_hasta")
+  // Llegó invitado y ya usa Kiri de verdad (3 movimientos en 2 días distintos):
+  // en ese momento los dos ganan el bono de Kiri Coach. Se marca una sola vez.
+  referidoActivadoEn    DateTime? @map("referido_activado_en")
   // Versiones aceptadas de los Términos y de la autorización de datos (la
   // prueba legal está en Authoriza). Distintas de las vigentes = pedir aceptar.
   terminosVersion       String?  @map("terminos_version")
@@ -95,6 +106,9 @@ model User {
   // Relaciones existentes
   debts                 Debt[]
   aiUsos                AiUso[]
+  aiBonos               AiBono[]
+  premiosReferido       ReferidoPremio[]
+  cosechasJardin        GardenCosecha[]
   escenariosProyeccion  ProyeccionEscenario[]
   fixedExpenses         FixedExpense[]
   savingsHistory        SavingsHistory[]
@@ -1010,6 +1024,58 @@ model AiUso {
 }
 
 // Escenarios guardados de Proyecciones (KIRI PRO)
+// Usos extra de IA ganados (p. ej. +20 mensajes cuando un amigo invitado
+// empieza a usar Kiri). Se suman al tope del plan en ese periodo ("2026-10").
+model AiBono {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  periodo   String
+  tipo      String   // coach | dictado | escaneo
+  cantidad  Int
+  motivo    String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, periodo])
+  @@map("ai_bonos")
+}
+
+// Premios del programa de invitados, uno por clave (idempotente):
+// "prueba_invitado", "activacion:<amigo>", "pago:<amigo>", "nivel_3"…
+// estado "pendiente" = un mes gratis que Authoriza aún no confirmó (se reintenta).
+model ReferidoPremio {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  clave     String
+  premio    String   // texto para mostrar: "1 mes gratis de KIRI PLUS"
+  detalle   Json?
+  estado    String   @default("entregado")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, clave])
+  @@map("referido_premios")
+}
+
+// Minijuego del árbol: lo cosechado cada día (frutos, sacudida, riego).
+model GardenCosecha {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  fecha     String   // "2026-10-04" (día local)
+  tipo      String   // fruto | sacudida | riego
+  indice    Int      @default(0)
+  xp        Int      @default(0)
+  detalle   String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, fecha, tipo, indice])
+  @@map("garden_cosechas")
+}
+
 model ProyeccionEscenario {
   id              String   @id @default(uuid())
   userId          String   @map("user_id")

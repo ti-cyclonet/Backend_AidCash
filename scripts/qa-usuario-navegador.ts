@@ -2,6 +2,7 @@
  * Crea (o borra) un usuario temporal con datos realistas para revisar la app
  * en el navegador sin tocar cuentas reales. Siembra por la API normal (:4000).
  *   npx tsx scripts/qa-usuario-navegador.ts crear   → imprime tokens para localStorage
+ *   npx tsx scripts/qa-usuario-navegador.ts crear pro → igual, con KIRI PRO (todo desbloqueado)
  *   npx tsx scripts/qa-usuario-navegador.ts nuevo   → recién registrado, con el test inicial por hacer
  *   npx tsx scripts/qa-usuario-navegador.ts borrar <userId>
  */
@@ -38,6 +39,8 @@ async function main() {
     correo, username: `laura${String(stamp).slice(-8)}`, passwordHash: 'x', onboardingDone: true, isActive: true,
     ingresoBase: 3800000, frecuenciaIngreso: 'quincenal', tipoIngreso: 'fijo', diasPago: [15, 30],
     cashBalance: 2150000, walletLibre: 2150000, pruebaPlusHasta: new Date(Date.now() + 10 * 86400000),
+    // "crear pro": todo desbloqueado (KIRI PRO prestado 30 días) para ver la app completa en local
+    ...(process.argv.includes('pro') ? { pruebaProHasta: new Date(Date.now() + 30 * 86400000) } : {}),
     guiasVistas: ['dashboard', 'gestion', 'obligaciones', 'ahorro', 'balance', 'social', 'misiones', 'jardin'],
     // Ya aceptó los Términos vigentes (si no, la app pide aceptarlos antes de seguir)
     ...consentLocalData(),

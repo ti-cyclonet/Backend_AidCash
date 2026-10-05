@@ -148,7 +148,7 @@ export function contextoComoTexto(c: ContextoIA): string {
   const u = c.usuario
   const lineas: string[] = []
   lineas.push(`Hoy: ${c.hoy}`)
-  if (c.plan) lineas.push(`Plan: ${c.plan.nombre}${c.plan.fuente === 'prueba' && c.plan.pruebaHasta ? ` (días de PLUS ganados por invitar amigos, hasta ${c.plan.pruebaHasta})` : ''} · límites: ${c.plan.limites}. Si una acción supera el plan, avísale y sugiérele Mi plan.`)
+  if (c.plan) lineas.push(`Plan: ${c.plan.nombre}${c.plan.fuente === 'prueba' && c.plan.pruebaHasta ? ` (prestado por el programa de invitados — prueba de invitado o meses ganados —, hasta ${c.plan.pruebaHasta})` : ''} · límites: ${c.plan.limites}. Si una acción supera el plan, avísale y sugiérele Mi plan.`)
   lineas.push(`Usuario: ${u.nombre} · ${u.descripcionIngreso} · disponible hoy ${$(u.disponible)} · ahorrado en total ${$(u.ahorroTotal)}`)
   lineas.push('\nCATEGORÍAS DE PRESUPUESTO [id | nombre | límite mensual o quincenal (el gasto se suma en ese mismo mes o quincena) | límite | gastado | disponible | estado]:')
   lineas.push(c.categorias.length ? c.categorias.map(x => `- ${x.id} | ${x.nombre} | ${x.frecuencia} | ${$(x.limite)} | ${$(x.gastado)} | ${$(x.disponible)} | ${x.estado}`).join('\n') : '- (no tiene categorías)')

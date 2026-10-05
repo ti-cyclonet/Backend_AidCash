@@ -175,7 +175,8 @@ async function main() {
     const ia = uso.variables?.find((v: any) => v.variableName === 'iaMensajesMes')
     check('Tu uso este mes: 5/5 categorías y 10/10 mensajes', cats?.currentCount === 5 && cats?.maxValue === 5 && cats?.usagePercentage === 100 && ia?.currentCount === 10, { cats, ia })
 
-    // ── Invitar amigos: el amigo tiene descuento; quien invita gana 10 días cuando el amigo paga ──
+    // ── Invitar amigos: el amigo tiene 14 días de PLUS y descuento; quien invita gana 1 mes cuando el amigo paga ──
+    // (el detalle del programa — activación, bono de IA, niveles, meses en factura — está en e2e-referidos.test.ts)
     const diasDe = async (u: { id: string }) => { const x = await prisma.user.findUnique({ where: { id: u.id }, select: { pruebaPlusHasta: true } }); return x?.pruebaPlusHasta ? (x.pruebaPlusHasta.getTime() - Date.now()) / 86400000 : 0 }
     const pagada = (u: { correo: string }, codigo: string) => fetch(`http://127.0.0.1:${APP_PORT}/api/plan/factura-evento`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-internal-key': CLAVE },
@@ -186,8 +187,13 @@ async function main() {
     const N = await crear('Nico', { invitedById: I.id, isActive: true })
     await prisma.connection.create({ data: { requesterId: I.id, addresseeId: N.id, status: 'ACCEPTED', role: 'FRIEND' } })
     await acreditarReferido(N.id)
-    check('Registrarse con el enlace ya NO da días gratis a quien invita', (await diasDe(I)) === 0)
+    check('Registrarse con el enlace no le da días a quien invita (gana cuando el amigo usa Kiri o paga)', (await diasDe(I)) === 0)
+    const dN = await diasDe(N)
+    check('Nico llegó invitado → 14 días de KIRI PLUS gratis', dN > 13.9 && dN <= 14.01, dN.toFixed(2))
+    await acreditarReferido(N.id)
+    check('…una sola vez (repetir la activación no suma más días)', Math.abs((await diasDe(N)) - dN) < 0.01)
     const planN = await call(N, 'GET', '/plan')
+    check('Nico en prueba → KIRI PLUS prestado con fecha de fin', planN.tier === 'PLUS' && planN.fuente === 'prueba' && !!planN.pruebaHasta, { tier: planN.tier, fuente: planN.fuente })
     check('Nico llegó invitado → tiene 50% en PLUS y 30% en PRO para su primer mes', planN.descuentoInvitado?.PLUS === 50 && planN.descuentoInvitado?.PRO === 30, planN.descuentoInvitado)
     check('Felipe (sin invitación) no tiene descuento', (await call(F, 'GET', '/plan')).descuentoInvitado === null)
 
@@ -209,8 +215,9 @@ async function main() {
 
     const r1 = await pagada(N, 'F-1')
     const d1 = await diasDe(I)
-    check('Nico paga su primera factura → Iris gana 10 días de KIRI PLUS', r1.referidoPremiado === true && d1 > 9.9 && d1 <= 10.01, d1.toFixed(2))
-    check('…avanza su misión "Un amigo se suscribe"', (await mision(I, 'referido_1')) === 1)
+    check('Nico paga su primera factura → Iris (FREE) gana 1 mes: 30 días de KIRI PLUS', r1.referidoPremiado === true && d1 > 29.9 && d1 <= 30.01, d1.toFixed(2))
+    check('…Nico cuenta como amigo activo y avanza la misión "Tu primer amigo usa Kiri"', (await mision(I, 'referido_1')) === 1)
+    check('…y con su primer amigo Iris gana la insignia "Primer brote"', !!(await prisma.userBadge.findUnique({ where: { userId_badgeId: { userId: I.id, badgeId: 'ref_primer_brote' } } })))
     const planNPago = await call(N, 'GET', '/plan')
     check('…y Nico ya no tiene descuento de invitado', planNPago.descuentoInvitado === null)
     check('…durante ese mes, Mi plan le recuerda que su primer mes tuvo 50%', planNPago.primerMesInvitado?.pct === 50, planNPago.primerMesInvitado)
@@ -227,17 +234,19 @@ async function main() {
       await pagada(amigo, `F-${nombre}`)
     }
     const d4 = await diasDe(I)
-    check('Solo los 3 primeros amigos suscritos dan días: 4 amigos → 30 días, no 40', d4 > 29.9 && d4 <= 30.02, d4.toFixed(2))
-    check('…y las 3 misiones de invitar quedan completas', (await mision(I, 'referido_3')) === 3)
+    check('Sin tope: 4 amigos que pagan → 4 meses, más el nivel de 3 amigos (1 mes) = 150 días', d4 > 149.9 && d4 <= 150.05, d4.toFixed(2))
+    check('…y la misión de 3 amigos queda completa', (await mision(I, 'referido_3')) === 3)
     const planIris = await call(I, 'GET', '/plan')
-    check('Mi plan de Iris muestra 4 amigos suscritos (tope de premio 3, 10 días c/u)', planIris.referidos?.suscritos === 4 && planIris.referidos?.maximo === 3 && planIris.referidos?.diasPorReferido === 10, planIris.referidos)
+    check('Mi plan de Iris: 4 activos y 4 con plan; el siguiente premio es el de 5 amigos (falta 1)',
+      planIris.referidos?.activos === 4 && planIris.referidos?.pagados === 4 && planIris.referidos?.siguiente?.amigos === 5 && planIris.referidos?.siguiente?.faltanAmigos === 1,
+      { activos: planIris.referidos?.activos, pagados: planIris.referidos?.pagados, siguiente: planIris.referidos?.siguiente })
 
     await prisma.user.update({ where: { id: I.id }, data: { pruebaPlusHasta: new Date(Date.now() - 1000) } })
     invalidarPlan(I.id)
     check('Al vencerse los días vuelve a FREE', (await resolverPlan(I.id)).tier === 'FREE')
 
     const nuevo = await prisma.user.findUnique({ where: { id: F.id }, select: { pruebaPlusHasta: true } })
-    check('Registrarse ya no da prueba de PLUS (sin días por defecto)', nuevo?.pruebaPlusHasta === null)
+    check('Registrarse SIN enlace no da prueba de PLUS (sin días por defecto)', nuevo?.pruebaPlusHasta === null)
   } finally {
     await prisma.user.deleteMany({ where: { id: { in: ids } } })
     const quedan = await prisma.user.count({ where: { id: { in: ids } } })
