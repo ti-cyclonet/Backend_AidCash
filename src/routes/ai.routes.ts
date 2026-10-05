@@ -11,6 +11,7 @@ import { ESQUEMA_SIMULACION, REGLAS_SIMULACION, normalizarSimulacion } from '../
 import { prisma } from '../config/database.js'
 import { resolverPlan, mejoraPara, ILIMITADO, type PlanResuelto } from '../lib/planes.js'
 import { periodoIA } from '../middleware/limit-enforcement.js'
+import { bonosIA } from '../lib/referidos.js'
 import { idiomaDe, normalizarIdioma } from '../lib/i18n.js'
 
 /** Instrucción de idioma para la IA (la app en inglés → todo en inglés). */
@@ -31,10 +32,16 @@ const NOMBRE_IA: Record<TipoIA, string> = { coach: 'mensajes con Kiri Coach', di
 
 async function usoIA(userId: string, tipo: TipoIA, plan?: PlanResuelto) {
   const p = plan ?? await resolverPlan(userId)
-  const limite = p.limites[VARIABLE_IA[tipo]]?.maxValue ?? 0
-  const r = await prisma.aiUso.findUnique({ where: { userId_periodo_tipo: { userId, periodo: periodoIA(), tipo } } })
+  const delPlan = p.limites[VARIABLE_IA[tipo]]?.maxValue ?? 0
+  const [r, bonos] = await Promise.all([
+    prisma.aiUso.findUnique({ where: { userId_periodo_tipo: { userId, periodo: periodoIA(), tipo } } }),
+    bonosIA(userId),
+  ])
+  // Usos extra ganados (invitar amigos) se suman al tope del plan este mes
+  const extra = bonos[tipo]
+  const limite = delPlan >= ILIMITADO ? delPlan : delPlan + extra
   const usados = r?.cantidad ?? 0
-  return { usados, limite, ilimitado: limite >= ILIMITADO, restantes: limite >= ILIMITADO ? null : Math.max(0, limite - usados), plan: p }
+  return { usados, limite, extra, ilimitado: limite >= ILIMITADO, restantes: limite >= ILIMITADO ? null : Math.max(0, limite - usados), plan: p }
 }
 
 /** Revisa la cuota; si ya no queda, responde 429 con el mensaje para subir de plan. */

@@ -67,9 +67,15 @@ export async function countResource(resource: string, userId: string): Promise<n
     case 'ia-coach':
     case 'ia-dictado':
     case 'ia-escaneo': {
+      // Lo usado menos los usos extra ganados este mes (invitar amigos):
+      // así el tope del plan no bloquea mientras queden usos extra
       const tipo = resource.slice(3)
-      const r = await prisma.aiUso.findUnique({ where: { userId_periodo_tipo: { userId, periodo: periodoIA(), tipo } } })
-      return r?.cantidad ?? 0
+      const periodo = periodoIA()
+      const [r, extra] = await Promise.all([
+        prisma.aiUso.findUnique({ where: { userId_periodo_tipo: { userId, periodo, tipo } } }),
+        prisma.aiBono.aggregate({ where: { userId, periodo, tipo }, _sum: { cantidad: true } }),
+      ])
+      return Math.max(0, (r?.cantidad ?? 0) - (extra._sum.cantidad ?? 0))
     }
     default:
       return 0

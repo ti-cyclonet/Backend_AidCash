@@ -17,8 +17,9 @@ import type { ConnectionRole } from '@prisma/client'
 import { prisma } from '../config/database.js'
 import { emitToUser, SOCKET_EVENTS } from './socket.js'
 import { pushReferralJoined, pushInviteAccepted } from './push.js'
-import { recordOnboardingAction, recordReferral } from './missions.js'
-import { resolverPlan, invalidarPlan, DIAS_PLUS_POR_REFERIDO, MAX_REFERIDOS_PREMIADOS, DESCUENTO_INVITADO } from './planes.js'
+import { recordOnboardingAction } from './missions.js'
+import { DESCUENTO_INVITADO } from './planes.js'
+import { darPruebaInvitado, premiarPagoDeReferido, contarAmigos, textoFalta, PRUEBA_INVITADO_DIAS, BONO_ACTIVACION, textoBono } from './referidos.js'
 
 const ROLE_LABEL: Record<ConnectionRole, string> = { FRIEND: 'amigo', FAMILY: 'familia', PARTNER: 'pareja' }
 
@@ -134,17 +135,16 @@ export async function acreditarReferido(nuevoUsuarioId: string): Promise<void> {
     const role = conn?.role ?? 'FRIEND'
     await recordOnboardingAction(inviterId, 'invitar_amigo')
 
-    // Ya no hay días gratis por un simple registro: el premio (10 días de
-    // PLUS) llega cuando el amigo se suscribe y paga (premiarReferidoPorPago).
-    const yaPremiados = await contarReferidosSuscritos(inviterId)
-    const premio = yaPremiados < MAX_REFERIDOS_PREMIADOS
-      ? ` Cuando se suscriba a KIRI PLUS o PRO (tiene ${DESCUENTO_INVITADO.PLUS}% o ${DESCUENTO_INVITADO.PRO}% en su primer mes), tú ganas ${DIAS_PLUS_POR_REFERIDO} días de KIRI PLUS.`
-      : ''
+    // El invitado: 14 días de KIRI PLUS gratis (una sola vez). Quien invita
+    // gana cuando el amigo empiece a usar Kiri y cuando pague (lib/referidos.ts).
+    const inviter = await prisma.user.findUnique({ where: { id: inviterId }, select: { nombre: true } })
+    await darPruebaInvitado(nuevoUsuarioId, inviter?.nombre)
+    const c = await contarAmigos(inviterId)
     emitToUser(inviterId, SOCKET_EVENTS.REFERRAL_JOINED, {
       nombre: nuevo.nombre,
       role,
-      message: `${nuevo.nombre} se unió a Kiri con tu enlace y ya está en tus conexiones como ${ROLE_LABEL[role]}.${premio}`,
-      route: '/misiones',
+      message: `¡${nuevo.nombre} entró con tu enlace! Ya está en tus conexiones como ${ROLE_LABEL[role]}. Cuando registre sus primeros movimientos, los dos ganan ${textoBono(BONO_ACTIVACION)} de Kiri Coach. ${textoFalta(c)}`,
+      route: '/mi-plan#invita',
     })
     pushReferralJoined(inviterId, nuevo.nombre, ROLE_LABEL[role]).catch(() => {})
   } catch (error) {
@@ -177,38 +177,16 @@ export function contarReferidosSuscritos(userId: string): Promise<number> {
 
 /**
  * `userId` pagó una factura de Kiri. La primera vez: queda marcado como
- * suscrito y, si llegó invitado, quien lo invitó gana 10 días de KIRI PLUS
- * (solo por sus 3 primeros amigos suscritos) y avanzan sus misiones de invitar.
+ * suscrito y, si llegó invitado, quien lo invitó gana 1 mes gratis de su plan
+ * (sin tope de amigos) y se revisan sus niveles (lib/referidos.ts).
  * Idempotente: una segunda factura pagada no vuelve a premiar.
  */
-export async function premiarReferidoPorPago(userId: string): Promise<{ premiado: boolean; inviterId?: string }> {
+export async function premiarReferidoPorPago(userId: string): Promise<{ premiado: boolean; inviterId?: string; premio?: string }> {
   // Marca atómica: solo la primera factura pagada pasa de null a fecha
   const marcado = await prisma.user.updateMany({ where: { id: userId, primerPagoEn: null }, data: { primerPagoEn: new Date(), descuentoReferidoUsado: true } })
   if (marcado.count === 0) return { premiado: false }
-  const u = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true, invitedById: true, primerPagoEn: true } })
-  if (!u?.invitedById) return { premiado: false }
-  const inviterId = u.invitedById
-
-  // Su puesto por orden de pago (si dos amigos pagan a la vez, el 3.º igual
-  // premia y el 4.º no — contar el total los dejaba a ambos por fuera)
-  const suscritos = await prisma.user.count({ where: { invitedById: inviterId, primerPagoEn: { not: null, lte: u.primerPagoEn! } } })
-  await recordReferral(inviterId)
-  if (suscritos > MAX_REFERIDOS_PREMIADOS) {
-    emitToUser(inviterId, SOCKET_EVENTS.REFERRAL_JOINED, { nombre: u.nombre, message: `${u.nombre} se suscribió a Kiri con tu enlace. ¡Gracias por recomendarnos! (Ya ganaste tus ${MAX_REFERIDOS_PREMIADOS * DIAS_PLUS_POR_REFERIDO} días de PLUS por invitar.)`, route: '/misiones' })
-    return { premiado: false, inviterId }
-  }
-
-  // +10 días sobre lo que ya tenga ganado (si aún le quedan días, se suman al final)
-  const inv = await prisma.user.findUnique({ where: { id: inviterId }, select: { pruebaPlusHasta: true } })
-  const desde = inv?.pruebaPlusHasta && inv.pruebaPlusHasta > new Date() ? inv.pruebaPlusHasta : new Date()
-  await prisma.user.update({ where: { id: inviterId }, data: { pruebaPlusHasta: new Date(desde.getTime() + DIAS_PLUS_POR_REFERIDO * 86400000) } })
-  invalidarPlan(inviterId)
-  const plan = await resolverPlan(inviterId)
-  const nota = plan.fuente === 'contrato' && plan.tier !== 'FREE' ? ' Como ya tienes un plan pago, se usarán si algún día vuelves a KIRI FREE.' : ''
-  emitToUser(inviterId, SOCKET_EVENTS.REFERRAL_JOINED, {
-    nombre: u.nombre,
-    message: `🎉 ${u.nombre} se suscribió a Kiri con tu enlace: ganaste ${DIAS_PLUS_POR_REFERIDO} días de KIRI PLUS (${suscritos} de ${MAX_REFERIDOS_PREMIADOS}).${nota}`,
-    route: '/mi-plan',
-  })
-  return { premiado: true, inviterId }
+  return premiarPagoDeReferido(userId)
 }
+
+/** Texto corto de lo que gana el amigo, para los mensajes de invitación. */
+export const OFERTA_AMIGO = `${PRUEBA_INVITADO_DIAS} días de KIRI PLUS gratis y ${DESCUENTO_INVITADO.PLUS}% en su primer mes`

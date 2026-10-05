@@ -32,23 +32,37 @@ con sus días de pago; se cambia en Perfil).
 - Es el punto de partida. Muestra el árbol, su nivel y su salud.
 - XP y niveles: Semilla → … → Jardín próspero. Niveles en 0, 850, 1.850, 4.350, 8.350 y 14.350 XP
   (el 2 pide 850, el 3 mil más, y cada nivel siguiente pide más). XP sale de misiones, rachas (40 XP), insignias (50 XP), que te rieguen
-  amigos y de invitar gente.
+  amigos, de invitar gente y del minijuego del árbol.
+- Minijuego del árbol (todo validado por el servidor):
+  · Frutos (solo desde el nivel 4, "Árbol en crecimiento"): caen al pie del árbol, 1 por visitarlo
+    y 1 más por cada gasto, ingreso, pago o ahorro registrado HOY (máximo 5 al día). Tocar un fruto
+    lo cosecha: +3 XP; ~1 de cada 5 sale dorado: +10 XP. Los que no se recogen se pierden a
+    medianoche. Consejo: registrar los movimientos del día da más frutos.
+  · Sacudida: tocar el árbol 5 veces seguidas lo sacude; una vez al día suelta un premio sorpresa
+    (+2 a +20 XP, XP x2 por 2 horas o, raro, el premio mayor de +50 XP).
+  · Riego: mantener presionado "Regar" (1 vez al día) da +5 XP. Ya regado, el botón dice "Abonar:
+    ahorrar" y lleva a Ahorro.
+  · Con XP x2 activo (cofres o sacudida) todo vale doble. "Hoy en tu jardín" muestra lo pendiente.
+- Al subir de nivel, con rachas de 7, 14, 30… días, al cumplir una meta de ahorro o terminar de
+  pagar una deuda, Kiri ofrece compartir el logro (imagen para estados o WhatsApp con el enlace).
 - Salud (0-100%): sube si registras ingresos, ahorras, controlas deudas y estás al día.
 - Clima: ahorrar → llueve; registrar un ingreso → sale el sol y caen monedas; un pago por vencer
   (7 días) → nubes; pagos vencidos → tormenta con rayos y truenos (se pueden silenciar); un gasto
   hormiga → cae un rayo. Tocar las nubes muestra qué obligaciones están vencidas y cuáles vencen
   pronto, con su monto.
-- Botones: "Regar" (a la izquierda) riega el jardín; "Invitar" (a la derecha) abre el enlace de
-  invitación (Amigo, Familia o Pareja) con botones Copiar y Compartir.
+- Botones: "Regar" (a la izquierda, mantener presionado) riega el árbol; "Invitar" (a la derecha)
+  abre el enlace de invitación (Amigo, Familia o Pareja) con Copiar, Compartir y Enviar por WhatsApp.
+- Tarjeta "Invita y gana": cuántos amigos usan Kiri y cuánto falta para el siguiente premio.
 - Tarjeta "Progreso general": Disponible frente al ingreso, avance de ahorros, % pagado de deudas y
   colchón de emergencia (cuántos meses de obligaciones cubren tus ahorros).
 - Consejos contextuales con botón "Otro consejo".
 
 ## MISIONES — ruta /misiones
 - Misiones diarias (5, 10 o 20 XP), una semanal (60 XP), cofres para reclamar y racha de días.
-- Misiones de invitar: invitar 1, 2 y 3 personas (25, 50 y 75 XP). Solo cuentan personas NUEVAS que
-  se registran con tu enlace y verifican su correo; quedan conectados automáticamente en Social.
-  Alguien que ya tenía cuenta y abre el enlace queda conectado, pero no cuenta para la misión.
+- Misiones de invitar: 1, 3, 5, 10 y 25 amigos que usan Kiri (50, 100, 200, 400 y 800 XP). Solo
+  cuentan personas NUEVAS que llegan con tu enlace, verifican su correo y registran 3 movimientos en
+  2 días distintos (o ya se suscribieron); quedan conectados automáticamente en Social. Alguien que
+  ya tenía cuenta y abre el enlace queda conectado, pero no cuenta.
 - Recordatorios de misiones pendientes a las 10:30 y 18:30, y a las 20:00 "¿Registraste tus gastos
   de hoy?".
 
@@ -237,11 +251,23 @@ con sus días de pago; se cambia en Perfil).
   ilimitado; escáner que separa por productos; insignias exclusivas; soporte prioritario; IA al
   mes: 500 mensajes, 300 dictados, 100 escaneos.
 - Las cuotas de IA se renuevan el día 1 de cada mes; Mi plan muestra "Tu uso este mes".
-- No hay prueba gratis al registrarse: todos empiezan en KIRI FREE.
-- Invitar amigos (enlace en Social o Misiones): el amigo que llega con el enlace tiene 50% de descuento
-  en su primer mes de KIRI PLUS o 30% en KIRI PRO (solo pagando mensual). Quien invitó gana 10 días de
-  KIRI PLUS cuando ese amigo se suscribe y paga su primera factura, hasta 3 amigos (30 días en total).
-  Las misiones "Un amigo se suscribe", "2 amigos" y "3 amigos" avanzan con esos amigos suscritos.
+- Quien se registra solo empieza en KIRI FREE (sin prueba). Quien llega con el enlace de un amigo
+  tiene 14 días de KIRI PLUS gratis.
+- "Invita y gana" (Mi plan, sección Invita y gana; enlace en Social, Misiones, el árbol o por WhatsApp):
+  1) El amigo llega con el enlace: 14 días de KIRI PLUS gratis y, al suscribirse, 50% en su primer
+     mes de KIRI PLUS o 30% en KIRI PRO (solo pagando mensual).
+  2) Cuando el amigo empieza a usar Kiri (3 movimientos en 2 días distintos), LOS DOS ganan +20
+     mensajes, +10 dictados y +5 escaneos de Kiri Coach (se suman a la cuota de ese mes; si al mes le
+     quedan 7 días o menos, al siguiente).
+  3) Cuando el amigo paga su primera factura, quien invitó gana 1 mes gratis de su plan: si ya paga
+     PLUS o PRO, se descuenta en su próxima factura; si está en FREE, 30 días de KIRI PLUS.
+  4) Niveles SIN TOPE por amigos activos: 1 amigo → insignia "Primer brote" + 20 mensajes extra;
+     3 → 1 mes gratis de tu plan; 5 → insignia "Jardinero social" + 50 mensajes, 20 dictados y 10
+     escaneos; 10 (y 2 de ellos con plan pago) → 3 meses de KIRI PRO + insignia "Embajador Kiri";
+     25 (y 5 con plan) → KIRI PRO por 1 año. Quien ya paga PRO recibe esos meses en su factura.
+  Mi plan muestra invitados, cuántos usan Kiri, cuántos tienen plan, el siguiente premio y los
+  premios ganados. En "Tu uso este mes" los usos extra aparecen como "(+N por invitar)".
+- En "Me deben", el recordatorio por WhatsApp incluye una posdata con el enlace de Kiri.
 - Si llega a un límite, Kiri le muestra un aviso con el botón "Ver planes" que lleva a Mi plan.
   Nunca inventes precios ni límites distintos a estos.
 

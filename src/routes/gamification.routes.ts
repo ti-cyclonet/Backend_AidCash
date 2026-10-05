@@ -5,6 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { resolverPlan } from '../lib/planes.js'
 import { respuestaFuncion } from '../middleware/limit-enforcement.js'
+import { estadoJardin, cosecharFruto, sacudirArbol, regarArbol } from '../lib/jardin-juego.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -34,6 +35,7 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
         streakUltimoCheck: true,
         xpFromMissions: true,
         xpFromWatering: true,
+        xpFromJardin: true,
       },
     })
 
@@ -51,6 +53,7 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
       badges,
       xpFromMissions: user?.xpFromMissions ?? 0,
       xpFromWatering: user?.xpFromWatering ?? 0,
+      xpFromJardin: user?.xpFromJardin ?? 0,
     })
   } catch (error) {
     console.error('[GetGamification]', error)
@@ -110,6 +113,12 @@ router.post('/badges', validate(addBadgeSchema), async (req: Request, res: Respo
     const userId = req.user!.userId
     const { badgeId } = req.body
 
+    // Las de invitar amigos ("ref_") solo las entrega el servidor (lib/referidos.ts)
+    if (String(badgeId).startsWith('ref_')) {
+      res.status(403).json({ error: 'Esta insignia se gana invitando amigos a Kiri' })
+      return
+    }
+
     // Las insignias "pro_" son exclusivas de KIRI PRO
     if (String(badgeId).startsWith('pro_')) {
       const plan = await resolverPlan(userId)
@@ -145,6 +154,52 @@ router.get('/badges', async (req: Request, res: Response): Promise<void> => {
   } catch (error) {
     console.error('[GetBadges]', error)
     res.status(500).json({ error: 'Error al obtener insignias' })
+  }
+})
+
+// ─── Minijuego del árbol (lib/jardin-juego.ts) ────────────────────────────────
+
+router.get('/jardin', async (req: Request, res: Response): Promise<void> => {
+  try {
+    res.json(await estadoJardin(req.user!.userId))
+  } catch (error) {
+    console.error('[Jardin]', error)
+    res.status(500).json({ error: 'No se pudo cargar tu jardín' })
+  }
+})
+
+const cosecharSchema = z.object({ indice: z.number().int().min(0).max(20) })
+
+router.post('/jardin/cosechar', validate(cosecharSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const r = await cosecharFruto(req.user!.userId, req.body.indice)
+    if (!r.ok) { res.status(r.status).json({ error: r.error }); return }
+    res.json(r)
+  } catch (error) {
+    console.error('[Jardin cosechar]', error)
+    res.status(500).json({ error: 'No se pudo cosechar el fruto' })
+  }
+})
+
+router.post('/jardin/sacudir', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const r = await sacudirArbol(req.user!.userId)
+    if (!r.ok) { res.status(r.status).json({ error: r.error }); return }
+    res.json(r)
+  } catch (error) {
+    console.error('[Jardin sacudir]', error)
+    res.status(500).json({ error: 'No se pudo sacudir el árbol' })
+  }
+})
+
+router.post('/jardin/regar', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const r = await regarArbol(req.user!.userId)
+    if (!r.ok) { res.status(r.status).json({ error: r.error }); return }
+    res.json(r)
+  } catch (error) {
+    console.error('[Jardin regar]', error)
+    res.status(500).json({ error: 'No se pudo regar el árbol' })
   }
 })
 

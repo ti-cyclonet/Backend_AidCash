@@ -7,8 +7,9 @@ import { verifyCredentials } from '../lib/authoriza-auth.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
 import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
-import { acreditarReferido, contarReferidosSuscritos, premiarReferidoPorPago } from '../lib/invitaciones.js'
-import { resolverPlan, invalidarPlan, otorgarInsigniaPro, descuentoInvitadoDisponible, tierDeNombre, DESCUENTO_INVITADO, DIAS_PLUS_POR_REFERIDO, MAX_REFERIDOS_PREMIADOS } from '../lib/planes.js'
+import { acreditarReferido, premiarReferidoPorPago } from '../lib/invitaciones.js'
+import { resolverPlan, invalidarPlan, otorgarInsigniaPro, descuentoInvitadoDisponible, tierDeNombre, DESCUENTO_INVITADO } from '../lib/planes.js'
+import { resumenReferidos } from '../lib/referidos.js'
 import { avisar } from '../lib/push.js'
 import { z } from 'zod'
 import { Prisma } from '@prisma/client'
@@ -42,10 +43,12 @@ interface TenantLimitsResponse {
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userId = req.user!.userId
-    const [plan, descuentoInvitado, suscritos, primerMesInvitado] = await Promise.all([
+    // Primero el resumen de invitados: puede entregar premios pendientes que
+    // cambian el plan (meses ganados), y así el plan ya sale actualizado
+    const referidos = await resumenReferidos(userId)
+    const [plan, descuentoInvitado, primerMesInvitado] = await Promise.all([
       resolverPlan(userId),
       descuentoInvitadoDisponible(userId),
-      contarReferidosSuscritos(userId),
       primerMesConDescuento(userId),
     ])
     if (plan.features.exclusiveBadges) otorgarInsigniaPro(userId, 'pro_jardin_dorado')
@@ -59,11 +62,14 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       limits: plan.limites,
       hasPlan: true,
       pruebaHasta: plan.pruebaHasta ?? null,
+      // Con un plan ganado encima de uno pago: lo que de verdad paga
+      tierContrato: plan.tierContrato ?? null,
       // { PLUS: 50, PRO: 30 } si llegó invitado y aún no lo ha usado
       descuentoInvitado,
       // Ya pagó su primera factura con descuento de invitado: { pct, hasta } durante ese mes
       primerMesInvitado,
-      referidos: { suscritos, maximo: MAX_REFERIDOS_PREMIADOS, diasPorReferido: DIAS_PLUS_POR_REFERIDO, descuentoAmigo: DESCUENTO_INVITADO },
+      // Invita y gana: amigos (registrados, activos, con plan), niveles, siguiente premio y premios ganados
+      referidos: { ...referidos, suscritos: referidos.pagados, descuentoAmigo: DESCUENTO_INVITADO },
     })
   } catch (error: any) {
     console.error('[Plan] Error fetching plan:', error.message)
@@ -601,8 +607,8 @@ router.post('/factura-evento', requireInternalKey, async (req: Request, res: Res
     const { title, body } = avisos[evento]
     await avisar(user.id, { title, body, url: '/mi-plan#factonet', tag: `factura-${factura.codigo}`, tipo: 'factura' })
 
-    // Primera factura pagada: si llegó invitado, quien lo invitó gana 10 días
-    // de KIRI PLUS (hasta 3 amigos) y avanzan sus misiones de invitar
+    // Primera factura pagada: si llegó invitado, quien lo invitó gana 1 mes
+    // gratis de su plan y se revisan sus niveles (lib/referidos.ts)
     const referido = evento === 'pagada' && factura.valor > 0 ? await premiarReferidoPorPago(user.id) : null
     return res.json({ success: true, ...(referido ? { referidoPremiado: referido.premiado } : {}) })
   } catch (error: any) {

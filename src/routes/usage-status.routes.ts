@@ -5,26 +5,39 @@
 import { Router, Request, Response } from 'express'
 import { authMiddleware } from '../middleware/auth.js'
 import { invalidateTenantCache } from '../lib/authoriza-client.js'
-import { KIRI_VARIABLE_MAP, countResource } from '../middleware/limit-enforcement.js'
+import { KIRI_VARIABLE_MAP, countResource, periodoIA } from '../middleware/limit-enforcement.js'
+import { prisma } from '../config/database.js'
 import { ILIMITADO, resolverPlan } from '../lib/planes.js'
+import { bonosIA } from '../lib/referidos.js'
 
 const router = Router()
 
+// Cuotas de IA: los usos extra ganados (invitar amigos) se muestran sumados
+// al tope del plan — "12 de 50", no "0 de 10" (countResource ya los descuenta)
+const TIPO_IA: Record<string, 'coach' | 'dictado' | 'escaneo'> = { iaMensajesMes: 'coach', iaDictadosMes: 'dictado', iaEscaneosMes: 'escaneo' }
+
 async function usoDelPlan(userId: string) {
   const plan = await resolverPlan(userId)
+  const extras = await bonosIA(userId)
   const variables = await Promise.all(
     Object.entries(plan.limites)
       .filter(([k]) => KIRI_VARIABLE_MAP[k])
       .map(async ([variableName, lim]) => {
-        const currentCount = await countResource(KIRI_VARIABLE_MAP[variableName], userId)
         const ilimitado = lim.maxValue >= ILIMITADO
+        const tipoIA = TIPO_IA[variableName]
+        const extra = tipoIA && !ilimitado ? extras[tipoIA] : 0
+        const currentCount = tipoIA
+          ? (await prisma.aiUso.findUnique({ where: { userId_periodo_tipo: { userId, periodo: periodoIA(), tipo: tipoIA } } }))?.cantidad ?? 0
+          : await countResource(KIRI_VARIABLE_MAP[variableName], userId)
+        const maxValue = lim.maxValue + extra
         return {
           variableName,
           displayName: lim.displayName,
-          maxValue: lim.maxValue,
+          maxValue,
           ilimitado,
           currentCount,
-          usagePercentage: ilimitado || lim.maxValue <= 0 ? 0 : Math.min(100, Math.round((currentCount / lim.maxValue) * 100)),
+          ...(extra ? { extra } : {}),
+          usagePercentage: ilimitado || maxValue <= 0 ? 0 : Math.min(100, Math.round((currentCount / maxValue) * 100)),
         }
       }),
   )
