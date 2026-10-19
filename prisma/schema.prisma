@@ -62,6 +62,10 @@ model User {
   // XP del minijuego del árbol: frutos cosechados, sacudida y riego del día
   // (ver lib/jardin-juego.ts). Lo valida el servidor, nunca el cliente.
   xpFromJardin          Int      @default(0) @map("xp_from_jardin")
+  // XP por días de racha, ACUMULADA (40 por cada día que recordDailyStreak
+  // cuenta). Antes se calculaba streakActual * 40 y al perder la racha el
+  // árbol volvía a semilla; ahora la XP nunca baja.
+  xpFromRacha           Int      @default(0) @map("xp_from_racha")
   cashBalance           Decimal  @default(0) @map("cash_balance") @db.Decimal(12, 2)
   // Wallet — saldo real distribuido en 4 bolsillos
   walletAhorro          Decimal  @default(0) @map("wallet_ahorro") @db.Decimal(12, 2)
@@ -621,6 +625,8 @@ model IncomeRecord {
   userId    String   @map("user_id")
   monto     Decimal  @db.Decimal(12, 2)
   tipo      String   // salario | extra
+  // Qué fue (ej. "Freelance", "Venta del celular") — se muestra en Balance
+  descripcion String?
   // Distribución aplicada al registrar
   aAhorro         Decimal  @default(0) @map("a_ahorro") @db.Decimal(12, 2)
   aObligaciones   Decimal  @default(0) @map("a_obligaciones") @db.Decimal(12, 2)
@@ -1064,7 +1070,7 @@ model GardenCosecha {
   id        String   @id @default(uuid())
   userId    String   @map("user_id")
   fecha     String   // "2026-10-04" (día local)
-  tipo      String   // fruto | sacudida | riego
+  tipo      String   // fruto | sacudida | riego | toques
   indice    Int      @default(0)
   xp        Int      @default(0)
   detalle   String?

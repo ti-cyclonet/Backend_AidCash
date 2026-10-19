@@ -111,7 +111,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       prisma.impulseExpense.findMany({
         where: { userId, createdAt: { gte: from, lte: to } },
         orderBy: { createdAt: 'desc' },
-        include: { tarjeta: { select: { nombre: true } } },
+        include: { tarjeta: { select: { nombre: true } }, budgetCategory: { select: { nombre: true } } },
       }),
 
       // Historial de ahorro — filtrado por createdAt
@@ -184,7 +184,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       prisma.fixedExpensePayment.findMany({
         where: { fixedExpense: { userId }, createdAt: { gte: from, lte: to } },
         include: {
-          fixedExpense: { select: { nombre: true } },
+          fixedExpense: { select: { nombre: true, budgetCategory: { select: { nombre: true } } } },
           tarjeta: { select: { nombre: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -468,7 +468,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
       monthlySeries,
 
       // Listas detalladas para la tabla y exportación
-      impulseExpenses:  impulseExpenses.map(e => ({ ...e, monto: Number(e.monto), tarjetaNombre: e.tarjeta?.nombre ?? null, tarjeta: undefined })),
+      impulseExpenses:  impulseExpenses.map(e => ({ ...e, monto: Number(e.monto), tarjetaNombre: e.tarjeta?.nombre ?? null, tarjeta: undefined, categoriaNombre: e.budgetCategory?.nombre ?? null, budgetCategory: undefined })),
       savingsHistory:   savingsHistory.map(e => ({ ...e, monto: Number(e.monto) })),
       extraIncomes:     extraIncomes.map(e => ({ ...e, monto: Number(e.monto) })),
       debts: debts.map(d => {
@@ -536,6 +536,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         periodo: p.periodo,
         createdAt: p.createdAt,
         tarjetaNombre: p.tarjeta?.nombre ?? null,
+        categoriaNombre: p.fixedExpense.budgetCategory?.nombre ?? null,
       })),
 
       // Ingresos registrados (sueldo + extras)

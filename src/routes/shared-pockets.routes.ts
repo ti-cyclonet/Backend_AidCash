@@ -8,6 +8,7 @@ import { checkLimit, requireFeature } from '../middleware/limit-enforcement.js'
 import { requireConnection } from '../lib/connections.js'
 import { planPocketDeduction } from '../lib/wallet.js'
 import { ingresoPromedioMensual, ingresoReferenciaMensual } from '../lib/ingresos.js'
+import { avisar } from '../lib/push.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -382,6 +383,53 @@ router.post('/:id/deposit/:depositId/reject', async (req: Request, res: Response
 })
 
 // ─── DELETE /shared-pockets/:id — Solicitar eliminación (timer 5 días) ────────
+
+// ─── PATCH /shared-pockets/:id — subir o bajar la meta (y renombrar) ────────
+// Cualquier miembro puede cambiarla; a los demás les llega el aviso. El saldo
+// no se edita aquí: se mueve con aportes y retiros (que los demás aprueban).
+
+const updateSchema = z.object({
+  nombre: z.string().trim().min(1).max(80).optional(),
+  meta: z.number().min(0).optional(),
+}).refine(d => d.nombre !== undefined || d.meta !== undefined, 'Nada que cambiar')
+
+router.patch('/:id', validate(updateSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const pocketId = req.params.id as string
+    const { nombre, meta } = req.body as z.infer<typeof updateSchema>
+    const pocket = await prisma.sharedPocket.findFirst({
+      where: { id: pocketId, members: { some: { userId } } },
+      include: { members: { select: { userId: true } } },
+    })
+    if (!pocket) { res.status(404).json({ error: 'Ahorro no encontrado' }); return }
+
+    const updated = await prisma.sharedPocket.update({
+      where: { id: pocketId },
+      data: { ...(nombre !== undefined ? { nombre } : {}), ...(meta !== undefined ? { meta } : {}) },
+    })
+
+    const yo = await prisma.user.findUnique({ where: { id: userId }, select: { nombre: true } })
+    const quien = yo?.nombre.split(' ')[0] ?? 'Alguien'
+    const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
+    const antes = Number(pocket.meta)
+    for (const m of pocket.members.filter(x => x.userId !== userId)) {
+      emitToUser(m.userId, SOCKET_EVENTS.SHARED_DEPOSIT, { type: 'updated', pocketId })
+      avisar(m.userId, {
+        title: `🎯 ${quien} cambió el ahorro "${updated.nombre}"`,
+        body: meta !== undefined && meta !== antes ? `La meta pasó de ${fmt(antes)} a ${fmt(meta)}.` : 'Ahora se llama así.',
+        url: '/social?tab=pockets',
+        tag: `pocket-edit-${pocketId}`,
+        tipo: 'ahorro',
+      }).catch(() => {})
+    }
+
+    res.json({ pocket: { ...updated, balance: Number(updated.balance), meta: Number(updated.meta) } })
+  } catch (error) {
+    console.error('[UpdateSharedPocket]', error)
+    res.status(500).json({ error: 'Error al editar el ahorro' })
+  }
+})
 
 router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
   try {

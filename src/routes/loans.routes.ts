@@ -148,6 +148,88 @@ router.patch('/:id/fecha', validate(fechaSchema), async (req: Request, res: Resp
   }
 })
 
+// ─── POST /loans/:id/ajustar — subir o bajar lo que se debe ──────────────────
+// "Me prestó más y es la misma deuda": se suma al préstamo activo en vez de
+// crear otro. Quien prestó puede subirlo o bajarlo (corrección o perdón de una
+// parte); quien debe solo puede subirlo — para bajarlo registra un abono, que
+// el otro confirma. `enMiSaldo`: la plata nueva salió/entró de MI saldo en
+// Kiri (cada uno solo mueve su propia billetera, nunca la del otro).
+
+const ajustarSchema = z.object({
+  tipo: z.enum(['aumentar', 'disminuir']),
+  monto: z.number().min(0.01),
+  nota: z.string().max(200).optional(),
+  enMiSaldo: z.boolean().optional(),
+})
+
+router.post('/:id/ajustar', validate(ajustarSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { tipo, monto, nota, enMiSaldo } = req.body as z.infer<typeof ajustarSchema>
+    const loan = await prisma.loan.findFirst({
+      where: { id: String(req.params.id), OR: [{ lenderId: userId }, { borrowerId: userId }], status: 'ACTIVE' },
+      include: { lender: { select: { nombre: true } }, borrower: { select: { nombre: true } } },
+    })
+    if (!loan) { res.status(404).json({ error: 'Préstamo activo no encontrado' }); return }
+
+    const soyLender = loan.lenderId === userId
+    if (tipo === 'disminuir' && !soyLender) {
+      res.status(403).json({ error: 'Para bajar lo que debes, registra un abono y quien te prestó lo confirma' })
+      return
+    }
+    const pendiente = Number(loan.remainingAmount)
+    if (tipo === 'disminuir' && monto > pendiente) {
+      res.status(400).json({ error: `No puedes bajar más de lo que falta (${Math.round(pendiente).toLocaleString('es-CO')})` })
+      return
+    }
+    // Solo quien prestó saca plata al aumentar; solo quien debe la recibe
+    const mueveSaldo = tipo === 'aumentar' && !!enMiSaldo
+    if (mueveSaldo && soyLender) {
+      const yo = await prisma.user.findUnique({ where: { id: userId }, select: { cashBalance: true } })
+      if (Number(yo?.cashBalance ?? 0) < monto) {
+        res.status(400).json({ error: 'No tienes saldo suficiente en Kiri para prestar ese valor', disponible: Number(yo?.cashBalance ?? 0) })
+        return
+      }
+    }
+
+    const signo = tipo === 'aumentar' ? 1 : -1
+    const nuevoPendiente = Math.max(0, pendiente + signo * monto)
+    const nuevoTotal = Math.max(0, Number(loan.amount) + signo * monto)
+    const nuevoOriginal = loan.montoOriginal != null ? Math.max(0, Number(loan.montoOriginal) + signo * monto) : null
+    const [updated] = await prisma.$transaction([
+      prisma.loan.update({
+        where: { id: loan.id },
+        data: {
+          amount: nuevoTotal,
+          remainingAmount: nuevoPendiente,
+          ...(nuevoOriginal != null ? { montoOriginal: nuevoOriginal } : {}),
+          status: nuevoPendiente <= 0 ? 'PAID' : 'ACTIVE',
+        },
+      }),
+      ...(mueveSaldo
+        ? [prisma.user.update({ where: { id: userId }, data: soyLender ? planPocketDeduction('libre', monto) : planPocketCredit('libre', monto) })]
+        : []),
+    ])
+
+    const otroId = soyLender ? loan.borrowerId : loan.lenderId
+    const yo = (soyLender ? loan.lender.nombre : loan.borrower.nombre).split(' ')[0]
+    const fmt = (n: number) => `$${Math.round(n).toLocaleString('es-CO')}`
+    emitToUser(otroId, SOCKET_EVENTS.LOAN_APPROVED, { loanId: loan.id, ajuste: tipo, monto })
+    avisar(otroId, {
+      title: tipo === 'aumentar' ? `➕ ${yo} sumó ${fmt(monto)} al préstamo` : `➖ ${yo} bajó ${fmt(monto)} del préstamo`,
+      body: `${nota?.trim() ? `"${nota.trim()}". ` : ''}Ahora ${nuevoPendiente > 0 ? `faltan ${fmt(nuevoPendiente)}` : 'quedó saldado'}.`,
+      url: '/social?tab=loans',
+      tag: `loan-ajuste-${loan.id}`,
+      tipo: 'prestamo',
+    }).catch(() => {})
+
+    res.json({ loan: { ...updated, amount: Number(updated.amount), remainingAmount: Number(updated.remainingAmount) } })
+  } catch (error) {
+    console.error('[LoanAjustar]', error)
+    res.status(500).json({ error: 'Error al ajustar el préstamo' })
+  }
+})
+
 // ─── POST /loans/request ──────────────────────────────────────────────────────
 // Borrower solicita préstamo a Lender
 

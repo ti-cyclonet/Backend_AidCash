@@ -5,7 +5,7 @@ import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { resolverPlan } from '../lib/planes.js'
 import { respuestaFuncion } from '../middleware/limit-enforcement.js'
-import { estadoJardin, cosecharFruto, sacudirArbol, regarArbol } from '../lib/jardin-juego.js'
+import { estadoJardin, cosecharFruto, sacudirArbol, regarArbol, premioToques } from '../lib/jardin-juego.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -36,6 +36,7 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
         xpFromMissions: true,
         xpFromWatering: true,
         xpFromJardin: true,
+        xpFromRacha: true,
       },
     })
 
@@ -54,6 +55,7 @@ router.get('/status', async (req: Request, res: Response): Promise<void> => {
       xpFromMissions: user?.xpFromMissions ?? 0,
       xpFromWatering: user?.xpFromWatering ?? 0,
       xpFromJardin: user?.xpFromJardin ?? 0,
+      xpFromRacha: user?.xpFromRacha ?? 0,
     })
   } catch (error) {
     console.error('[GetGamification]', error)
@@ -200,6 +202,17 @@ router.post('/jardin/regar', async (req: Request, res: Response): Promise<void> 
   } catch (error) {
     console.error('[Jardin regar]', error)
     res.status(500).json({ error: 'No se pudo regar el árbol' })
+  }
+})
+
+router.post('/jardin/toques', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const r = await premioToques(req.user!.userId)
+    if (!r.ok) { res.status(r.status).json({ error: r.error }); return }
+    res.json(r)
+  } catch (error) {
+    console.error('[Jardin toques]', error)
+    res.status(500).json({ error: 'No se pudo entregar el premio' })
   }
 })
 
