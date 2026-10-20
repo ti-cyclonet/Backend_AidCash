@@ -117,7 +117,13 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.userId
     const estado = (req.query.estado as string) || 'activa'
 
-    const debts = await prisma.debt.findMany({ where: { userId, estado }, orderBy: { createdAt: 'desc' } })
+    // Las saldadas solo se listan los primeros 7 días después de terminarlas: la
+    // fila (y sus pagos en Balance) se conserva, pero sale de "Deudas saldadas".
+    const SALDADA_VISIBLE_DIAS = 7
+    const debts = await prisma.debt.findMany({
+      where: { userId, estado, ...(estado === 'saldada' ? { updatedAt: { gte: new Date(Date.now() - SALDADA_VISIBLE_DIAS * 86_400_000) } } : {}) },
+      orderBy: { createdAt: 'desc' },
+    })
 
     const ctx = await cargarContextoDeudas(debts)
 
@@ -723,6 +729,56 @@ router.post('/:id/ajustar-saldo', validate(ajustarSaldoSchema), async (req: Requ
   } catch (error) {
     console.error('[AjustarSaldoDebt]', error)
     res.status(500).json({ error: 'Error al actualizar el saldo' })
+  }
+})
+
+// ─── POST /debts/:id/ajustar-monto ("Me prestaron más" / "Bajó la deuda") ────
+// La misma deuda crece (me prestaron otra parte) o baja (corrección, perdón de
+// una parte): sube/baja el total y lo que falta por el mismo valor, sin tocar la
+// billetera ni contar como pago. Queda en DebtAjuste ('ampliacion'/'reduccion').
+
+const ajustarMontoSchema = z.object({
+  tipo: z.enum(['aumentar', 'disminuir']),
+  monto: z.number().min(0.01),
+})
+
+router.post('/:id/ajustar-monto', validate(ajustarMontoSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const id = req.params.id as string
+    const { tipo, monto } = req.body as z.infer<typeof ajustarMontoSchema>
+
+    const debt = await prisma.debt.findFirst({ where: { id, userId, estado: { in: ['activa', 'vencida'] } } })
+    if (!debt) { res.status(404).json({ error: 'Deuda activa no encontrada' }); return }
+
+    const saldoAnterior = Number(debt.saldoRestante ?? debt.montoTotal)
+    if (tipo === 'disminuir' && monto > saldoAnterior) {
+      res.status(400).json({ error: `No puedes bajar más de lo que falta (${Math.round(saldoAnterior).toLocaleString('es-CO')})` })
+      return
+    }
+    const signo = tipo === 'aumentar' ? 1 : -1
+    const saldoPosterior = Math.max(0, saldoAnterior + signo * monto)
+    const montoTotal = Math.max(0, Number(debt.montoTotal) + signo * monto)
+
+    await prisma.$transaction([
+      prisma.debt.update({
+        where: { id },
+        data: {
+          montoTotal,
+          saldoRestante: saldoPosterior,
+          ...(debt.saldoPrincipal != null ? { saldoPrincipal: Math.max(0, Number(debt.saldoPrincipal) + signo * monto) } : {}),
+          ...(saldoPosterior <= 0 ? { estado: 'saldada' } : {}),
+        },
+      }),
+      prisma.debtAjuste.create({
+        data: { debtId: id, tipo: tipo === 'aumentar' ? 'ampliacion' : 'reduccion', monto: signo * monto, saldoAnterior, saldoPosterior, periodo: debtPeriodo(debt) },
+      }),
+    ])
+
+    res.json({ debt: await serializarUnaDeuda(id) })
+  } catch (error) {
+    console.error('[AjustarMontoDebt]', error)
+    res.status(500).json({ error: 'Error al ajustar la deuda' })
   }
 })
 

@@ -72,6 +72,7 @@ const balanceSchema = z.object({
 const walletIncomeSchema = z.object({
   monto: z.number().min(0.01),
   tipo: z.enum(['salario', 'extra']),
+  descripcion: z.string().trim().max(120).optional(),
 }).strict()
 
 const saldoInicialSchema = z.object({
@@ -413,7 +414,7 @@ async function repartirEnBilletera(userId: string, monto: number) {
 router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId
-    const { monto, tipo } = req.body as { monto: number; tipo: 'salario' | 'extra' }
+    const { monto, tipo, descripcion } = req.body as { monto: number; tipo: 'salario' | 'extra'; descripcion?: string }
 
     const reparto = await repartirEnBilletera(userId, monto)
     if (!reparto) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
@@ -422,7 +423,7 @@ router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async
     // Transacción: crear registro + actualizar wallet + cashBalance
     const [record, updated] = await prisma.$transaction([
       prisma.incomeRecord.create({
-        data: { userId, monto, tipo, aAhorro, aObligaciones, aLibre, aEndeudamiento },
+        data: { userId, monto, tipo, descripcion: descripcion || null, aAhorro, aObligaciones, aLibre, aEndeudamiento },
       }),
       prisma.user.update({
         where: { id: userId },

@@ -80,6 +80,26 @@ async function main() {
     check('El estado del día lo refleja todo (sacudida, riego y XP de hoy)', e3.regado === true && !!e3.sacudida && e3.xpHoy === (await xpJardin()), { xpHoy: e3.xpHoy })
     const st = await call('GET', '/status')
     check('/gamification/status trae la XP del jardín para el nivel del árbol', st.xpFromJardin === (await xpJardin()))
+
+    // 50 toques en el día → premio mayor, una vez al día
+    const antesToques = await xpJardin()
+    const t = await call('POST', '/jardin/toques')
+    check('50 toques dan un premio (XP ≥ 15 o boost)', t.ok && (t.tipo === 'boost' || t.xp >= 15) && (await xpJardin()) === antesToques + t.xp, t)
+    check('El premio de los 50 toques es una vez al día', (await call('POST', '/jardin/toques')).status === 409)
+    const e4 = await call('GET', '/jardin')
+    check('El estado lo muestra (premioToques, meta 50)', !!e4.premioToques && e4.toquesPremio === 50)
+
+    // La racha suma XP acumulada: perderla no baja el árbol de nivel
+    const { recordDailyStreak } = await import('../src/lib/missions.js')
+    await prisma.user.update({ where: { id: u.id }, data: { streakActual: 0, streakUltimoCheck: null, xpFromRacha: 0 } })
+    await recordDailyStreak(u.id)
+    const r1 = await prisma.user.findUnique({ where: { id: u.id }, select: { streakActual: true, xpFromRacha: true } })
+    check('Un día de racha suma 40 XP acumulados', r1?.streakActual === 1 && r1?.xpFromRacha === 40, r1)
+    await recordDailyStreak(u.id)
+    check('El mismo día no suma dos veces', (await prisma.user.findUnique({ where: { id: u.id }, select: { xpFromRacha: true } }))?.xpFromRacha === 40)
+    await call('PATCH', '/streak', { streakActual: 0 })
+    const st2 = await call('GET', '/status')
+    check('Perder la racha no quita la XP del árbol', st2.streak.actual === 0 && st2.xpFromRacha === 40, { actual: st2.streak.actual, xp: st2.xpFromRacha })
   } finally {
     await prisma.user.delete({ where: { id: u.id } }).catch(() => {})
     console.log(`\nUsuario temporal borrado; quedan: ${await prisma.user.count({ where: { id: u.id } })}`)

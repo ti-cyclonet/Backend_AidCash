@@ -147,6 +147,9 @@ function dateKey(d: Date): string {
  * reinicia en 1 en vez de en 0 — ya volviste a actuar hoy, así que hoy
  * cuenta como el primer día de una racha nueva.
  */
+/** XP del árbol por cada día de racha contado (misma cifra que XP_PER_STREAK del frontend). */
+export const XP_POR_DIA_RACHA = 40
+
 export async function recordDailyStreak(userId: string): Promise<void> {
   try {
     const user = await prisma.user.findUnique({
@@ -169,7 +172,8 @@ export async function recordDailyStreak(userId: string): Promise<void> {
 
     await prisma.user.update({
       where: { id: userId },
-      data: { streakActual: newStreak, streakMejor: newBest, streakUltimoCheck: today },
+      // xpFromRacha acumula: perder la racha ya no le quita niveles al árbol
+      data: { streakActual: newStreak, streakMejor: newBest, streakUltimoCheck: today, xpFromRacha: { increment: XP_POR_DIA_RACHA } },
     })
 
     // Insignias por racha — antes esto solo pasaba dentro del incrementStreak

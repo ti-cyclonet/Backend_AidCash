@@ -3,6 +3,7 @@ import { esPendienteProximoPeriodo } from './period.js'
 import {
   debtPeriodo, debtPeriodoSiguiente, computePeriodStatus, resumenPagosPeriodo,
   cuotaBaseDelPeriodo, calcularAtrasos, periodosRevisables, esLineaCredito, cupoDisponible,
+  calcularPagoDeuda, tasaDelPeriodo,
 } from './debt-calc.js'
 import { cuotaEfectivaTarjeta, cuotaExigibleLinea } from './installments.js'
 import type { Debt, DebtAjuste, DebtCardInstallment, DebtPayment, Prisma } from '@prisma/client'
@@ -78,6 +79,12 @@ export function serializarDeuda(
   const cupo = d.cupoTotal != null ? Number(d.cupoTotal) : null
   const disponible = esLinea ? cupoDisponible(cupo, saldo) : null
 
+  // "Pago total" (como el de la tarjeta): el saldo más el interés que falta del
+  // periodo — lo mismo que payDebtServer acepta como máximo para dejarla en 0.
+  const tasaMensual = d.tasaInteresAplicada != null ? Number(d.tasaInteresAplicada) : d.tasaInteres != null ? Number(d.tasaInteres) : null
+  const interesPendiente = calcularPagoDeuda(saldo, tasaDelPeriodo(tasaMensual, d.frecuenciaPago), status, Number.MAX_SAFE_INTEGER).pagoInteres
+  const pagoTotal = Math.round((saldo + interesPendiente) * 100) / 100
+
   const montoAdelantado = payments.filter(p => p.periodo === periodoSiguiente).reduce((s, p) => s + Number(p.montoPagado), 0)
 
   // Nunca se pide por atrasos más de lo que de verdad queda debiendo (ej. una
@@ -95,6 +102,7 @@ export function serializarDeuda(
     ...d,
     montoTotal: Number(d.montoTotal),
     saldoRestante: Number(d.saldoRestante),
+    pagoTotal,
     cuotaPeriodo,
     // Cuota normal (sin el ajuste "solo este periodo") — para mostrar "normal: $X".
     cuotaBase: Number(d.cuotaPeriodo),
