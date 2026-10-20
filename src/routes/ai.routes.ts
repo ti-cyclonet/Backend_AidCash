@@ -22,7 +22,7 @@ async function enIdioma(req: Request, sistema: string): Promise<string> {
 }
 
 // ─── Cuotas mensuales de IA por plan ──────────────────────────────────────────
-// Cada uso cuesta en Google: FREE 10 mensajes / 10 dictados / 3 escaneos al
+// Cada uso cuesta en Google: FREE 5 mensajes / 5 dictados / 3 escaneos al
 // mes, PLUS 150/100/30, PRO 500/300/100 (lib/planes.ts). Solo cuenta lo que
 // la IA sí respondió.
 

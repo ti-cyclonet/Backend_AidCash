@@ -92,7 +92,7 @@ async function main() {
 
     // ── Plan efectivo de cada uno ──
     const pf = await call(F, 'GET', '/plan')
-    check('Felipe sin contrato → KIRI FREE (gratis)', pf.tier === 'FREE' && pf.fuente === 'gratis' && pf.limits.nCategorias.maxValue === 5, { tier: pf.tier, fuente: pf.fuente })
+    check('Felipe sin contrato → KIRI FREE (gratis)', pf.tier === 'FREE' && pf.fuente === 'gratis' && pf.limits.nCategorias.maxValue === 3, { tier: pf.tier, fuente: pf.fuente })
     const pt = await call(T, 'GET', '/plan')
     check('Tania con días de PLUS ganados por invitar → KIRI PLUS con fecha de fin', pt.tier === 'PLUS' && pt.fuente === 'prueba' && !!pt.pruebaHasta)
     const pp = await call(P, 'GET', '/plan')
@@ -106,10 +106,10 @@ async function main() {
 
     // ── Límites de cantidad (403 LIMITE con "mejora") ──
     let ultima: Record<string, any> = {}
-    for (let i = 1; i <= 6; i++) ultima = await call(F, 'POST', '/budget-categories', { nombre: `Cat ${i}` })
-    check('FREE: la 6.ª categoría → 403 LIMITE', ultima.status === 403 && ultima.codigo === 'LIMITE' && ultima.maxValue === 5, ultima.message)
-    check('…con el mensaje y la mejora a PLUS (20)', ultima.mejora?.plan === 'KIRI PLUS' && ultima.mejora?.maxValue === 20 && /5 categorías/.test(ultima.message))
-    check('…y solo quedaron 5', (await prisma.budgetCategory.count({ where: { userId: F.id } })) === 5)
+    for (let i = 1; i <= 4; i++) ultima = await call(F, 'POST', '/budget-categories', { nombre: `Cat ${i}` })
+    check('FREE: la 4.ª categoría → 403 LIMITE', ultima.status === 403 && ultima.codigo === 'LIMITE' && ultima.maxValue === 3, ultima.message)
+    check('…con el mensaje y la mejora a PLUS (20)', ultima.mejora?.plan === 'KIRI PLUS' && ultima.mejora?.maxValue === 20 && /3 categorías/.test(ultima.message))
+    check('…y solo quedaron 3', (await prisma.budgetCategory.count({ where: { userId: F.id } })) === 3)
     for (let i = 1; i <= 4; i++) ultima = await call(F, 'POST', '/savings-pockets', { nombre: `Bolsillo ${i}` })
     check('FREE: el 4.º bolsillo → 403', ultima.status === 403 && ultima.variableName === 'nBolsillos')
     for (let i = 1; i <= 4; i++) ultima = await call(F, 'POST', '/external-loans', { persona: `Amigo ${i}`, monto: 1000, salioDeBilletera: false })
@@ -153,10 +153,10 @@ async function main() {
 
     // ── Cuotas mensuales de IA ──
     const usoF = await call(F, 'GET', '/ai/uso')
-    check('FREE: 10 mensajes, 10 dictados y 3 escaneos al mes', usoF.coach?.limite === 10 && usoF.dictado?.limite === 10 && usoF.escaneo?.limite === 3 && usoF.coach.restantes === 10)
-    await prisma.aiUso.create({ data: { userId: F.id, periodo: periodoIA(), tipo: 'coach', cantidad: 10 } })
+    check('FREE: 5 mensajes, 5 dictados y 3 escaneos al mes', usoF.coach?.limite === 5 && usoF.dictado?.limite === 5 && usoF.escaneo?.limite === 3 && usoF.coach.restantes === 5)
+    await prisma.aiUso.create({ data: { userId: F.id, periodo: periodoIA(), tipo: 'coach', cantidad: 5 } })
     const c429 = await call(F, 'POST', '/ai/coach', { mensaje: '¿cómo voy?' })
-    check('Mensaje 11 del mes → 429 CUOTA_IA con la mejora a PLUS (150)', c429.status === 429 && c429.codigo === 'CUOTA_IA' && c429.mejora?.maxValue === 150, c429.error)
+    check('Mensaje 6 del mes → 429 CUOTA_IA con la mejora a PLUS (150)', c429.status === 429 && c429.codigo === 'CUOTA_IA' && c429.mejora?.maxValue === 150, c429.error)
     const usoP = await call(P, 'GET', '/ai/uso')
     check('PRO: 500 mensajes, 300 dictados, 100 escaneos', usoP.coach?.limite === 500 && usoP.dictado?.limite === 300 && usoP.escaneo?.limite === 100)
 
@@ -165,7 +165,7 @@ async function main() {
     const desde = hace.toISOString().slice(0, 10)
     const hasta = new Date().toISOString().slice(0, 10)
     const balF = await call(F, 'GET', `/reports/balance?timeframe=custom&from=${desde}&to=${hasta}`)
-    check('FREE: pedir un año de historial → se recorta a 3 meses y se avisa', balF.historialLimitado?.meses === 3 && balF.historialLimitado?.mejora?.plan === 'KIRI PLUS' && new Date(balF.from) > hace, balF.historialLimitado)
+    check('FREE: pedir un año de historial → solo el mes actual y se avisa', balF.historialLimitado?.meses === 1 && balF.historialLimitado?.mejora?.plan === 'KIRI PLUS' && new Date(balF.from) > hace, balF.historialLimitado)
     const balP = await call(P, 'GET', `/reports/balance?timeframe=custom&from=${desde}&to=${hasta}`)
     check('PRO: historial completo, sin recorte', balP.status === 200 && !balP.historialLimitado)
 
@@ -173,7 +173,7 @@ async function main() {
     const uso = await call(F, 'GET', '/usage-status')
     const cats = uso.variables?.find((v: any) => v.variableName === 'nCategorias')
     const ia = uso.variables?.find((v: any) => v.variableName === 'iaMensajesMes')
-    check('Tu uso este mes: 5/5 categorías y 10/10 mensajes', cats?.currentCount === 5 && cats?.maxValue === 5 && cats?.usagePercentage === 100 && ia?.currentCount === 10, { cats, ia })
+    check('Tu uso este mes: 3/3 categorías y 5/5 mensajes', cats?.currentCount === 3 && cats?.maxValue === 3 && cats?.usagePercentage === 100 && ia?.currentCount === 5, { cats, ia })
 
     // ── Invitar amigos: el amigo tiene 14 días de PLUS y descuento; quien invita gana 1 mes cuando el amigo paga ──
     // (el detalle del programa — activación, bono de IA, niveles, meses en factura — está en e2e-referidos.test.ts)

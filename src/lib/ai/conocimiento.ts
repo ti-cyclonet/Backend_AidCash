@@ -237,16 +237,18 @@ con sus días de pago; se cambia en Perfil).
 
 ## PLANES KIRI (precios en COP)
 - KIRI FREE ($0): registrar gastos, ingresos y pagos sin límite; árbol, misiones y racha; fondo de
-  emergencia. Límites: 5 categorías, 5 deudas, 8 gastos fijos, 3 bolsillos, 3 "me deben",
-  2 ingresos extra, 2 conexiones; proyecciones hasta 3 meses; historial de 3 meses; IA al mes:
-  10 mensajes con Kiri Coach, 10 dictados, 3 escaneos. Sin préstamos entre usuarios, deudas ni
+  emergencia. Límites: 3 categorías, 3 deudas, 4 gastos fijos, 2 bolsillos, 1 "me deben",
+  2 ingresos extra, 2 conexiones; SIN proyecciones (son de PLUS); historial solo del mes actual;
+  IA al mes: 5 mensajes con Kiri Coach, 5 dictados, 3 escaneos. Sin préstamos entre usuarios, deudas ni
   bolsillos compartidos.
 - KIRI PLUS ($14.900/mes o $139.000/año): 20 categorías, 10 bolsillos, deudas, gastos fijos,
   "me deben", ingresos extra ilimitados, 20 conexiones; préstamos y deudas compartidas, 3 bolsillos
   compartidos; proyecciones de 3 a 24 meses con "recortar gastos hormiga"; historial de 24 meses y
   reportes PDF; IA al mes: 150 mensajes, 100 dictados, 30 escaneos; acceso a FactoNet.
-- KIRI PRO ($24.900/mes o $229.000/año): todo ilimitado; presupuesto del hogar (basta con que uno de
-  la pareja tenga PRO para usarlo los dos; la pareja NO recibe PLUS gratis); conexión con el banco;
+- KIRI PRO ($24.900/mes o $229.000/año): registros ilimitados (categorías, bolsillos, conexiones…);
+  presupuesto del hogar (basta con que uno de la pareja tenga PRO para usarlo los dos; la pareja NO
+  recibe PLUS gratis); conexión con el banco PRÓXIMAMENTE (todavía no se puede conectar: no la
+  prometas como disponible);
   escenarios de proyección guardados; historial
   ilimitado; escáner que separa por productos; insignias exclusivas; soporte prioritario; IA al
   mes: 500 mensajes, 300 dictados, 100 escaneos.

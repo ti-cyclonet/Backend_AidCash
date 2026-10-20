@@ -129,13 +129,13 @@ async function main() {
 
     if (periodoBono() === periodoIA()) {
       const usoA = await call(Ana, 'GET', '/ai/uso')
-      check('Kiri Coach de Ana (FREE): 10 del plan + 40 extra = 50 este mes', usoA.coach?.limite === 50 && usoA.coach?.extra === 40, usoA.coach)
+      check('Kiri Coach de Ana (FREE): 5 del plan + 40 extra = 45 este mes', usoA.coach?.limite === 45 && usoA.coach?.extra === 40, usoA.coach)
       await prisma.aiUso.create({ data: { userId: Ana.id, periodo: periodoIA(), tipo: 'coach', cantidad: 12 } })
       const usoA2 = await call(Ana, 'GET', '/ai/uso')
-      check('Con 12 mensajes usados (más que los 10 del plan) le quedan 38', usoA2.coach?.restantes === 38, usoA2.coach)
+      check('Con 12 mensajes usados (más que los 5 del plan) le quedan 33', usoA2.coach?.restantes === 33, usoA2.coach)
       const usage = await call(Ana, 'GET', '/usage-status')
       const ia = usage.variables?.find((v: any) => v.variableName === 'iaMensajesMes')
-      check('Tu uso este mes: 12 de 50 mensajes (10 del plan + 40 extra)', ia?.currentCount === 12 && ia?.maxValue === 50 && ia?.extra === 40, ia)
+      check('Tu uso este mes: 12 de 45 mensajes (5 del plan + 40 extra)', ia?.currentCount === 12 && ia?.maxValue === 45 && ia?.extra === 40, ia)
     } else {
       console.log('SKIP  (fin de mes: el bono quedó para el mes siguiente)')
     }

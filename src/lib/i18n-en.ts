@@ -58,6 +58,7 @@ export const EN: Record<string, string> = {
   "Conexiones sociales": "Social connections",
   "Conexión bancaria no encontrada": "Bank connection not found",
   "Conexión con tu banco": "Connection to your bank",
+  "Conexión con tu banco (próximamente)": "Connection to your bank (coming soon)",
   "Conexión eliminada": "Connection deleted",
   "Conexión no encontrada": "Connection not found",
   "Contraseña actualizada exitosamente.": "Password updated successfully.",
