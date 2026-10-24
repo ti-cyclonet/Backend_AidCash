@@ -12,7 +12,7 @@
  *    cosechan se caen a medianoche.
  *  - Sacudida: una vez al día, sacudir el árbol suelta un premio sorpresa.
  *  - Riego: una vez al día, regar el árbol da +5 XP.
- *  - 50 toques: una vez al día, tocar el árbol 50 veces (no hace falta seguidas)
+ *  - 50 toques: una vez al día, tocar el árbol 50 veces seguidas (el cliente reinicia la cuenta si se para)
  *    suelta un premio mayor que la sacudida.
  *
  * Con el boost de XP x2 activo (cofres de misiones o la sacudida) todo vale doble.
@@ -51,7 +51,7 @@ const PREMIOS_SACUDIDA: PremioSacudida[] = [
   { tipo: 'xp', valor: 50, peso: 2, etiqueta: '¡Premio mayor! +50 XP', icono: '💎' },
 ]
 
-/** Premio por tocar el árbol 50 veces en el día: siempre mejor que la sacudida. */
+/** Premio por tocar el árbol 50 veces seguidas: siempre mejor que la sacudida. */
 export const TOQUES_PREMIO = 50
 const PREMIOS_TOQUES: PremioSacudida[] = [
   { tipo: 'xp', valor: 15, peso: 40, etiqueta: '+15 XP', icono: '🍊' },
