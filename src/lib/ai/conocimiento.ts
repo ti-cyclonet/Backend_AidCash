@@ -29,7 +29,10 @@ con sus días de pago; se cambia en Perfil).
   salen en el "+" de la barra inferior. Dentro del chat también están el micrófono y el escáner.
 
 ## ÁRBOL KIRI (Jardín) — ruta /jardin
-- Es el punto de partida. Muestra el árbol, su nivel y su salud.
+- Es el punto de partida. Muestra el árbol en 3D sobre una isla flotante, su nivel y su salud.
+  Arrastrar a los lados gira la isla; pellizcar (o Ctrl + rueda en PC) acerca, y vuelve sola.
+  El árbol crece de semilla a jardín próspero; en el nivel 6 florece y llegan las mariposas.
+  "Así crece tu jardín" solo muestra los niveles y en cuál vas (no se puede cambiar el árbol desde ahí).
 - XP y niveles: Semilla → … → Jardín próspero. Niveles en 0, 850, 1.850, 4.350, 8.350 y 14.350 XP
   (el 2 pide 850, el 3 mil más, y cada nivel siguiente pide más). XP sale de misiones, rachas (40 XP), insignias (50 XP), que te rieguen
   amigos, de invitar gente y del minijuego del árbol.
@@ -38,23 +41,30 @@ con sus días de pago; se cambia en Perfil).
     y 1 más por cada gasto, ingreso, pago o ahorro registrado HOY (máximo 5 al día). Tocar un fruto
     lo cosecha: +3 XP; ~1 de cada 5 sale dorado: +10 XP. Los que no se recogen se pierden a
     medianoche. Consejo: registrar los movimientos del día da más frutos.
-  · Sacudida: tocar el árbol 5 veces seguidas lo sacude; una vez al día suelta un premio sorpresa
-    (+2 a +20 XP, XP x2 por 2 horas o, raro, el premio mayor de +50 XP).
-  · Riego: mantener presionado "Regar" (1 vez al día) da +5 XP. Ya regado, el botón dice "Abonar:
-    ahorrar" y lleva a Ahorro.
+  · Sacudida: tocar el árbol 5 veces seguidas lo sacude; una vez al día tumba todas las manzanas y
+    suelta un premio sorpresa (+2 a +20 XP, XP x2 por 2 horas o, raro, el premio mayor de +50 XP).
+    Las manzanas vuelven a salir al día siguiente.
+  · 50 toques: tocar el árbol 50 veces SEGUIDAS, sin parar (si pasa más de un segundo vuelve a 0),
+    suelta el premio grande del día.
+  · Riego: mantener presionado "Regar" (1 vez al día) saca la regadera y da +5 XP. Ya regado, el
+    botón dice "Abonar: ahorrar" y lleva a Ahorro.
   · Con XP x2 activo (cofres o sacudida) todo vale doble. "Hoy en tu jardín" muestra lo pendiente.
 - Al subir de nivel, con rachas de 7, 14, 30… días, al cumplir una meta de ahorro o terminar de
   pagar una deuda, Kiri ofrece compartir el logro (imagen para estados o WhatsApp con el enlace).
-- Salud (0-100%): sube si registras ingresos, ahorras, controlas deudas y estás al día.
-- Clima: ahorrar → llueve; registrar un ingreso → sale el sol y caen monedas; un pago por vencer
-  (7 días) → nubes; pagos vencidos → tormenta con rayos y truenos (se pueden silenciar); un gasto
-  hormiga → cae un rayo. Tocar las nubes muestra qué obligaciones están vencidas y cuáles vencen
-  pronto, con su monto.
+- Salud (0-100%): sube si registras ingresos, ahorras, controlas deudas y estás al día. Con la
+  salud por debajo de 65% las hojas se secan (se ponen cafés y hay menos); vuelven a verdear al mejorar.
+- Clima y reacciones: ahorrar o que un amigo te riegue → sale la regadera y riega el árbol;
+  registrar un ingreso → una luz dorada nutre el árbol; un pago por vencer (7 días) → nubes y
+  lluvia; pagos vencidos → tormenta con nubes alrededor de la isla, rayos y truenos (se pueden
+  silenciar). Tocar las nubes muestra qué obligaciones están vencidas y cuáles vencen pronto, con
+  su monto.
+- Gastos hormiga: cada uno saca una hormiga del hormiguero que sube al tronco y baja cargando lo
+  que compraste (café, comida, transporte…); al entrar muestra el monto y al final cuánto se fue
+  hoy en gastos hormiga. Tocar una hormiga muestra su gasto; tocar el hormiguero saca hormigas a
+  pasear.
 - Botones: "Regar" (a la izquierda, mantener presionado) riega el árbol; "Invitar" (a la derecha)
   abre el enlace de invitación (Amigo, Familia o Pareja) con Copiar, Compartir y Enviar por WhatsApp.
 - Tarjeta "Invita y gana": cuántos amigos usan Kiri y cuánto falta para el siguiente premio.
-- Tarjeta "Progreso general": Disponible frente al ingreso, avance de ahorros, % pagado de deudas y
-  colchón de emergencia (cuántos meses de obligaciones cubren tus ahorros).
 - Consejos contextuales con botón "Otro consejo".
 
 ## MISIONES — ruta /misiones
@@ -180,7 +190,7 @@ con sus días de pago; se cambia en Perfil).
 
 ## AHORRO — ruta /ahorro
 - Bolsillos de ahorro con nombre, color, ícono y meta (libre o con fecha límite). "Depositar"
-  pasa plata del disponible al bolsillo (el árbol llueve); "Retirar" la devuelve.
+  pasa plata del disponible al bolsillo (sale la regadera en el árbol); "Retirar" la devuelve.
 - Simulador de Ahorro (tarjeta verde bajo el total ahorrado), con dos preguntas:
   "¿Cuánto tendré?" (ahorrando X cada quincena o mes durante N meses) y "Quiero comprar algo"
   (precio y fecha → cuánto ahorrar por quincena/mes). Opcional: lo que ya tienes y el rendimiento
