@@ -292,6 +292,7 @@ model DebtCardInstallment {
   fixedExpensePayments FixedExpensePayment[]
   impulseExpenses      ImpulseExpense[]
   allocations          DebtPaymentAllocation[]
+  incomeRecords        IncomeRecord[]
 
   @@index([tarjetaId])
   @@map("debt_card_installments")
@@ -624,9 +625,14 @@ model IncomeRecord {
   id        String   @id @default(uuid())
   userId    String   @map("user_id")
   monto     Decimal  @db.Decimal(12, 2)
-  tipo      String   // salario | extra
+  tipo      String   // salario | extra | avance
   // Qué fue (ej. "Freelance", "Venta del celular") — se muestra en Balance
   descripcion String?
+  // Avance de tarjeta de crédito: el plan de cuotas que quedó en la tarjeta
+  // (monto + comisión). No es un ingreso real: no cuenta en el promedio ni
+  // en "Total ingresos"; eliminarlo revierte también la deuda en la tarjeta.
+  installmentId String? @map("installment_id")
+  installment   DebtCardInstallment? @relation(fields: [installmentId], references: [id], onDelete: SetNull)
   // Distribución aplicada al registrar
   aAhorro         Decimal  @default(0) @map("a_ahorro") @db.Decimal(12, 2)
   aObligaciones   Decimal  @default(0) @map("a_obligaciones") @db.Decimal(12, 2)

@@ -11,6 +11,9 @@ import { planPocketDeduction, planPocketCredit, planDeduccionEnCascada, WALLET_P
 import { AuthorizaRejectedError, setAuthorizaAvatar, setAuthorizaName } from '../lib/authoriza-auth.js'
 import { unirNombre } from '../lib/ingresos.js'
 import { olvidarIdioma } from '../lib/i18n.js'
+import { randomUUID } from 'crypto'
+import { buildInstallmentRevertOps } from '../lib/installments.js'
+import { serializarUnaDeuda, avisoDeCupo } from '../lib/debt-view.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -72,6 +75,15 @@ const balanceSchema = z.object({
 const walletIncomeSchema = z.object({
   monto: z.number().min(0.01),
   tipo: z.enum(['salario', 'extra']),
+  descripcion: z.string().trim().max(120).optional(),
+}).strict()
+
+const walletAvanceSchema = z.object({
+  tarjetaId: z.string().uuid(),
+  monto: z.number().min(0.01),
+  cuotas: z.number().int().min(1).max(48),
+  // Lo que cobró el banco por hacer el avance: va a la deuda, no a la billetera
+  comision: z.number().min(0).default(0),
   descripcion: z.string().trim().max(120).optional(),
 }).strict()
 
@@ -474,6 +486,74 @@ router.post('/wallet/income', walletLimiter, validate(walletIncomeSchema), async
   }
 })
 
+// ─── POST /users/wallet/avance-tarjeta ─────────────────────────────────────────
+// Avance (retiro de efectivo) con una tarjeta de crédito: el monto entra a la
+// billetera (se reparte como cualquier ingreso) y en la tarjeta queda como
+// deuda el monto MÁS la comisión del banco, a las cuotas que el usuario
+// eligió — mismo plan de cuotas que una compra (DebtCardInstallment), así que
+// la cuota de la tarjeta sube (monto + comisión) / cuotas desde el próximo
+// extracto. Queda en el historial como tipo 'avance', que no cuenta como
+// ingreso real (ni en el promedio ni en "Total ingresos").
+
+router.post('/wallet/avance-tarjeta', walletLimiter, validate(walletAvanceSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const { tarjetaId, monto, cuotas, comision, descripcion } = req.body as z.infer<typeof walletAvanceSchema>
+
+    const tarjeta = await prisma.debt.findFirst({ where: { id: tarjetaId, userId, estado: 'activa', tipoDeuda: 'TARJETA_CREDITO' } })
+    if (!tarjeta) { res.status(404).json({ error: 'Tarjeta de crédito no encontrada' }); return }
+
+    const reparto = await repartirEnBilletera(userId, monto)
+    if (!reparto) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+    const { aObligaciones, aAhorro, aLibre, aEndeudamiento } = reparto
+
+    const deuda = Math.round((monto + comision) * 100) / 100
+    const cuotaMensual = Math.round((deuda / cuotas) * 100) / 100
+    const installmentId = randomUUID()
+
+    const [, record, updated] = await prisma.$transaction([
+      prisma.debtCardInstallment.create({
+        data: { id: installmentId, tarjetaId, cuotaMensual, cuotasTotal: cuotas, descripcion: `Avance${descripcion ? ` · ${descripcion}` : ''}` },
+      }),
+      prisma.incomeRecord.create({
+        data: { userId, monto, tipo: 'avance', descripcion: descripcion || `Avance ${tarjeta.nombre}`, installmentId, aAhorro, aObligaciones, aLibre, aEndeudamiento },
+      }),
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          cashBalance: { increment: monto },
+          walletAhorro: { increment: aAhorro },
+          walletObligaciones: { increment: aObligaciones },
+          walletLibre: { increment: aLibre },
+          walletEndeudamiento: { increment: aEndeudamiento },
+        },
+        select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
+      }),
+      prisma.debt.update({
+        where: { id: tarjetaId },
+        data: { saldoRestante: { increment: deuda }, saldoPrincipal: { increment: deuda } },
+      }),
+    ])
+
+    const tarjetaActualizada = await serializarUnaDeuda(tarjetaId)
+    res.status(201).json({
+      record: { ...record, monto: Number(record.monto) },
+      wallet: {
+        cashBalance: Number(updated.cashBalance),
+        ahorro: Number(updated.walletAhorro),
+        obligaciones: Number(updated.walletObligaciones),
+        libre: Number(updated.walletLibre),
+        endeudamiento: Number(updated.walletEndeudamiento),
+      },
+      tarjeta: tarjetaActualizada,
+      avisoCupo: avisoDeCupo(tarjetaActualizada),
+    })
+  } catch (error) {
+    console.error('[WalletAvance]', error)
+    res.status(500).json({ error: 'Error al registrar el avance' })
+  }
+})
+
 // ─── POST /users/wallet/saldo-inicial ─────────────────────────────────────────
 // El test inicial pregunta cuánta plata tiene HOY en total (bancos, Nequi,
 // efectivo, hasta las monedas): es el punto de partida de su Sueldo Real y
@@ -564,6 +644,10 @@ router.delete('/wallet/income/:id', walletLimiter, async (req: Request, res: Res
       if (desglose[p] > 0) data[WALLET_POCKET_FIELD[p]] = { decrement: desglose[p] }
     }
 
+    // Un avance de tarjeta también sale de la tarjeta: lo que falta del plan
+    // (monto + comisión) baja del saldo, como al borrar una compra a cuotas.
+    const revertOps = record.installmentId ? await buildInstallmentRevertOps(userId, [record.installmentId]) : []
+
     const [, updated] = await prisma.$transaction([
       prisma.incomeRecord.delete({ where: { id: record.id } }),
       prisma.user.update({
@@ -571,6 +655,7 @@ router.delete('/wallet/income/:id', walletLimiter, async (req: Request, res: Res
         data,
         select: { cashBalance: true, walletAhorro: true, walletObligaciones: true, walletLibre: true, walletEndeudamiento: true },
       }),
+      ...revertOps,
     ])
 
     res.json({

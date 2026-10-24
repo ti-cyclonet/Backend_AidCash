@@ -94,7 +94,7 @@ export async function construirContexto(userId: string, now: Date = new Date()):
   // Movimientos recientes (para "¿por qué bajó mi saldo?", "explícame este movimiento")
   const movimientos = [
     ...gastos.map(g => ({ fecha: g.createdAt, tipo: g.esHormiga ? 'gasto hormiga' : 'gasto', nombre: g.nombre, monto: -r(g.monto) })),
-    ...ingresos.map(i => ({ fecha: i.createdAt, tipo: i.tipo === 'salario' ? 'ingreso (salario)' : 'ingreso extra', nombre: 'Ingreso', monto: r(i.monto) })),
+    ...ingresos.map(i => ({ fecha: i.createdAt, tipo: i.tipo === 'salario' ? 'ingreso (salario)' : i.tipo === 'avance' ? 'avance de tarjeta de crédito (deuda, no ingreso)' : 'ingreso extra', nombre: 'Ingreso', monto: r(i.monto) })),
     ...pagosDeuda.map(p => ({ fecha: p.createdAt, tipo: 'pago de deuda', nombre: p.debt.nombre, monto: -r(p.montoPagado) })),
     ...pagosFijo.map(p => ({ fecha: p.createdAt, tipo: 'pago de gasto fijo', nombre: p.fixedExpense.nombre, monto: -r(p.montoPagado) })),
     ...ahorros.filter(a => a.createdAt >= hace3).map(a => ({ fecha: a.createdAt, tipo: 'ahorro', nombre: 'Depósito a ahorro', monto: -r(a.monto) })),

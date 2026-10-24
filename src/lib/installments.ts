@@ -24,8 +24,19 @@ export function cuotaEfectivaTarjeta(
   const activos = installments.filter(p =>
     Number(p.montoAbonado) < Number(p.cuotaMensual) * p.cuotasTotal
     && debtPeriodo(cobro.tarjeta, p.createdAt) < cobro.periodo)
-  const sumaActivos = activos.reduce((s, p) => s + Number(p.cuotaMensual), 0)
+  const sumaActivos = activos.reduce((s, p) => s + cuotaDelPlanPorPeriodo(p, cobro.tarjeta), 0)
   return Math.round((cuotaBase + sumaActivos) * 100) / 100
+}
+
+/**
+ * Lo que un plan de cuotas suma a la cuota de la tarjeta en UN periodo de
+ * cobro. `cuotaMensual` es el monto / cuotas (meses); en una tarjeta quincenal
+ * cada quincena cobra la mitad — antes sumaba la cuota mensual entera en cada
+ * quincena y la compra se cobraba al doble de rápido.
+ */
+export function cuotaDelPlanPorPeriodo(plan: { cuotaMensual: Prisma.Decimal | number }, tarjeta: { frecuenciaPago: string }): number {
+  const cuota = Number(plan.cuotaMensual)
+  return Math.round((tarjeta.frecuenciaPago === 'quincenal' ? cuota / 2 : cuota) * 100) / 100
 }
 
 /**
@@ -52,39 +63,73 @@ export function cuotaExigibleLinea(
 
 /**
  * Reparte el abono a capital de un pago sobre la propia tarjeta entre sus
- * planes de cuotas vigentes — el más antiguo primero — hasta agotar el pago o
- * los planes. Cada porción queda registrada en DebtPaymentAllocation para que
- * undo-pay pueda revertirla con precisión más adelante. Lo que sobra después
- * de cubrir todos los planes reduce el saldo "base" de la tarjeta sin más
- * (ya lo hace el UPDATE de saldoRestante de quien llama esta función).
+ * planes de cuotas, respetando las cuotas: primero cubre lo que cada plan
+ * cobra EN ESTE periodo (su cuota, menos lo que otros pagos del mismo periodo
+ * ya le dieron), después el saldo de la tarjeta que no es de ningún plan, y
+ * solo lo que sobre de ahí adelanta planes (el más antiguo primero) — p. ej.
+ * cuando se paga el total de la tarjeta.
  *
- * Debe llamarse ANTES del $transaction que crea el DebtPayment, pasándole el
- * id ya generado (randomUUID) para poder enlazar las asignaciones — mismo
- * patrón que ya usa pay-with-card con el id del installment.
+ * Antes todo el abono iba al plan más antiguo hasta agotarlo: pagar la cuota
+ * del mes de una tarjeta con una compra a 6 cuotas daba la compra por pagada
+ * entera y desde el mes siguiente la cuota "olvidaba" las 5 que faltaban.
+ *
+ * Cada porción queda registrada en DebtPaymentAllocation para que undo-pay
+ * pueda revertirla con precisión más adelante. Debe llamarse ANTES del
+ * $transaction que crea el DebtPayment, pasándole el id ya generado
+ * (randomUUID) para poder enlazar las asignaciones — mismo patrón que ya usa
+ * pay-with-card con el id del installment.
  */
 export async function allocateCardPayment(
-  tarjetaId: string,
+  tarjeta: { id: string; frecuenciaPago: string; diasPago: string },
   debtPaymentId: string,
   abonoCapital: number,
+  periodo: string,
+  saldoAntes: number,
 ): Promise<Prisma.PrismaPromise<unknown>[]> {
   if (abonoCapital <= 0) return []
 
-  const installments = await prisma.debtCardInstallment.findMany({
-    where: { tarjetaId },
+  const r2 = (n: number) => Math.round(n * 100) / 100
+  const planes = (await prisma.debtCardInstallment.findMany({
+    where: { tarjetaId: tarjeta.id },
     orderBy: { createdAt: 'asc' },
-  })
+    include: { allocations: { where: { debtPayment: { periodo } }, select: { monto: true } } },
+  }))
+    .map(inst => ({
+      inst,
+      pendiente: r2(Number(inst.cuotaMensual) * inst.cuotasTotal - Number(inst.montoAbonado)),
+      asignado: 0,
+    }))
+    .filter(p => p.pendiente > 0)
+
+  let capitalLeft = r2(abonoCapital)
+  const asignar = (p: (typeof planes)[number], tope: number) => {
+    const applied = r2(Math.min(tope, p.pendiente - p.asignado, capitalLeft))
+    if (applied <= 0) return
+    p.asignado = r2(p.asignado + applied)
+    capitalLeft = r2(capitalLeft - applied)
+  }
+
+  // 1) La cuota de este periodo de cada plan que ya se está cobrando
+  for (const p of planes) {
+    if (capitalLeft <= 0) break
+    if (debtPeriodo(tarjeta, p.inst.createdAt) >= periodo) continue
+    const yaCubierto = p.inst.allocations.reduce((s, a) => s + Number(a.monto), 0)
+    asignar(p, cuotaDelPlanPorPeriodo(p.inst, tarjeta) - yaCubierto)
+  }
+  // 2) El saldo de la tarjeta que no pertenece a ningún plan
+  const saldoSinPlanes = Math.max(0, r2(saldoAntes - planes.reduce((s, p) => s + p.pendiente, 0)))
+  capitalLeft = r2(capitalLeft - Math.min(capitalLeft, saldoSinPlanes))
+  // 3) Lo que sobre adelanta planes, el más antiguo primero
+  for (const p of planes) {
+    if (capitalLeft <= 0) break
+    asignar(p, Number.MAX_SAFE_INTEGER)
+  }
 
   const ops: Prisma.PrismaPromise<unknown>[] = []
-  let capitalLeft = abonoCapital
-  for (const inst of installments) {
-    if (capitalLeft <= 0) break
-    const total = Number(inst.cuotaMensual) * inst.cuotasTotal
-    const remaining = Math.round((total - Number(inst.montoAbonado)) * 100) / 100
-    if (remaining <= 0) continue
-    const applied = Math.round(Math.min(remaining, capitalLeft) * 100) / 100
-    ops.push(prisma.debtPaymentAllocation.create({ data: { debtPaymentId, installmentId: inst.id, monto: applied } }))
-    ops.push(prisma.debtCardInstallment.update({ where: { id: inst.id }, data: { montoAbonado: { increment: applied } } }))
-    capitalLeft = Math.round((capitalLeft - applied) * 100) / 100
+  for (const p of planes) {
+    if (p.asignado <= 0) continue
+    ops.push(prisma.debtPaymentAllocation.create({ data: { debtPaymentId, installmentId: p.inst.id, monto: p.asignado } }))
+    ops.push(prisma.debtCardInstallment.update({ where: { id: p.inst.id }, data: { montoAbonado: { increment: p.asignado } } }))
   }
   return ops
 }
