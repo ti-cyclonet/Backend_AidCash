@@ -183,7 +183,7 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
 
   const paymentId = randomUUID()
   const allocationOps = esLinea
-    ? await allocateCardPayment(debtId, paymentId, Math.max(0, abonoCapital))
+    ? await allocateCardPayment(existing, paymentId, Math.max(0, abonoCapital), periodo, currentSaldo)
     : []
 
   // "Quedó pagada la cuota" con otro valor: en un préstamo, la cuota de ESTE

@@ -37,7 +37,8 @@ export async function ingresoPromedioMensual(userId: string, now: Date = new Dat
   const inicioMes = new Date(now.getFullYear(), now.getMonth(), 1)
   const hace3 = new Date(now.getFullYear(), now.getMonth() - 3, 1)
   const registros = await prisma.incomeRecord.findMany({
-    where: { userId, createdAt: { gte: hace3 } },
+    // Un avance de tarjeta no es ingreso: es plata prestada
+    where: { userId, tipo: { not: 'avance' }, createdAt: { gte: hace3 } },
     select: { monto: true, createdAt: true },
     orderBy: { createdAt: 'asc' },
   })

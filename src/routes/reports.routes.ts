@@ -144,9 +144,10 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         select: { ingresoBase: true, frecuenciaIngreso: true, cashBalance: true },
       }),
 
-      // Total de ingresos reales registrados (toda la vida)
+      // Total de ingresos reales registrados (toda la vida) — un avance de
+      // tarjeta no es ingreso: es plata prestada que ya está en la deuda
       prisma.incomeRecord.aggregate({
-        where: { userId },
+        where: { userId, tipo: { not: 'avance' } },
         _sum: { monto: true },
       }),
 
@@ -237,7 +238,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
         select: { debtId: true, saldoAnterior: true },
       }),
       prisma.incomeRecord.aggregate({
-        where: { userId, createdAt: { gte: from, lte: to } },
+        where: { userId, tipo: { not: 'avance' }, createdAt: { gte: from, lte: to } },
         _sum: { monto: true },
       }),
       prisma.impulseExpense.aggregate({ where: { userId }, _sum: { monto: true } }),
@@ -425,7 +426,7 @@ router.get('/balance', async (req: Request, res: Response): Promise<void> => {
     fixedPaymentsForSpending.forEach(p => addToMonth(new Date(p.createdAt), 'egresos', Number(p.montoPagado)))
 
     // Ingresos reales registrados
-    incomeRecordsPeriodList.forEach(r => addToMonth(new Date(r.createdAt), 'ingresos', Number(r.monto)))
+    incomeRecordsPeriodList.filter(r => r.tipo !== 'avance').forEach(r => addToMonth(new Date(r.createdAt), 'ingresos', Number(r.monto)))
     extraIncomes.forEach(e => addToMonth(new Date(e.createdAt), 'ingresos', Number(e.monto)))
 
     const monthlySeries = Object.entries(timeMap)
@@ -597,6 +598,8 @@ router.delete('/income-records/:id', async (req: Request, res: Response): Promis
     const id = req.params.id as string
     const existing = await prisma.incomeRecord.findFirst({ where: { id, userId } })
     if (!existing) { res.status(404).json({ error: 'Registro no encontrado' }); return }
+    // Un avance también dejó deuda en la tarjeta: se borra con DELETE /users/wallet/income/:id, que la revierte
+    if (existing.installmentId) { res.status(409).json({ error: 'Elimina este avance desde el historial de Balance' }); return }
     await prisma.incomeRecord.delete({ where: { id } })
     res.json({ message: 'Registro eliminado' })
   } catch (error) {
