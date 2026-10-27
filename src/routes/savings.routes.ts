@@ -4,6 +4,7 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { recordOnboardingAction } from '../lib/missions.js'
+import { abonarAhorro, revertirAbono, sinFallar } from '../lib/economia.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -67,6 +68,7 @@ router.post('/', validate(createSchema), async (req: Request, res: Response): Pr
         },
       })
       await recordOnboardingAction(userId, 'registrar_ahorro')
+      await sinFallar('ahorro libre', () => abonarAhorro(userId, entry.id))
     }
 
     res.status(201).json({ entry })
@@ -85,6 +87,8 @@ router.delete('/:id', async (req: Request, res: Response): Promise<void> => {
     const existing = await prisma.savingsHistory.findFirst({ where: { id, userId } })
     if (!existing) { res.status(404).json({ error: 'Registro no encontrado' }); return }
     await prisma.savingsHistory.delete({ where: { id } })
+    // Si ese ahorro dio monedas hoy, se devuelven
+    if (existing.tipo === 'ahorro') await sinFallar('reverso de ahorro', () => revertirAbono(userId, 'ahorro', id))
     res.json({ message: 'Registro eliminado' })
   } catch (error) {
     console.error('[DeleteSaving]', error)

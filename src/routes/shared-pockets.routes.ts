@@ -9,6 +9,7 @@ import { requireConnection } from '../lib/connections.js'
 import { planPocketDeduction } from '../lib/wallet.js'
 import { ingresoPromedioMensual, ingresoReferenciaMensual } from '../lib/ingresos.js'
 import { avisar } from '../lib/push.js'
+import { abonarAhorro, sinFallar } from '../lib/economia.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -34,10 +35,6 @@ const depositSchema = z.object({
 
 // Marca en la nota de un aporte de plata que ya estaba ahorrada (no salió de la billetera)
 const TAG_PREVIO = '[APORTE_PREVIO]'
-
-const respondSchema = z.object({
-  depositId: z.string().min(1),
-})
 
 export function calculateProportionalSplit(
   gastoTotal: number, ingresoA: number, ingresoB: number
@@ -248,6 +245,9 @@ router.post('/:id/deposit', validate(depositSchema), async (req: Request, res: R
     for (const m of allMembers) {
       await pushSavingsDeposit(m.user.id, pocketInfo?.nombre ?? 'ahorro', depositor?.nombre ?? 'Alguien')
     }
+
+    // Monedas del árbol por ahorrar (+15, tope diario); "ya lo tenía ahorrado" no cuenta como ahorro nuevo
+    if (tipo === 'aporte' && !previo) await sinFallar('aporte compartido', () => abonarAhorro(userId, `sd:${deposit.id}`))
 
     res.status(201).json({
       deposit: { ...deposit, monto: Number(deposit.monto) },

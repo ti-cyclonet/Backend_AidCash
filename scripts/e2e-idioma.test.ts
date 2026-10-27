@@ -86,7 +86,7 @@ async function main() {
     // Mensajes con valores (límite del plan)
     let ultima: Record<string, any> = {}
     for (let i = 1; i <= 6; i++) ultima = await call(A, 'POST', '/budget-categories', { nombre: `Cat ${i}` }, 'en')
-    check('Límite del plan en inglés, con sus valores', ultima.status === 403 && ultima.message === 'You reached your 5 budget categories on KIRI FREE. With KIRI PLUS you have 20.', ultima.message)
+    check('Límite del plan en inglés, con sus valores', ultima.status === 403 && ultima.message === 'You reached your 3 budget categories on KIRI FREE. With KIRI PLUS you have 20.', ultima.message)
     check('…el código del error no se traduce', ultima.error === 'LIMIT_REACHED' && ultima.codigo === 'LIMITE')
 
     // Avisos y campana en el idioma de la cuenta

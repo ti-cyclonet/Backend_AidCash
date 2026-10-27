@@ -6,7 +6,6 @@ import { requireInternalKey } from '../middleware/internal-key.js'
 import { verifyCredentials } from '../lib/authoriza-auth.js'
 import { env } from '../config/env.js'
 import { prisma } from '../config/database.js'
-import { tieneAccesoCompleto } from '../lib/acceso-completo.js'
 import { acreditarReferido, premiarReferidoPorPago } from '../lib/invitaciones.js'
 import { resolverPlan, invalidarPlan, otorgarInsigniaPro, descuentoInvitadoDisponible, tierDeNombre, DESCUENTO_INVITADO } from '../lib/planes.js'
 import { resumenReferidos } from '../lib/referidos.js'
@@ -15,23 +14,6 @@ import { z } from 'zod'
 import { Prisma } from '@prisma/client'
 
 const router = Router()
-
-interface PlanLimit {
-  variableName: string
-  displayName: string
-  maxValue: number
-  targetApplication: string
-  limitType: string
-}
-
-interface TenantLimitsResponse {
-  contractId: string
-  packageName: string
-  isBillable: boolean
-  startDate: string | null
-  endDate: string | null
-  limits: PlanLimit[]
-}
 
 /**
  * GET /api/plan — el plan EFECTIVO del usuario (lib/planes.ts):

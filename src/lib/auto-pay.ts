@@ -32,7 +32,7 @@ import { cuotaBaseDelPeriodo, debtPeriodo, esLineaCredito } from './debt-calc.js
 import { serializarUnaDeuda } from './debt-view.js'
 import { payDebtServer } from './debt-payments.js'
 import { payFixedExpenseServer } from './fixed-expense-payments.js'
-import { sendPushToUser, avisar } from './push.js'
+import { avisar } from './push.js'
 import type { Debt, FixedExpense } from '@prisma/client'
 
 export interface AutoPayRunSummary {

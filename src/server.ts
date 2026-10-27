@@ -4,6 +4,7 @@ import cors from 'cors'
 import helmet from 'helmet'
 import cookieParser from 'cookie-parser'
 import rateLimit from 'express-rate-limit'
+import { antiDoble } from './middleware/anti-doble.js'
 import { env } from './config/env.js'
 import { connectDatabase } from './config/database.js'
 import { errorHandler } from './middleware/error-handler.js'
@@ -33,9 +34,9 @@ import loansRoutes from './routes/loans.routes.js'
 import externalLoansRoutes from './routes/external-loans.routes.js'
 import inviteLinksRoutes from './routes/invite-links.routes.js'
 import hogarRoutes from './routes/hogar.routes.js'
+import pagosRoutes from './routes/pagos.routes.js'
 import aiRoutes from './routes/ai.routes.js'
 import { initMissionRemindersCron } from './cron/mission-reminders.js'
-import homeBudgetRoutes from './routes/home-budget.routes.js'
 import expenseSplitRoutes from './routes/expense-split.routes.js'
 import banksRoutes from './routes/banks.routes.js'
 import usageStatusRoutes from './routes/usage-status.routes.js'
@@ -90,15 +91,38 @@ const limiter = rateLimit({
 })
 app.use(limiter)
 
-const authLimiter = rateLimit({
+// Doble toque en el celular → un solo gasto, pago o ahorro (middleware/anti-doble.ts).
+// Fuera: login (tiene sus propias reglas) y el webhook de la tienda (ya es idempotente).
+app.use((req, res, next) => (req.path.startsWith('/api/auth/') || req.path.startsWith('/api/pagos/') ? next() : antiDoble(req, res, next)))
+
+/*
+ * Límite estricto SOLO para lo que prueba credenciales (login, registro, olvidé la
+ * contraseña…). Antes cubría todo /api/auth, incluido /auth/me y /auth/refresh, que
+ * la app llama en cada carga: con muchos usuarios detrás de la misma IP del operador
+ * (CGNAT) se llenaba el cupo y la app los sacaba a todos de la sesión.
+ * Se cuenta por IP + correo (frena la fuerza bruta contra una cuenta sin bloquear a
+ * los demás de esa red) y, de respaldo, por IP con un tope más alto.
+ * Siempre con la IP real (req.ip, con `trust proxy` = el salto de Nginx): antes se
+ * usaba x-forwarded-for tal cual y quien la cambiara tenía intentos ilimitados.
+ */
+const RUTAS_CREDENCIALES = /^\/(login|register|forgot-password|reset-password|check-email|change-password)\/?$/
+const correoDe = (req: express.Request) => String(req.body?.correo ?? req.body?.email ?? '').trim().toLowerCase().slice(0, 120)
+const authLimiterCuenta = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 50,
-  // Por IP real (req.ip, con `trust proxy` = el salto de Nginx). Antes se usaba
-  // la cabecera x-forwarded-for tal cual: quien la cambiara en cada intento
-  // tenía intentos de login ilimitados.
+  max: 20,
+  keyGenerator: (req) => `${req.ip || 'unknown'}|${correoDe(req as express.Request)}`,
+  message: { error: 'Demasiados intentos, espera 15 minutos.' },
+})
+const authLimiterIp = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
   keyGenerator: (req) => req.ip || 'unknown',
   message: { error: 'Demasiados intentos, espera 15 minutos.' },
 })
+const authLimiter: express.RequestHandler = (req, res, next) => {
+  if (!RUTAS_CREDENCIALES.test(req.path)) return next()
+  authLimiterIp(req, res, (err?: unknown) => (err ? next(err) : authLimiterCuenta(req, res, next)))
+}
 
 // ─── Rutas ────────────────────────────────────────────────────────────────────
 
@@ -119,9 +143,10 @@ app.use('/api/loans', loansRoutes)
 app.use('/api/external-loans', externalLoansRoutes)
 app.use('/api/invite-links', inviteLinksRoutes)
 app.use('/api/hogar', hogarRoutes)
+// Webhook de compras en la app (RevenueCat): se autentica con su propia clave, no con el login
+app.use('/api/pagos', pagosRoutes)
 app.use('/api/ai', aiRoutes)
 app.use('/api/notifications', notificationsRoutes)
-app.use('/api/home-budget', homeBudgetRoutes)
 app.use('/api/expenses/split', expenseSplitRoutes)
 app.use('/api/banks', banksRoutes)
 app.use('/api/usage-status', usageStatusRoutes)

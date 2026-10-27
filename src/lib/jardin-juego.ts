@@ -32,7 +32,7 @@ export const NIVEL_FRUTOS = { nivel: 4, xp: 4350 }
  * (40 acumulados por cada día de racha, 50 por insignia, más misiones, riegos de
  * amigos y minijuego). Solo sube: perder la racha no baja de nivel.
  */
-async function xpDelArbol(userId: string): Promise<number> {
+export async function xpDelArbol(userId: string): Promise<number> {
   const [u, insignias] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId }, select: { xpFromRacha: true, xpFromMissions: true, xpFromWatering: true, xpFromJardin: true } }),
     prisma.userBadge.count({ where: { userId } }),

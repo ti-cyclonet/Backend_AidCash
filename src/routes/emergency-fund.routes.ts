@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
 import type { Prisma } from '@prisma/client'
 import { recordOnboardingAction } from '../lib/missions.js'
+import { abonarAhorro, sinFallar } from '../lib/economia.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -63,6 +64,7 @@ router.post('/transaction', validate(transactionSchema), async (req: Request, re
     // increment/decrement: antes se guardaba un valor calculado con una lectura
     // previa, y dos aportes seguidos cobraban dos veces pero sumaban uno.
     const aporte = tipo === 'aporte'
+    let ahorroId: string | null = null
     const nuevoFondo = await prisma.$transaction(async tx => {
       const r = await tx.user.updateMany({
         where: aporte ? { id: userId, cashBalance: { gte: monto } } : { id: userId, fondoEmergenciaActual: { gte: monto } },
@@ -73,7 +75,8 @@ router.post('/transaction', validate(transactionSchema), async (req: Request, re
       })
       if (r.count === 0) return null
       await tx.emergencyFundHistory.create({ data: { userId, periodo, monto, tipo, nota } })
-      await tx.savingsHistory.create({ data: { userId, periodo, monto, tipo: aporte ? 'ahorro' : 'retiro' } })
+      const fila = await tx.savingsHistory.create({ data: { userId, periodo, monto, tipo: aporte ? 'ahorro' : 'retiro' } })
+      if (aporte) ahorroId = fila.id
       const u = await tx.user.findUniqueOrThrow({ where: { id: userId }, select: { fondoEmergenciaActual: true } })
       return Number(u.fondoEmergenciaActual)
     })
@@ -87,6 +90,8 @@ router.post('/transaction', validate(transactionSchema), async (req: Request, re
     }
 
     if (aporte) await recordOnboardingAction(userId, 'registrar_ahorro')
+    // Monedas del árbol por ahorrar (+15, tope diario)
+    if (ahorroId) { const ref = ahorroId; await sinFallar('aporte al fondo', () => abonarAhorro(userId, ref)) }
 
     res.status(201).json({
       fondoActual: nuevoFondo,

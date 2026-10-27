@@ -68,7 +68,7 @@ export const NOMBRE_PLAN: Record<Tier, string> = { FREE: 'KIRI FREE', PLUS: 'KIR
 const ORDEN: Tier[] = ['FREE', 'PLUS', 'PRO']
 
 /** 'prueba' = plan prestado por el programa de invitados (prueba del invitado o meses ganados; no hay prueba al registrarse solo ni PLUS por la pareja) */
-export type FuentePlan = 'contrato' | 'gratis' | 'prueba' | 'acceso' | 'sin_conexion'
+export type FuentePlan = 'contrato' | 'gratis' | 'prueba' | 'acceso' | 'sin_conexion' | 'tienda'
 
 export interface PlanResuelto {
   tier: Tier
@@ -130,13 +130,13 @@ async function contratoKiri(correo: string): Promise<{ data: InfoContrato | null
   try {
     const check = await fetch(`${env.AUTHORIZA_API_URL}/api/auth/check-email`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: correo }),
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(3500),
     })
     if (!check.ok) throw new Error(`check-email ${check.status}`)
     const cd = await check.json() as { exists?: boolean; userId?: string }
     let data: InfoContrato | null = null
     if (cd.exists && cd.userId) {
-      const r = await fetch(`${env.AUTHORIZA_API_URL}/api/contracts/tenant/${cd.userId}/limits?application=Kiri`, { signal: AbortSignal.timeout(6000) })
+      const r = await fetch(`${env.AUTHORIZA_API_URL}/api/contracts/tenant/${cd.userId}/limits?application=Kiri`, { signal: AbortSignal.timeout(3500) })
       if (r.ok) {
         const d = await r.json() as { packageName: string; contractId?: string; isBillable?: boolean; limits: { variableName: string; maxValue: number; limitType?: string; displayName: string; targetApplication: string }[] }
         data = { packageName: d.packageName, contractId: d.contractId, isBillable: d.isBillable, variables: (d.limits ?? []).filter(l => l.targetApplication?.toLowerCase() === 'kiri') }
@@ -197,7 +197,7 @@ export async function resolverPlan(userId: string): Promise<PlanResuelto> {
   const c = cachePlan.get(userId)
   if (c && c.expira > Date.now()) return c.plan
 
-  const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, correo: true, pruebaPlusHasta: true, pruebaProHasta: true } })
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, correo: true, pruebaPlusHasta: true, pruebaProHasta: true, planTienda: true, planTiendaHasta: true } })
   if (!user) return { tier: 'FREE', planName: NOMBRE_PLAN.FREE, fuente: 'gratis', ...planDeMatriz('FREE') }
 
   let plan = await planPropio(user)
@@ -224,9 +224,18 @@ export async function resolverPlan(userId: string): Promise<PlanResuelto> {
     }
   }
 
+  // Suscripción comprada en la app (App Store / Google Play): vale mientras esté vigente y solo sube el plan
+  const tierTienda = user.planTienda === 'PRO' || user.planTienda === 'PLUS' ? user.planTienda as Tier : null
+  if (tierTienda && user.planTiendaHasta && user.planTiendaHasta > ahora && ORDEN.indexOf(tierTienda) > ORDEN.indexOf(plan.tier)) {
+    plan = { ...plan, tier: tierTienda, ...planDeMatriz(tierTienda), planName: NOMBRE_PLAN[tierTienda], fuente: 'tienda', pruebaHasta: user.planTiendaHasta.toISOString() }
+  }
+
   cachePlan.set(userId, { plan, expira: Date.now() + 60 * 1000 })
   return plan
 }
+
+/** Olvida el plan guardado en memoria (después de una compra en la tienda). */
+export const olvidarPlan = (userId: string) => { cachePlan.delete(userId) }
 
 /**
  * El presupuesto del hogar es de PRO, pero lo usan los dos de la pareja:

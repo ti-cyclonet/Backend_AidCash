@@ -62,6 +62,24 @@ con sus días de pago; se cambia en Perfil).
   que compraste (café, comida, transporte…); al entrar muestra el monto y al final cuánto se fue
   hoy en gastos hormiga. Tocar una hormiga muestra su gasto; tocar el hormiguero saca hormigas a
   pasear.
+- Cerca del fondo de emergencia: rodea el árbol y se arma con el % del fondo frente a la meta de 3
+  meses de gastos fijos. Completa, las hormigas ya no llegan al árbol ("tu fondo frenó el gasto").
+- Monedas (saldo arriba a la izquierda del jardín, toca para abrir la tienda). Se ganan SOLO con
+  plata real: ahorrar +15 (máx. 3 al día), pagar una obligación +10 (máx. 5 al día), saldar una deuda
+  +30 y un cofre común; si borras ese ahorro o pago el mismo día, se devuelven. Regar, sacudir y
+  cosechar dan XP, nunca monedas. KIRI PLUS regala 150 monedas cada mes y KIRI PRO 400.
+- Tienda: Habitantes, Árboles (Kiri, Pino, Bonsái, Palmera, Cerezo), Colores de hojas, Accesorios
+  (hormiguero, cerca, regadera, frutos), Cofres y Monedas. Cada día hay una "Oferta del día" con
+  30 % de descuento que cambia a medianoche. Los paquetes de monedas dicen "Próximamente".
+- Habitantes (viven en la isla y reaccionan a tus finanzas reales; se pueden tener varios): Chanchito
+  (incluido; engorda con el ahorro del mes y le cae una moneda al ahorrar), Don Gnomo (vive atrás de la
+  isla y carga la racha en un cartel; con racha en cero se duerme) y la Casita de pájaros (cantan
+  alrededor del árbol al registrar un ingreso). Tocar un habitante dice lo que muestra.
+- Cofres: común (al saldar una deuda; 10-40 monedas y 20 % de un color), raro (al subir de nivel;
+  40-100 monedas, 25 % de un aspecto o habitante, si no 30 % de un color) y legendario (solo se compra
+  con 1.500 monedas; aspecto seguro). Aparecen en la isla y se abren tocándolos; el premio lo sortea
+  el servidor. Ningún cofre se vende por dinero real.
+- Día y noche: la isla sigue la hora del celular (amanecer, atardecer dorado y noche con luna y estrellas).
 - Botones: "Regar" (a la izquierda, mantener presionado) riega el árbol; "Invitar" (a la derecha)
   abre el enlace de invitación (Amigo, Familia o Pareja) con Copiar, Compartir y Enviar por WhatsApp.
 - Tarjeta "Invita y gana": cuántos amigos usan Kiri y cuánto falta para el siguiente premio.

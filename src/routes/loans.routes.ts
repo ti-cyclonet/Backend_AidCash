@@ -675,7 +675,6 @@ router.post('/payment', validate(paymentSchema), async (req: Request, res: Respo
     })
 
     const isPartner = !!partnerConnection
-    const paymentStatus = isPartner ? 'CONFIRMED' : 'PENDING_CONFIRMATION'
 
     const borrower = await prisma.user.findUnique({
       where: { id: borrowerId },
