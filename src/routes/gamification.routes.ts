@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate.js'
 import { resolverPlan } from '../lib/planes.js'
 import { respuestaFuncion } from '../middleware/limit-enforcement.js'
 import { estadoJardin, cosecharFruto, sacudirArbol, regarArbol, premioToques } from '../lib/jardin-juego.js'
+import { estadoTienda, comprar, comprarCofreLegendario, equipar, abrirCofre, EconomiaError, TIPOS } from '../lib/economia.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -213,6 +214,62 @@ router.post('/jardin/toques', async (req: Request, res: Response): Promise<void>
   } catch (error) {
     console.error('[Jardin toques]', error)
     res.status(500).json({ error: 'No se pudo entregar el premio' })
+  }
+})
+
+// ─── Tienda del árbol 3D: monedas, cosméticos y cofres (lib/economia.ts) ──────
+// Los precios, el saldo y el premio de cada cofre los decide el servidor.
+
+function responderEconomia(res: Response, error: unknown, etiqueta: string, mensaje: string) {
+  if (error instanceof EconomiaError) { res.status(error.status).json({ error: error.message }); return }
+  console.error(`[Tienda ${etiqueta}]`, error)
+  res.status(500).json({ error: mensaje })
+}
+
+router.get('/jardin/tienda', async (req: Request, res: Response): Promise<void> => {
+  try {
+    res.json(await estadoTienda(req.user!.userId))
+  } catch (error) {
+    responderEconomia(res, error, 'estado', 'No se pudo cargar la tienda')
+  }
+})
+
+const articuloSchema = z.object({ tipo: z.string().min(1).max(20), clave: z.string().min(1).max(30) })
+
+/** Comprar un cosmético con monedas, o el cofre legendario ({ tipo: "cofre", clave: "legendario" }). */
+router.post('/jardin/tienda/comprar', validate(articuloSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId, { tipo, clave } = req.body as { tipo: string; clave: string }
+    if (tipo === 'cofre') {
+      if (clave !== 'legendario') { res.status(400).json({ error: 'Ese cofre no se vende.' }); return }
+      const cofre = await comprarCofreLegendario(userId)
+      res.json({ cofre, tienda: await estadoTienda(userId) })
+      return
+    }
+    if (!TIPOS.includes(tipo as (typeof TIPOS)[number])) { res.status(400).json({ error: 'Ese artículo no existe.' }); return }
+    await comprar(userId, tipo, clave)
+    res.json({ tienda: await estadoTienda(userId) })
+  } catch (error) {
+    responderEconomia(res, error, 'comprar', 'No se pudo completar la compra')
+  }
+})
+
+router.post('/jardin/tienda/equipar', validate(articuloSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const equipado = await equipar(req.user!.userId, req.body.tipo, req.body.clave)
+    res.json({ equipado })
+  } catch (error) {
+    responderEconomia(res, error, 'equipar', 'No se pudo equipar')
+  }
+})
+
+router.post('/jardin/cofres/:id/abrir', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.userId
+    const premio = await abrirCofre(userId, String(req.params.id))
+    res.json({ premio, tienda: await estadoTienda(userId) })
+  } catch (error) {
+    responderEconomia(res, error, 'cofre', 'No se pudo abrir el cofre')
   }
 })
 

@@ -75,14 +75,12 @@ router.get('/spending', async (req: Request, res: Response): Promise<void> => {
     const monthTotal = Number(spendingMonth._sum.monto ?? 0)
 
     const dailyAvg7d = weekTotal / 7
-    const dailyAvg14d = (weekTotal + lastWeekTotal) / 14
     const dailyAvg30d = monthTotal / 30
 
     const walletLibre = Number(user.walletLibre)
 
     // Días restantes a ritmo actual
     const diasRestantes7d = dailyAvg7d > 0 ? walletLibre / dailyAvg7d : Infinity
-    const diasRestantes30d = dailyAvg30d > 0 ? walletLibre / dailyAvg30d : Infinity
 
     // Días hasta próximo pago
     let diasHastaPago = 30

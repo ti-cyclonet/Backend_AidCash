@@ -179,14 +179,15 @@ async function main() {
       { body: { respuesta: 'Hola desde el respaldo', acciones: [], sugerencias: [] } },
     ]
     const e5 = await ia('POST', '/coach', { mensaje: 'hola' })
-    check('Modelo retirado (404) → reintenta con el primer respaldo (gemini-3.5-flash)', e5.status === 200 && e5.respuesta === 'Hola desde el respaldo' && ultimaUrl.includes('/gemini-3.5-flash:'), ultimaUrl)
+    check('Modelo retirado (404) → reintenta con el primer respaldo (gemini-flash-lite-latest)', e5.status === 200 && e5.respuesta === 'Hola desde el respaldo' && ultimaUrl.includes('/gemini-flash-lite-latest:'), ultimaUrl)
     siguiente = [
       { status: 503, body: { error: { code: 503, status: 'UNAVAILABLE' } } },
       { status: 503, body: { error: { code: 503, status: 'UNAVAILABLE' } } },
       { body: { respuesta: 'Respondió el respaldo', acciones: [], sugerencias: [] } },
     ]
     const e6 = await ia('POST', '/coach', { mensaje: 'hola' })
-    check('Modelo saturado (503 ×2) → sigue la cadena hasta gemini-flash-lite-latest', e6.status === 200 && e6.respuesta === 'Respondió el respaldo' && ultimaUrl.includes('gemini-flash-lite-latest'), ultimaUrl)
+    check('Modelo saturado (503 ×2) → sigue la cadena hasta gemini-3.1-flash-lite', e6.status === 200 && e6.respuesta === 'Respondió el respaldo' && ultimaUrl.includes('gemini-3.1-flash-lite'), ultimaUrl)
+    check('Se pide poco razonamiento (thinkingLevel low) para responder rápido', (ultimo?.generationConfig as { thinkingConfig?: { thinkingLevel?: string } })?.thinkingConfig?.thinkingLevel === 'low')
     siguiente = [
       { status: 429, body: { error: { status: 'RESOURCE_EXHAUSTED' } } },
       { body: { respuesta: 'Cuota de otro modelo', acciones: [], sugerencias: [] } },

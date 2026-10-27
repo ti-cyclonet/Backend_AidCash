@@ -2,7 +2,9 @@ import { prisma } from '../config/database.js'
 import { planPocketDeduction } from './wallet.js'
 import { getPeriodo, getMontoPorPeriodo, parseDiasPago, periodoSiguienteDe, periodosAnteriores } from './period.js'
 import { ATRASOS_MAX_DIAS, type Atraso } from './debt-calc.js'
+import { randomUUID } from 'crypto'
 import { recordMissionAction } from './missions.js'
+import { abonarPago, sinFallar } from './economia.js'
 
 // La frontera Q1/Q2 de un gasto fijo QUINCENAL usa su PROPIA `fechaCorte` (ej.
 // "5,28" — las dos fechas reales de cobro de ESE gasto), no los días de pago
@@ -98,11 +100,13 @@ export async function payFixedExpenseServer(userId: string, id: string, montoInp
     ? [prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: faltaCuota, periodo, esMarcador: true, createdAt: new Date(Date.now() - 1) } })]
     : []
   const isFullyPaid = totalPaid >= montoPorPeriodo || ajusteOps.length > 0
+  /* el id del pago es la referencia de sus monedas (para revertirlas si se deshace) */
+  const paymentId = randomUUID()
 
   if (existing.tarjetaVinculadaId && existing.tarjetaVinculada) {
     await prisma.$transaction([
       ...ajusteOps,
-      prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: montoPago, periodo, tarjetaId: existing.tarjetaVinculadaId } }),
+      prisma.fixedExpensePayment.create({ data: { id: paymentId, fixedExpenseId: id, montoPagado: montoPago, periodo, tarjetaId: existing.tarjetaVinculadaId } }),
       prisma.debt.update({
         where: { id: existing.tarjetaVinculadaId },
         data: { saldoRestante: { increment: montoPago }, saldoPrincipal: { increment: montoPago } },
@@ -110,6 +114,7 @@ export async function payFixedExpenseServer(userId: string, id: string, montoInp
     ])
 
     await recordMissionAction(userId, 'pagar_obligacion')
+    await sinFallar('pago de gasto fijo', () => abonarPago(userId, paymentId))
 
     return {
       fixedExpense: { ...existing, pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid, pagosPeriodo: { cantidad: prevPayments.length + 1, ultimoMonto: montoPago, ultimoEsMarcador: false } },
@@ -122,11 +127,12 @@ export async function payFixedExpenseServer(userId: string, id: string, montoInp
   const walletDeductionData = planPocketDeduction('obligaciones', montoPago)
   await prisma.$transaction([
     ...ajusteOps,
-    prisma.fixedExpensePayment.create({ data: { fixedExpenseId: id, montoPagado: montoPago, periodo } }),
+    prisma.fixedExpensePayment.create({ data: { id: paymentId, fixedExpenseId: id, montoPagado: montoPago, periodo } }),
     prisma.user.update({ where: { id: userId }, data: walletDeductionData }),
   ])
 
   await recordMissionAction(userId, 'pagar_obligacion')
+  await sinFallar('pago de gasto fijo', () => abonarPago(userId, paymentId))
 
   return {
     fixedExpense: { ...existing, pagadoEstePeriodo: isFullyPaid, montoPagadoEstePeriodo: totalPaid, pagosPeriodo: { cantidad: prevPayments.length + 1, ultimoMonto: montoPago, ultimoEsMarcador: false } },

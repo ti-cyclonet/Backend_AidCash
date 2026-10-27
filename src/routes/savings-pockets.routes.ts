@@ -6,6 +6,7 @@ import { validate } from '../middleware/validate.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { planPocketDeduction, planPocketCredit } from '../lib/wallet.js'
 import { recordOnboardingAction } from '../lib/missions.js'
+import { abonarAhorro, sinFallar } from '../lib/economia.js'
 import type { SavingsPocket, Prisma } from '@prisma/client'
 
 const router = Router()
@@ -176,13 +177,14 @@ router.post('/:id/deposit', validate(pocketTxSchema), async (req: Request, res: 
     const walletData = planPocketDeduction('ahorro', monto) as Prisma.UserUpdateManyMutationInput
     const periodo = new Date().toLocaleDateString('es-ES', { month: 'long', year: 'numeric' })
 
+    let ahorroId: string | null = null
     const updatedPocket = await prisma.$transaction(async tx => {
       const cobro = await tx.user.updateMany({ where: { id: userId, cashBalance: { gte: monto } }, data: walletData })
       if (cobro.count === 0) return null
       // Antes este endpoint no dejaba NINGÚN rastro en el historial — el
       // depósito era real (la billetera sí bajaba) pero invisible en
       // Balance/PDF. Mismo modelo que usa el registro de ahorro "libre".
-      await tx.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'ahorro' } })
+      ahorroId = (await tx.savingsHistory.create({ data: { userId, periodo, monto, tipo: 'ahorro' } })).id
       return tx.savingsPocket.update({ where: { id }, data: { montoActual: { increment: monto } } })
     })
     if (!updatedPocket) {
@@ -193,6 +195,8 @@ router.post('/:id/deposit', validate(pocketTxSchema), async (req: Request, res: 
     // La misión dice "Deposita en un bolsillo de ahorro" y antes solo la
     // cumplía la ruta vieja /savings: aportar a un bolsillo no contaba
     await recordOnboardingAction(userId, 'registrar_ahorro')
+    // Monedas del árbol por ahorrar (+15, tope diario); la referencia es la fila del historial
+    if (ahorroId) { const ref = ahorroId; await sinFallar('ahorro en bolsillo', () => abonarAhorro(userId, ref)) }
 
     res.json({ pocket: serializePocket(updatedPocket) })
   } catch (error) {

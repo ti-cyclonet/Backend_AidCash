@@ -44,26 +44,28 @@ async function usoIA(userId: string, tipo: TipoIA, plan?: PlanResuelto) {
   return { usados, limite, extra, ilimitado: limite >= ILIMITADO, restantes: limite >= ILIMITADO ? null : Math.max(0, limite - usados), plan: p }
 }
 
-/** Revisa la cuota; si ya no queda, responde 429 con el mensaje para subir de plan. */
-async function hayCuota(req: Request, res: Response, tipo: TipoIA): Promise<boolean> {
+type UsoIA = Awaited<ReturnType<typeof usoIA>>
+
+/** Revisa la cuota; si ya no queda, responde 429 con el mensaje para subir de plan (y devuelve null). */
+async function hayCuota(req: Request, res: Response, tipo: TipoIA): Promise<UsoIA | null> {
   const u = await usoIA(req.user!.userId, tipo)
-  if (u.plan.fuente === 'sin_conexion' || u.ilimitado || u.usados < u.limite) return true
+  if (u.plan.fuente === 'sin_conexion' || u.ilimitado || u.usados < u.limite) return u
   const mejora = mejoraPara(VARIABLE_IA[tipo], u.plan.tier)
   res.status(429).json({
     error: `Usaste tus ${u.limite} ${NOMBRE_IA[tipo]} de este mes en ${u.plan.planName}.${mejora ? ` Con ${mejora.plan} tienes ${mejora.maxValue} al mes.` : ' Se renuevan el primer día del próximo mes.'}`,
     codigo: 'CUOTA_IA', tipo, usados: u.usados, limite: u.limite, plan: u.plan.planName, mejora,
   })
-  return false
+  return null
 }
 
-async function sumarUso(userId: string, tipo: TipoIA) {
+/** Cuenta un uso que la IA sí respondió. El límite ya se conoce desde hayCuota (no se vuelve a consultar). */
+async function sumarUso(userId: string, tipo: TipoIA, u: UsoIA) {
   const periodo = periodoIA()
   const r = await prisma.aiUso.upsert({
     where: { userId_periodo_tipo: { userId, periodo, tipo } },
     create: { userId, periodo, tipo, cantidad: 1 },
     update: { cantidad: { increment: 1 } },
   })
-  const u = await usoIA(userId, tipo)
   return { usados: r.cantidad, limite: u.limite, restantes: u.ilimitado ? null : Math.max(0, u.limite - r.cantidad) }
 }
 
@@ -153,8 +155,11 @@ const ESQUEMA_COACH = {
 router.post('/coach', limiteIA, validate(coachSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const { mensaje, historial = [], pantalla } = req.body as z.infer<typeof coachSchema>
-    if (!(await hayCuota(req, res, 'coach'))) return
-    const ctx = await construirContexto(req.user!.userId)
+    // La cuota y los datos del usuario se consultan a la vez
+    const [cuota, ctx] = await Promise.all([hayCuota(req, res, 'coach'), construirContexto(req.user!.userId)])
+    if (!cuota) return
+    // Lo fijo va primero y lo del usuario al final: Gemini reutiliza (caché implícita) el
+    // prefijo repetido entre pedidos y responde más rápido
     const sistema = `${PERSONALIDAD}
 
 CÓMO RESPONDER:
@@ -169,7 +174,6 @@ CÓMO RESPONDER:
   Si falta un dato imprescindible (ej. la cuota de una deuda), pregúntalo en la respuesta.
 - "ir": sugiere la pantalla adecuada cuando ayude (ej. al explicar Proyecciones → /gestion?tab=proyecciones).
 - Cierra, cuando tenga sentido, con una pregunta que invite a actuar.
-${pantalla ? `- El usuario está ahora en la pantalla: ${pantalla}` : ''}
 
 ${REGLAS_ACCIONES}
 
@@ -179,16 +183,16 @@ ${REGLAS_SIMULACION}
 ${MANUAL_KIRI}
 
 ═══ DATOS REALES DEL USUARIO ═══
-${contextoComoTexto(ctx)}`
+${contextoComoTexto(ctx)}${pantalla ? `\n\nEl usuario está ahora en la pantalla: ${pantalla}` : ''}`
 
     const turnos: TurnoIA[] = [
       ...historial.slice(-10).map(h => ({ role: (h.rol === 'coach' ? 'model' : 'user') as 'user' | 'model', parts: [{ text: h.texto }] })),
       { role: 'user', parts: [{ text: mensaje }] },
     ]
     const out = await generarJSON<{ respuesta?: string; acciones?: unknown; sugerencias?: unknown; ir?: { ruta?: string; etiqueta?: string } | null; simulacion?: unknown }>({
-      sistema: await enIdioma(req, sistema), turnos, esquema: ESQUEMA_COACH, temperatura: 0.5,
+      sistema: await enIdioma(req, sistema), turnos, esquema: ESQUEMA_COACH, temperatura: 0.5, modo: 'rapido',
     })
-    const uso = await sumarUso(req.user!.userId, 'coach')
+    const uso = await sumarUso(req.user!.userId, 'coach', cuota)
     res.json({
       uso,
       respuesta: String(out.respuesta ?? '').trim() || 'No te entendí bien, ¿me lo cuentas de otra forma?',
@@ -220,8 +224,8 @@ const ESQUEMA_EXTRACCION = {
 router.post('/dictado', limiteIA, validate(dictadoSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const { transcripcion } = req.body as z.infer<typeof dictadoSchema>
-    if (!(await hayCuota(req, res, 'dictado'))) return
-    const ctx = await construirContexto(req.user!.userId)
+    const [cuota, ctx] = await Promise.all([hayCuota(req, res, 'dictado'), construirContexto(req.user!.userId)])
+    if (!cuota) return
     const sistema = `${PERSONALIDAD}
 
 El usuario dictó por voz lo que hizo con su plata. Conviértelo en acciones para registrar en Kiri.
@@ -234,9 +238,9 @@ ${REGLAS_ACCIONES}
 ═══ DATOS REALES DEL USUARIO ═══
 ${contextoComoTexto(ctx)}`
     const out = await generarJSON<{ resumen?: string; acciones?: unknown; confianza?: string }>({
-      sistema: await enIdioma(req, sistema), turnos: [{ role: 'user', parts: [{ text: `Dictado: "${transcripcion}"` }] }], esquema: ESQUEMA_EXTRACCION, temperatura: 0.2,
+      sistema: await enIdioma(req, sistema), turnos: [{ role: 'user', parts: [{ text: `Dictado: "${transcripcion}"` }] }], esquema: ESQUEMA_EXTRACCION, temperatura: 0.2, modo: 'rapido',
     })
-    const uso = await sumarUso(req.user!.userId, 'dictado')
+    const uso = await sumarUso(req.user!.userId, 'dictado', cuota)
     res.json({
       uso,
       resumen: String(out.resumen ?? ''),
@@ -273,8 +277,8 @@ const ESQUEMA_RECIBO = {
 router.post('/recibo', limiteIA, validate(reciboSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const { imageBase64, mimeType } = req.body as z.infer<typeof reciboSchema>
-    if (!(await hayCuota(req, res, 'escaneo'))) return
-    const ctx = await construirContexto(req.user!.userId)
+    const [cuota, ctx] = await Promise.all([hayCuota(req, res, 'escaneo'), construirContexto(req.user!.userId)])
+    if (!cuota) return
     const sistema = `Eres el lector de recibos de Kiri Finance (Colombia, pesos COP).
 Lee la imagen y extrae comercio, fecha, total e ítems. En Colombia el punto separa miles
 ("$12.500" = 12500) y la coma los decimales; el total suele ser el valor más grande al final
@@ -295,7 +299,7 @@ ${contextoComoTexto(ctx)}`
     const out = await generarJSON<{ esRecibo?: boolean; establecimiento?: string; fecha?: string | null; total?: number; items?: { descripcion?: string; monto?: number }[]; nombreClaro?: boolean; confianza?: string; acciones?: unknown }>({
       sistema: await enIdioma(req, sistema),
       turnos: [{ role: 'user', parts: [{ inlineData: { mimeType, data: imageBase64 } }, { text: 'Lee este recibo.' }] }],
-      esquema: ESQUEMA_RECIBO, temperatura: 0.1, timeoutMs: 60000,
+      esquema: ESQUEMA_RECIBO, temperatura: 0.1, timeoutMs: 45000, modo: 'preciso',
     })
     const total = Math.round(Math.abs(Number(out.total) || 0))
     let acciones = normalizarAcciones(out.acciones, ctx)
@@ -303,7 +307,7 @@ ${contextoComoTexto(ctx)}`
     if (out.esRecibo !== false && total > 0 && acciones.length === 0) {
       acciones = normalizarAcciones([{ tipo: 'sin_destino', nombre: out.nombreClaro ? out.establecimiento : '', monto: total }], ctx)
     }
-    const uso = await sumarUso(req.user!.userId, 'escaneo')
+    const uso = await sumarUso(req.user!.userId, 'escaneo', cuota)
     res.json({
       uso,
       esRecibo: out.esRecibo !== false,

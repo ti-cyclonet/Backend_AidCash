@@ -4,6 +4,7 @@ import { planPocketDeduction } from './wallet.js'
 import { debtPeriodo, debtPeriodoSiguiente, computePeriodStatus, calcularPagoDeuda, calcularAtrasos, cuotaBaseDelPeriodo, periodosRevisables, tasaDelPeriodo, esLineaCredito, estadoTrasPago, cupoDisponible } from './debt-calc.js'
 import { cuotaEfectivaTarjeta, cuotaExigibleLinea, allocateCardPayment } from './installments.js'
 import { recordMissionAction } from './missions.js'
+import { abonarPago, premiarDeudaSaldada, sinFallar } from './economia.js'
 import { serializarUnaDeuda } from './debt-view.js'
 import { sendPushToUser } from './push.js'
 
@@ -198,7 +199,7 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
         })]
       : []
 
-  const [debt] = await prisma.$transaction([
+  await prisma.$transaction([
     prisma.debt.update({
       where: { id: debtId },
       data: {
@@ -227,6 +228,9 @@ export async function payDebtServer(userId: string, debtId: string, montoInput?:
   ])
 
   await recordMissionAction(userId, 'pagar_obligacion')
+  // Monedas del árbol: pagar una obligación (+10, tope diario) y, si quedó saldada, +30 y un cofre común
+  await sinFallar('pago de deuda', () => abonarPago(userId, paymentId))
+  if (nuevoEstado === 'saldada') await sinFallar('deuda saldada', () => premiarDeudaSaldada(userId, debtId))
 
   // Misma forma que GET /debts (cupo, disponible, cuota exigible…)
   const vista = await serializarUnaDeuda(debtId)

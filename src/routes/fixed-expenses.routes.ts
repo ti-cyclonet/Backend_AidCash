@@ -6,7 +6,8 @@ import { validate } from '../middleware/validate.js'
 import { nombreRequerido, fechaDeCorte } from '../lib/validacion.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 import { recordMissionAction, recordOnboardingAction } from '../lib/missions.js'
-import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
+import { revertirAbono, sinFallar } from '../lib/economia.js'
+import { getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
 import { buildInstallmentRevertOps } from '../lib/installments.js'
 import { fixedPeriodo, fixedPeriodoSiguiente, payFixedExpenseServer, fixedPeriodosRevisables, calcularAtrasosFijo, PeriodoFijoInvalidoError } from '../lib/fixed-expense-payments.js'
 import { resumenPagosPeriodo } from '../lib/debt-calc.js'
@@ -404,6 +405,8 @@ router.post('/:id/undo-pay', validate(undoPaySchema), async (req: Request, res: 
     ops.push(...(await buildInstallmentRevertOps(userId, installmentIds)))
 
     await prisma.$transaction(ops)
+    // Pagos deshechos el mismo día: se devuelven sus monedas del árbol
+    for (const p of aDeshacer) await sinFallar('reverso de pago', () => revertirAbono(userId, 'pago', p.id))
 
     const user = await prisma.user.findUnique({
       where: { id: userId },

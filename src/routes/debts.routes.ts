@@ -4,10 +4,11 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { nombreRequerido, diasDelMes } from '../lib/validacion.js'
-import { checkLimit, attachUsageWarning, respuestaFuncion } from '../middleware/limit-enforcement.js'
+import { checkLimit, respuestaFuncion } from '../middleware/limit-enforcement.js'
 import { resolverPlan } from '../lib/planes.js'
 import { recordOnboardingAction, recordMissionAction } from '../lib/missions.js'
-import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago, esPendienteProximoPeriodo } from '../lib/period.js'
+import { abonarPago, premiarDeudaSaldada, revertirAbono, sinFallar } from '../lib/economia.js'
+import { getPeriodo, getNextPeriodo, getMontoPorPeriodo, parseDiasPago } from '../lib/period.js'
 import { cuotaEfectivaTarjeta, reverseCardPaymentAllocations, buildInstallmentRevertOps } from '../lib/installments.js'
 import { debtPeriodo, debtPeriodoSiguiente, computePeriodStatus, calcularPagoDeuda, calcularAtrasos, cuotaBaseDelPeriodo, periodosRevisables, tasaDelPeriodo, esLineaCredito, estadoTrasPago } from '../lib/debt-calc.js'
 import { payDebtServer, PeriodoInvalidoError, PagoExcedeSaldoError } from '../lib/debt-payments.js'
@@ -510,6 +511,11 @@ router.post('/:id/undo-pay', validate(undoPaySchema), async (req: Request, res: 
 
     const results = await prisma.$transaction(ops)
     const debt = results[0] as typeof existing
+    // Pagos deshechos el mismo día: se devuelven sus monedas del árbol
+    for (const p of aDeshacer) {
+      await sinFallar('reverso de pago', () => revertirAbono(userId, 'pago', p.id))
+      if (p.installmentId) await sinFallar('reverso de pago con tarjeta', () => revertirAbono(userId, 'pago', p.installmentId!))
+    }
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -835,6 +841,8 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
 
     // Calcular incremento de cuota = monto / cuotas
     const incrementoCuota = Math.round((monto / cuotas) * 100) / 100
+    // Referencia de las monedas del árbol (el plan de cuotas creado) y si la deuda quedó saldada
+    let refPagoTarjeta = '', deudaSaldadaConTarjeta = false
 
     if (sourceType === 'debt') {
       // Verificar que la deuda existe
@@ -869,6 +877,7 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
       // adivinar (antes no había ningún enlace: undo-pay trataba TODO pago
       // como si hubiera salido en efectivo, sin importar cómo se pagó).
       const installmentId = randomUUID()
+      refPagoTarjeta = installmentId; deudaSaldadaConTarjeta = nuevoEstado === 'saldada'
 
       await prisma.$transaction([
         // El plan de cuotas va PRIMERO: el pago lo referencia por FK
@@ -920,6 +929,7 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
         : getPeriodo(gasto.frecuencia)
 
       const installmentId = randomUUID()
+      refPagoTarjeta = installmentId
 
       await prisma.$transaction([
         prisma.debtCardInstallment.create({
@@ -940,6 +950,8 @@ router.post('/pay-with-card', validate(payWithCardSchema), async (req: Request, 
 
     // Pagar con la tarjeta también es pagar la obligación (antes no contaba para la misión)
     await recordMissionAction(userId, 'pagar_obligacion')
+    if (refPagoTarjeta) await sinFallar('pago con tarjeta', () => abonarPago(userId, refPagoTarjeta))
+    if (deudaSaldadaConTarjeta) await sinFallar('deuda saldada', () => premiarDeudaSaldada(userId, sourceId))
 
     // Estado actualizado de la tarjeta (cuota exigible, cupo y disponible)
     const tarjetaActualizada = await serializarUnaDeuda(tarjetaId)

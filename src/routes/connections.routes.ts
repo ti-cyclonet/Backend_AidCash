@@ -447,7 +447,6 @@ router.post('/:id/role-respond', validate(roleRespondSchema), async (req: Reques
 
     const proposedRole = conn.pendingRole
     const requesterId = conn.roleChangeRequestedBy
-    const requesterName = conn.requesterId === requesterId ? conn.requester.nombre : conn.addressee.nombre
     const responderName = conn.requesterId === userId ? conn.requester.nombre : conn.addressee.nombre
 
     if (accept && proposedRole === 'PARTNER') {

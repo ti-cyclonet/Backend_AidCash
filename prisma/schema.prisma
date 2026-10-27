@@ -113,6 +113,17 @@ model User {
   aiBonos               AiBono[]
   premiosReferido       ReferidoPremio[]
   cosechasJardin        GardenCosecha[]
+  // Economía del árbol 3D: monedas (saldo + libro), cosméticos, cofres y lo equipado
+  monedas               Int                @default(0)
+  jardinEquipado        Json?              @map("jardin_equipado")
+  // Último nivel del árbol que ya dio su cofre raro (null = aún no se revisó)
+  jardinNivelPremiado   Int?               @map("jardin_nivel_premiado")
+  // Plan comprado dentro de la app (App Store / Google Play vía RevenueCat): PLUS o PRO hasta esa fecha
+  planTienda            String?            @map("plan_tienda")
+  planTiendaHasta       DateTime?          @map("plan_tienda_hasta")
+  movimientosMonedas    CoinLedger[]
+  cosmeticos            UserCosmetic[]
+  cofres                UserChest[]
   escenariosProyeccion  ProyeccionEscenario[]
   fixedExpenses         FixedExpense[]
   savingsHistory        SavingsHistory[]
@@ -1101,4 +1112,60 @@ model ProyeccionEscenario {
 
   @@index([userId])
   @@map("proyeccion_escenarios")
+}
+
+// ─── Economía del árbol 3D ────────────────────────────────────────────────────
+// Las monedas salen de acciones financieras reales (ahorrar, pagar, saldar una
+// deuda) o de comprarlas; nunca de regar, sacudir ni cosechar. Cada abono queda
+// en el libro con su motivo y la referencia que lo originó: el índice único
+// impide abonar dos veces lo mismo, y el reverso es otra fila con delta negativo.
+
+model CoinLedger {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  delta     Int
+  motivo    String   // ahorro | pago | deuda | cofre | compra | paquete | reverso
+  refId     String   @map("ref_id")
+  fecha     String   // día local "2026-10-26" (para los topes diarios)
+  detalle   String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, motivo, refId])
+  @@index([userId, fecha])
+  @@map("coin_ledger")
+}
+
+/// Inventario: especie, color de hojas o aspecto de un accesorio.
+model UserCosmetic {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  tipo      String   // especie | color | hormiguero | cerca | regadera | frutos
+  clave     String
+  origen    String   // compra | cofre
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tipo, clave])
+  @@map("user_cosmetics")
+}
+
+model UserChest {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  tipo      String    // comun | raro | legendario
+  estado    String    @default("pendiente") // pendiente | abierto
+  origen    String    // deuda | nivel | compra
+  refId     String    @map("ref_id")         // debtId, número de nivel o id de la compra
+  premio    Json?
+  createdAt DateTime  @default(now()) @map("created_at")
+  abiertoAt DateTime? @map("abierto_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, origen, refId])
+  @@index([userId, estado])
+  @@map("user_chests")
 }

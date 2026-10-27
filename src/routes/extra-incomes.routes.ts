@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
-import { nombreRequerido, diasDelMes } from '../lib/validacion.js'
+import { nombreRequerido } from '../lib/validacion.js'
 import { checkLimit } from '../middleware/limit-enforcement.js'
 
 const router = Router()

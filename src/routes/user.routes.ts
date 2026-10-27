@@ -5,7 +5,6 @@ import { prisma } from '../config/database.js'
 import { authMiddleware } from '../middleware/auth.js'
 import { validate } from '../middleware/validate.js'
 import { sendPushToUser, contarDispositivos } from '../lib/push.js'
-import { env } from '../config/env.js'
 import { recordOnboardingAction } from '../lib/missions.js'
 import { planPocketDeduction, planPocketCredit, planDeduccionEnCascada, WALLET_POCKET_FIELD, type WalletPocket } from '../lib/wallet.js'
 import { AuthorizaRejectedError, setAuthorizaAvatar, setAuthorizaName } from '../lib/authoriza-auth.js'
@@ -924,6 +923,29 @@ router.post('/push-subscription', async (req: Request, res: Response): Promise<v
   } catch (error) {
     console.error('[PushSubscription]', error)
     res.status(500).json({ error: 'Error al guardar suscripción' })
+  }
+})
+
+/**
+ * DELETE /api/users/cuenta — el usuario elimina su cuenta de Kiri y TODOS sus datos
+ * (exigido por App Store y Google Play). Todo cuelga del usuario en cascada:
+ * movimientos, obligaciones, ahorros, cosméticos, notificaciones… Lo que comparte
+ * con otras personas (bolsillos compartidos, préstamos entre usuarios) también se
+ * borra. Su usuario de Cyclonet (Authoriza) sigue existiendo para las otras apps:
+ * si vuelve a entrar a Kiri, empieza de cero.
+ */
+const eliminarCuentaSchema = z.object({ confirmacion: z.literal('ELIMINAR') }).strict()
+router.delete('/cuenta', validate(eliminarCuentaSchema), async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user!.userId
+  try {
+    const u = await prisma.user.findUnique({ where: { id: userId }, select: { correo: true } })
+    if (!u) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+    await prisma.user.delete({ where: { id: userId } })
+    console.info(`[Cuenta] eliminada por su dueño: ${userId}`)
+    res.json({ ok: true })
+  } catch (error) {
+    console.error('[Cuenta] eliminar:', error)
+    res.status(500).json({ error: 'No se pudo eliminar la cuenta. Intenta de nuevo o escríbenos a soporte.' })
   }
 })
 
