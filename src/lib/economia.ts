@@ -5,8 +5,10 @@
  *
  * El juego premia lo que el usuario hace con su plata, no tocar la pantalla, y
  * llegar a lo caro cuesta (balance 2026-11):
- *  - Ahorrar: +10 monedas (máx. 2 al día). Pagar una obligación: +5 (máx. 4).
- *    Si ese ahorro o pago se elimina el mismo día, las monedas se revierten.
+ *  - Ahorrar: +10 monedas (máx. 2 al día). Quedar al día con TODAS las
+ *    obligaciones del periodo de cobro: +20, una vez por periodo (pagar una
+ *    cuota suelta ya no da monedas). Si ese ahorro o pago se elimina el mismo
+ *    día, las monedas se revierten.
  *  - Saldar una deuda: +40 y un cofre común, una sola vez por deuda.
  *  - Semana del plan lograda: +5 (lib/plan-semanal.ts).
  *  - Subir de nivel: un cofre raro por nivel (desde el nivel que tenía al
@@ -14,7 +16,8 @@
  *  - Regar, sacudir y cosechar dan solo XP (lib/jardin-juego.ts), nunca monedas.
  *  - Pasarse a un plan PAGO (KIRI PLUS o PRO) da un bono de bienvenida, UNA sola
  *    vez por plan. Las pruebas y los meses ganados con invitados no lo dan.
- *  - Por ahora no se venden monedas (los paquetes quedan listos pero ocultos).
+ *  - Las monedas solo se ganan usando Kiri (los paquetes quedan listos pero ocultos):
+ *    la idea es premiar buenos hábitos, no gastar más.
  *  - Los cofres se compran con monedas y se pueden regalar a un amigo de Social.
  *  - Cada día hay una oferta: un artículo que el usuario no tiene con 30 % de descuento.
  *  - Habitantes: personajes de la isla que reaccionan a sus finanzas (el chanchito
@@ -30,13 +33,15 @@ import { prisma } from '../config/database.js'
 import { todayPeriodo } from './missions.js'
 import { xpDelArbol } from './jardin-juego.js'
 import { resolverPlan } from './planes.js'
+import { getPeriodo } from './period.js'
+import { isDebtPending, isFixedExpensePending } from './obligation-schedule.js'
 
 // ─── Catálogo (los precios viven en el servidor) ─────────────────────────────
 
 /* Lo que tiene que ver con plata (billetes, monedas, mini banco, cartera, reja dorada) es lo más caro */
 export const CATALOGO = {
   especie: { kiri: 0, pino: 1200, bonsai: 1600, palmera: 1800, cerezo: 2200 },
-  color: { auto: 0, esmeralda: 400, menta: 400, bosque: 400, otono: 500, coral: 500, turquesa: 550, sakura: 550, lavanda: 600, morado: 600, noche: 600, carmesi: 700, blanco: 700, atardecer: 850, dorado: 1500 },
+  color: { auto: 0, esmeralda: 400, menta: 400, bosque: 400, otono: 500, coral: 500, turquesa: 550, sakura: 550, lavanda: 600, morado: 600, noche: 600, carmesi: 700, blanco: 700, atardecer: 850, dorado: 1500, aurora: 0, diamante: 0 },
   hormiguero: { arena: 0, arcilla: 300, piedra: 400, musgo: 450, hongo: 1100, banco: 2600 },
   cerca: { blanca: 0, madera: 400, bambu: 550, puas: 650, piedra: 800, seto: 850, reja: 1000, dorada: 2800 },
   regadera: { azul: 0, vaso: 300, balde: 400, pistola: 900, dorada: 1800, cartera: 2800 },
@@ -44,6 +49,17 @@ export const CATALOGO = {
   habitante: { chanchito: 0, gnomo: 700, pajaros: 1100 },
 } as const
 export type TipoCosmetico = keyof typeof CATALOGO
+
+/**
+ * Exclusivos de los planes pagos (2026-11): no se compran con monedas ni salen
+ * en cofres; vienen con el plan mientras se tenga (también en la prueba). Si el
+ * plan termina, la isla vuelve a lo de siempre y el artículo queda bloqueado.
+ */
+export const EXCLUSIVOS: Partial<Record<TipoCosmetico, Record<string, 'PLUS' | 'PRO'>>> = {
+  color: { aurora: 'PLUS', diamante: 'PRO' },
+}
+const exclusivoDe = (tipo: TipoCosmetico, clave: string) => EXCLUSIVOS[tipo]?.[clave] ?? null
+const NIVEL_TIER: Record<string, number> = { FREE: 0, PLUS: 1, PRO: 2 }
 export const TIPOS = Object.keys(CATALOGO) as TipoCosmetico[]
 /** Los "aspectos" que puede soltar un cofre raro o legendario (los colores van aparte). */
 const TIPOS_ASPECTO: TipoCosmetico[] = ['especie', 'hormiguero', 'cerca', 'regadera', 'frutos', 'habitante']
@@ -55,12 +71,13 @@ export type Equipado = Record<Ranura, string> & { habitantes: string[] }
 export const EQUIPADO_INICIAL: Equipado = { especie: 'kiri', color: 'auto', hormiguero: 'arena', cerca: 'blanca', regadera: 'azul', frutos: 'auto', habitantes: ['chanchito'] }
 
 /** Bono de bienvenida al pasarse a un plan pago: una sola vez por plan. */
-export const BONO_PLAN: Record<string, number> = { PLUS: 300, PRO: 700 }
+export const BONO_PLAN: Record<string, number> = { PLUS: 300, PRO: 500 }
 const DESCUENTO_OFERTA = 0.3
 
 export const ABONOS = {
   ahorro: { monedas: 10, maxDia: 2 },
-  pago: { monedas: 5, maxDia: 4 },
+  // Pagar TODAS las obligaciones del periodo de cobro: una vez por periodo (ya no se paga por cada cuota)
+  obligaciones: { monedas: 20 },
   deuda: { monedas: 40 },
   // Plan semanal: semana lograda (lib/plan-semanal.ts)
   semana: { monedas: 5, xp: 20, rachaCofre: 4 },
@@ -110,7 +127,7 @@ async function mover(userId: string, motivo: string, refId: string, delta: numbe
 }
 
 /** Cuántos abonos de ese motivo van hoy, sin contar los revertidos. */
-async function abonosDeHoy(userId: string, motivo: 'ahorro' | 'pago') {
+async function abonosDeHoy(userId: string, motivo: 'ahorro') {
   const fecha = todayPeriodo()
   const [hechos, revertidos] = await Promise.all([
     prisma.coinLedger.count({ where: { userId, motivo, fecha } }),
@@ -119,7 +136,7 @@ async function abonosDeHoy(userId: string, motivo: 'ahorro' | 'pago') {
   return hechos - revertidos
 }
 
-async function abonarConTope(userId: string, motivo: 'ahorro' | 'pago', refId: string) {
+async function abonarConTope(userId: string, motivo: 'ahorro', refId: string) {
   const regla = ABONOS[motivo]
   if (await abonosDeHoy(userId, motivo) >= regla.maxDia) return 0
   return (await mover(userId, motivo, refId, regla.monedas)) ?? 0
@@ -127,11 +144,62 @@ async function abonarConTope(userId: string, motivo: 'ahorro' | 'pago', refId: s
 
 /** Registrar un ahorro (bolsillo, ahorro libre, fondo de emergencia o aporte compartido aprobado). */
 export const abonarAhorro = (userId: string, refId: string) => abonarConTope(userId, 'ahorro', refId)
-/** Pagar una obligación (cuota de deuda o gasto fijo, manual o automático). */
-export const abonarPago = (userId: string, refId: string) => abonarConTope(userId, 'pago', refId)
+/**
+ * Obligaciones del periodo: se revisa después de cada pago (cuota de deuda o
+ * gasto fijo, manual o automático). Cuando ya no queda ninguna pendiente en el
+ * periodo de cobro del usuario, gana +20 monedas, una sola vez por periodo.
+ * Si deshace un pago el mismo día y vuelve a quedar algo pendiente, se le
+ * quitan (y las recupera al volver a ponerse al día).
+ */
+async function obligacionesAlDia(userId: string) {
+  const [debts, fes] = await Promise.all([
+    prisma.debt.findMany({ where: { userId, estado: 'activa' } }),
+    prisma.fixedExpense.findMany({ where: { userId } }),
+  ])
+  if (debts.length + fes.length === 0) return false
+  const desde = new Date(Date.now() - 40 * 86400000)
+  const [dp, fp] = await Promise.all([
+    debts.length ? prisma.debtPayment.findMany({ where: { debtId: { in: debts.map(d => d.id) }, createdAt: { gte: desde } } }) : [],
+    fes.length ? prisma.fixedExpensePayment.findMany({ where: { fixedExpenseId: { in: fes.map(f => f.id) }, createdAt: { gte: desde } } }) : [],
+  ])
+  return !debts.some(d => isDebtPending(d, dp)) && !fes.some(f => isFixedExpensePending(f, fp))
+}
+
+async function periodoDeCobro(userId: string) {
+  const u = await prisma.user.findUnique({ where: { id: userId }, select: { frecuenciaIngreso: true, diasPago: true } })
+  return getPeriodo(u?.frecuenciaIngreso === 'quincenal' ? 'quincenal' : 'mensual', u?.diasPago ?? [])
+}
+
+/** Abono vigente del periodo (el último que no se revirtió) y cuántas veces se revirtió. */
+async function abonoDelPeriodo(userId: string, periodo: string) {
+  const filas = await prisma.coinLedger.findMany({
+    where: { userId, OR: [{ motivo: 'obligaciones', refId: { startsWith: periodo } }, { motivo: 'reverso', refId: { startsWith: `obligaciones:${periodo}` } }] },
+    select: { motivo: true, refId: true, fecha: true },
+  })
+  const revertidos = new Set(filas.filter(f => f.motivo === 'reverso').map(f => f.refId.slice('obligaciones:'.length)))
+  const vigente = filas.find(f => f.motivo === 'obligaciones' && !revertidos.has(f.refId)) ?? null
+  return { vigente, veces: revertidos.size }
+}
+
+export async function abonarPago(userId: string, _refId?: string) {
+  if (!(await obligacionesAlDia(userId))) return 0
+  const periodo = await periodoDeCobro(userId)
+  const { vigente, veces } = await abonoDelPeriodo(userId, periodo)
+  if (vigente) return 0
+  return (await mover(userId, 'obligaciones', veces ? `${periodo}#${veces}` : periodo, ABONOS.obligaciones.monedas, 'Obligaciones del periodo al día')) ?? 0
+}
+
+async function revertirAbonoObligaciones(userId: string) {
+  const periodo = await periodoDeCobro(userId)
+  const { vigente } = await abonoDelPeriodo(userId, periodo)
+  if (!vigente || vigente.fecha !== todayPeriodo()) return 0
+  if (await obligacionesAlDia(userId)) return 0
+  return (await mover(userId, 'reverso', `obligaciones:${vigente.refId}`, -ABONOS.obligaciones.monedas, 'Pago deshecho')) ?? 0
+}
 
 /** Si ese ahorro o pago se eliminó el mismo día que se abonó, se devuelven sus monedas. */
 export async function revertirAbono(userId: string, motivo: 'ahorro' | 'pago', refId: string) {
+  if (motivo === 'pago') return revertirAbonoObligaciones(userId)
   const fila = await prisma.coinLedger.findUnique({ where: { userId_motivo_refId: { userId, motivo, refId } } })
   if (!fila || fila.fecha !== todayPeriodo()) return 0
   return (await mover(userId, 'reverso', `${motivo}:${refId}`, -fila.delta, 'Movimiento eliminado')) ?? 0
@@ -191,10 +259,23 @@ export async function revisarNivel(userId: string) {
 // ─── Inventario, tienda y equipar ────────────────────────────────────────────
 
 async function inventario(userId: string) {
-  const filas = await prisma.userCosmetic.findMany({ where: { userId }, select: { tipo: true, clave: true } })
+  const [filas, plan] = await Promise.all([
+    prisma.userCosmetic.findMany({ where: { userId }, select: { tipo: true, clave: true } }),
+    resolverPlan(userId).catch(() => null),
+  ])
   const tiene = new Set(filas.map(f => `${f.tipo}:${f.clave}`))
-  const posee = (tipo: TipoCosmetico, clave: string) => precio(tipo, clave) === 0 || tiene.has(`${tipo}:${clave}`)
+  const nivel = NIVEL_TIER[plan?.tier ?? 'FREE'] ?? 0
+  const posee = (tipo: TipoCosmetico, clave: string) => {
+    const ex = exclusivoDe(tipo, clave)
+    if (ex) return nivel >= NIVEL_TIER[ex]
+    return precio(tipo, clave) === 0 || tiene.has(`${tipo}:${clave}`)
+  }
   return { posee }
+}
+
+function sinExclusivosPerdidos(e: Equipado, posee: (t: TipoCosmetico, c: string) => boolean): Equipado {
+  for (const t of RANURAS) if (exclusivoDe(t, e[t]) && !posee(t, e[t])) e[t] = EQUIPADO_INICIAL[t]
+  return e
 }
 
 function leerEquipado(json: Prisma.JsonValue | null): Equipado {
@@ -246,21 +327,22 @@ export async function estadoTienda(userId: string) {
   const sinEsperar = { tier: 'FREE', monedas: 0, abonadas: 0 }
   const regalo = abonarBonoPlan(userId).catch(() => sinEsperar)
   const [, regaloPlan] = await Promise.all([revisarNivel(userId), Promise.race([regalo, new Promise<typeof sinEsperar>(r => setTimeout(() => r(sinEsperar), 1500))])])
-  const [u, { posee }, cofres, ahorrosHoy, pagosHoy] = await Promise.all([
+  const [u, { posee }, cofres, ahorrosHoy, obligPeriodo] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId }, select: { monedas: true, jardinEquipado: true } }),
     inventario(userId),
     prisma.userChest.findMany({ where: { userId, estado: 'pendiente' }, orderBy: { createdAt: 'asc' }, select: { id: true, tipo: true, origen: true, regalador: { select: { primerNombre: true, nombre: true } } } }),
     abonosDeHoy(userId, 'ahorro'),
-    abonosDeHoy(userId, 'pago'),
+    periodoDeCobro(userId).then(p => abonoDelPeriodo(userId, p)),
   ])
   if (!u) throw new EconomiaError(404, 'Usuario no encontrado.')
-  const catalogo = Object.fromEntries(TIPOS.map(t => [t, Object.entries(CATALOGO[t]).map(([clave, p]) => ({ clave, precio: p, incluido: p === 0, tiene: posee(t, clave) }))]))
+  const catalogo = Object.fromEntries(TIPOS.map(t => [t, Object.entries(CATALOGO[t]).map(([clave, p]) => ({ clave, precio: p, incluido: p === 0 && !exclusivoDe(t, clave), tiene: posee(t, clave), exclusivo: exclusivoDe(t, clave) }))]))
   return {
     monedas: u.monedas,
     oferta: ofertaDelDia(userId, posee),
     // Bono único al pasarse a un plan pago (bonoPlan = lo que da cada plan)
     plan: { tier: regaloPlan.tier, bono: regaloPlan.monedas, regaloRecibido: regaloPlan.abonadas, bonoPlan: BONO_PLAN },
-    equipado: leerEquipado(u.jardinEquipado),
+    // Un exclusivo de un plan que ya no tiene no se ve: la isla vuelve a lo de siempre
+    equipado: sinExclusivosPerdidos(leerEquipado(u.jardinEquipado), posee),
     catalogo,
     cofres: cofres.map(({ regalador, ...c }) => ({ ...c, de: regalador ? (regalador.primerNombre || regalador.nombre.split(' ')[0]) : null })),
     cofresInfo: Object.entries(COFRES).map(([tipo, c]) => ({
@@ -272,7 +354,7 @@ export async function estadoTienda(userId: string) {
     primeraCompraDoble: !(await yaComproMonedas(userId)),
     abonos: {
       ahorro: { monedas: ABONOS.ahorro.monedas, maxDia: ABONOS.ahorro.maxDia, hoy: ahorrosHoy },
-      pago: { monedas: ABONOS.pago.monedas, maxDia: ABONOS.pago.maxDia, hoy: pagosHoy },
+      obligaciones: { monedas: ABONOS.obligaciones.monedas, ganadasEstePeriodo: !!obligPeriodo.vigente },
       deuda: { monedas: ABONOS.deuda.monedas },
     },
   }
@@ -288,7 +370,10 @@ function validar(tipo: string, clave: string): { tipo: TipoCosmetico; precio: nu
 export async function equipar(userId: string, tipoIn: string, clave: string) {
   const { tipo } = validar(tipoIn, clave)
   const [{ posee }, u] = await Promise.all([inventario(userId), prisma.user.findUnique({ where: { id: userId }, select: { jardinEquipado: true } })])
-  if (!posee(tipo, clave)) throw new EconomiaError(403, 'Aún no tienes ese artículo.')
+  if (!posee(tipo, clave)) {
+    const ex = exclusivoDe(tipo, clave)
+    throw new EconomiaError(403, ex ? `Es exclusivo de KIRI ${ex}: viene con el plan.` : 'Aún no tienes ese artículo.')
+  }
   const equipado = leerEquipado(u?.jardinEquipado ?? null)
   // Un habitante se pone o se quita de la isla; el resto reemplaza lo que había en su espacio
   if (tipo === 'habitante') equipado.habitantes = equipado.habitantes.includes(clave) ? equipado.habitantes.filter(h => h !== clave) : [...equipado.habitantes, clave]
@@ -300,6 +385,7 @@ export async function equipar(userId: string, tipoIn: string, clave: string) {
 /** Compra con monedas: descuenta, desbloquea y lo deja equipado, todo en una transacción. */
 export async function comprar(userId: string, tipoIn: string, clave: string) {
   const { tipo, precio: normal } = validar(tipoIn, clave)
+  // Precio 0 = incluido, o exclusivo de un plan (equipar revisa que lo tenga)
   if (normal === 0) return equipar(userId, tipo, clave)
   const { posee } = await inventario(userId)
   if (posee(tipo, clave)) throw new EconomiaError(409, 'Ya tienes ese artículo.')
@@ -405,11 +491,11 @@ export async function abrirCofre(userId: string, cofreId: string) {
   let articulo: { tipo: TipoCosmetico; clave: string } | null = null
   // Aspecto (especie o accesorio) que no tenga; el común nunca da aspectos
   if (regla.aspecto > 0 && azar() < regla.aspecto) {
-    const pool = TIPOS_ASPECTO.flatMap(t => Object.keys(CATALOGO[t]).filter(k => !posee(t, k)).map(clave => ({ tipo: t, clave })))
+    const pool = TIPOS_ASPECTO.flatMap(t => Object.keys(CATALOGO[t]).filter(k => !posee(t, k) && !exclusivoDe(t, k)).map(clave => ({ tipo: t, clave })))
     if (pool.length) articulo = pool[randomInt(0, pool.length)]
   }
   if (!articulo && regla.color > 0 && azar() < regla.color) {
-    const pool = Object.keys(CATALOGO.color).filter(k => !posee('color', k)).map(clave => ({ tipo: 'color' as const, clave }))
+    const pool = Object.keys(CATALOGO.color).filter(k => !posee('color', k) && !exclusivoDe('color', k)).map(clave => ({ tipo: 'color' as const, clave }))
     if (pool.length) articulo = pool[randomInt(0, pool.length)]
   }
   // Legendario sin nada nuevo que dar (ya lo tiene todo): monedas extra

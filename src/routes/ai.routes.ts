@@ -13,6 +13,7 @@ import { resolverPlan, mejoraPara, ILIMITADO, type PlanResuelto } from '../lib/p
 import { periodoIA } from '../middleware/limit-enforcement.js'
 import { bonosIA } from '../lib/referidos.js'
 import { idiomaDe, normalizarIdioma } from '../lib/i18n.js'
+import { registrarEvento } from '../lib/plan-eventos.js'
 
 /** Instrucción de idioma para la IA (la app en inglés → todo en inglés). */
 async function enIdioma(req: Request, sistema: string): Promise<string> {
@@ -51,6 +52,7 @@ async function hayCuota(req: Request, res: Response, tipo: TipoIA): Promise<UsoI
   const u = await usoIA(req.user!.userId, tipo)
   if (u.plan.fuente === 'sin_conexion' || u.ilimitado || u.usados < u.limite) return u
   const mejora = mejoraPara(VARIABLE_IA[tipo], u.plan.tier)
+  registrarEvento(req.user!.userId, 'limite', `ia:${tipo}`, undefined, u.plan.tier)
   res.status(429).json({
     error: `Usaste tus ${u.limite} ${NOMBRE_IA[tipo]} de este mes en ${u.plan.planName}.${mejora ? ` Con ${mejora.plan} tienes ${mejora.maxValue} al mes.` : ' Se renuevan el primer día del próximo mes.'}`,
     codigo: 'CUOTA_IA', tipo, usados: u.usados, limite: u.limite, plan: u.plan.planName, mejora,

@@ -109,7 +109,7 @@ async function main() {
     const Beto = await crear('Beto', { invitedById: Ana.id, isActive: true })
     await acreditarReferido(Beto.id)
     const dB = await dias(Beto.id)
-    check('Beto llega con el enlace de Ana → 14 días de KIRI PLUS', dB > 13.9 && dB <= 14.01, dB.toFixed(2))
+    check('Beto llega con el enlace de Ana → 30 días de KIRI PLUS', dB > 29.9 && dB <= 30.01, dB.toFixed(2))
     check('Ana todavía no gana nada (Beto aún no usa Kiri)', (await dias(Ana.id)) === 0 && Object.keys(await bonos(Ana.id)).length === 0)
 
     // ── Momento 2: Beto empieza a usar Kiri ──
@@ -156,7 +156,7 @@ async function main() {
       && planAna.referidos?.niveles?.find((n: any) => n.amigos === 3)?.logrado === true,
       { activos: planAna.referidos?.activos, siguiente: planAna.referidos?.siguiente })
     check('…y muestra los premios ganados (bono por Beto, nivel 1 y nivel 3)', (planAna.referidos?.premios ?? []).length >= 3, planAna.referidos?.premios?.map((p: any) => p.premio))
-    check('Ana ve la oferta para sus amigos: 14 días de prueba', planAna.referidos?.reglas?.pruebaAmigoDias === 14)
+    check('Ana ve la oferta para sus amigos: 30 días de prueba', planAna.referidos?.reglas?.pruebaAmigoDias === 30)
 
     // ── 10 amigos activos pero ninguno paga → todavía no hay PRO ──
     const extra: { id: string; correo: string }[] = []

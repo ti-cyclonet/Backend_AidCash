@@ -175,7 +175,7 @@ async function main() {
     const ia = uso.variables?.find((v: any) => v.variableName === 'iaMensajesMes')
     check('Tu uso este mes: 3/3 categorías y 5/5 mensajes', cats?.currentCount === 3 && cats?.maxValue === 3 && cats?.usagePercentage === 100 && ia?.currentCount === 5, { cats, ia })
 
-    // ── Invitar amigos: el amigo tiene 14 días de PLUS y descuento; quien invita gana 1 mes cuando el amigo paga ──
+    // ── Invitar amigos: el amigo tiene 30 días de PLUS y descuento; quien invita gana 1 mes cuando el amigo paga ──
     // (el detalle del programa — activación, bono de IA, niveles, meses en factura — está en e2e-referidos.test.ts)
     const diasDe = async (u: { id: string }) => { const x = await prisma.user.findUnique({ where: { id: u.id }, select: { pruebaPlusHasta: true } }); return x?.pruebaPlusHasta ? (x.pruebaPlusHasta.getTime() - Date.now()) / 86400000 : 0 }
     const pagada = (u: { correo: string }, codigo: string) => fetch(`http://127.0.0.1:${APP_PORT}/api/plan/factura-evento`, {
@@ -189,7 +189,7 @@ async function main() {
     await acreditarReferido(N.id)
     check('Registrarse con el enlace no le da días a quien invita (gana cuando el amigo usa Kiri o paga)', (await diasDe(I)) === 0)
     const dN = await diasDe(N)
-    check('Nico llegó invitado → 14 días de KIRI PLUS gratis', dN > 13.9 && dN <= 14.01, dN.toFixed(2))
+    check('Nico llegó invitado → 30 días de KIRI PLUS gratis', dN > 29.9 && dN <= 30.01, dN.toFixed(2))
     await acreditarReferido(N.id)
     check('…una sola vez (repetir la activación no suma más días)', Math.abs((await diasDe(N)) - dN) < 0.01)
     const planN = await call(N, 'GET', '/plan')

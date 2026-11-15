@@ -12,6 +12,8 @@ import { resumenReferidos } from '../lib/referidos.js'
 import { avisar } from '../lib/push.js'
 import { z } from 'zod'
 import { Prisma } from '@prisma/client'
+import { estadoPruebaBienvenida } from '../lib/prueba-plus.js'
+import { registrarEvento } from '../lib/plan-eventos.js'
 
 const router = Router()
 
@@ -50,6 +52,8 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       descuentoInvitado,
       // Ya pagó su primera factura con descuento de invitado: { pct, hasta } durante ese mes
       primerMesInvitado,
+      // Prueba de PLUS (bienvenida o de invitado): días que le quedan, o recién terminada
+      pruebaPlus: await estadoPruebaBienvenida(userId, plan.tier, plan.fuente).catch(() => null),
       // Invita y gana: amigos (registrados, activos, con plan), niveles, siguiente premio y premios ganados
       referidos: { ...referidos, suscritos: referidos.pagados, descuentoAmigo: DESCUENTO_INVITADO },
     })
@@ -57,6 +61,16 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     console.error('[Plan] Error fetching plan:', error.message)
     return res.status(503).json({ error: 'No se pudo obtener la información del plan. Intente más tarde.' })
   }
+})
+
+/**
+ * POST /api/plan/evento — la app avisa que mostró o tocaron una oferta de plan.
+ * { tipo: 'oferta_vista' | 'oferta_click', origen: 'proyecciones' | 'semana_lograda' | … }
+ */
+router.post('/evento', authMiddleware, (req: Request, res: Response) => {
+  const { tipo, origen } = req.body ?? {}
+  if ((tipo === 'oferta_vista' || tipo === 'oferta_click') && typeof origen === 'string' && origen) registrarEvento(req.user!.userId, tipo, origen)
+  res.json({ ok: true })
 })
 
 /**
@@ -115,12 +129,15 @@ router.get('/available', authMiddleware, async (_req: Request, res: Response) =>
 router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
   try {
     const userEmail = (req as any).user?.correo
-    const { packageId, password, packageName, acceptTerms, acceptHabeasData, billingCycle } = req.body
+    const { packageId, password, packageName, acceptTerms, acceptHabeasData, billingCycle, origen } = req.body
 
-    if (!packageId || !password) {
+    // La contraseña ya no se pide (2026-11): la sesión de Kiri identifica a la
+    // persona y la aceptación de Términos + datos es la firma. Si una app vieja
+    // la manda, se sigue validando por el camino de antes.
+    if (!packageId) {
       return res.status(400).json({
         success: false,
-        error: 'Se requiere packageId y password.',
+        error: 'Se requiere packageId.',
       })
     }
 
@@ -153,7 +170,7 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
 
     // Call Authoriza's upgrade-plan endpoint (con la clave interna: Authoriza
     // solo acepta el descuento si viene del backend de Kiri)
-    const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/upgrade-plan`
+    const upgradeUrl = `${env.AUTHORIZA_API_URL}/api/auth/${password ? 'upgrade-plan' : 'internal/upgrade-plan'}`
     // Al contratar se aceptan de nuevo los documentos vigentes (Authoriza guarda la prueba)
     const aceptaDocumentos = acceptTerms === true && acceptHabeasData === true
     const upgradeResponse = await fetch(upgradeUrl, {
@@ -162,7 +179,7 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
       body: JSON.stringify({
         ...(descuento > 0 ? { firstInvoiceDiscountPct: descuento } : {}),
         email: userEmail,
-        password,
+        ...(password ? { password } : {}),
         packageId,
         ...(aceptaDocumentos ? consentPayload(req) : {}),
         // Mensual o anual (el anual es una sola factura por el año, con descuento)
@@ -184,6 +201,8 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
     // NOTE: We do NOT deactivate the user here — they keep using the previous plan
     // until the new contract is fully signed and activated by Authoriza's webhook.
 
+    // Con la aceptación el plan ya quedó activo en Authoriza: Kiri lo vuelve a leer ya
+    invalidarPlan((req as any).user.userId, userEmail)
     // Recordarlo para mostrar en Mi plan "tu contrato está listo en FactoNet"
     await prisma.user.update({
       where: { id: (req as any).user.userId },
@@ -195,6 +214,8 @@ router.post('/upgrade', authMiddleware, async (req: Request, res: Response) => {
       },
     }).catch(() => {})
 
+    // Medición: de qué oferta venía (proyecciones, semana_lograda, prueba_terminada…)
+    registrarEvento((req as any).user.userId, 'cambio_plan', typeof origen === 'string' && origen ? origen : 'mi_plan', `${typeof packageName === 'string' ? packageName : packageId} · ${anual ? 'anual' : 'mensual'}`)
     return res.json({
       success: true,
       message: upgradeData.message || 'Plan actualizado exitosamente.',
@@ -522,11 +543,23 @@ router.get('/factonet', authMiddleware, async (req: Request, res: Response) => {
     })
     if (!user) return res.status(404).json({ error: 'Usuario no encontrado' })
     const base = env.FACTONET_URL.replace(/\/+$/, '')
+    // Desde 2026-11 el plan pedido queda activo al aceptar: si ya lo tiene, el
+    // "cambio pendiente" terminó y no se vuelve a mostrar
+    let cambioPlan = user.cambioPlan as { plan?: string | null } | null
+    if (cambioPlan?.plan) {
+      const plan = await resolverPlan((req as any).user.userId).catch(() => null)
+      if (plan && plan.fuente === 'contrato' && plan.tier === tierDeNombre(cambioPlan.plan)) {
+        await prisma.user.update({ where: { id: (req as any).user.userId }, data: { cambioPlan: Prisma.DbNull } }).catch(() => {})
+        cambioPlan = null
+      }
+    }
     return res.json({
       url: `${base}/login`,
       correo: user.correo,
       facturaPendiente: user.facturaPendiente ?? null,
-      cambioPlan: user.cambioPlan ?? null,
+      // Directo a pagar esa factura (FactoNet la abre al entrar, también después de iniciar sesión)
+      urlPagar: (user.facturaPendiente as { codigo?: string } | null)?.codigo ? `${base}/invoices?pagar=${encodeURIComponent((user.facturaPendiente as { codigo: string }).codigo)}` : null,
+      cambioPlan: cambioPlan ?? null,
     })
   } catch (error: any) {
     console.error('[Plan] Error en /factonet:', error.message)

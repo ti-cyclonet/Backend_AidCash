@@ -8,6 +8,7 @@
  */
 import cron from 'node-cron'
 import { cerrarSemanasVencidas } from '../lib/plan-semanal.js'
+import { avisarFinDePrueba } from '../lib/prueba-plus.js'
 
 export function initPlanSemanalCron() {
   cron.schedule('30 8 * * *', async () => {
@@ -18,5 +19,14 @@ export function initPlanSemanalCron() {
       console.error('[Cron] Error cerrando semanas del plan:', error)
     }
   }, { timezone: 'America/Bogota' })
-  console.log('[Cron] Cierre del plan semanal programado (8:30 AM)')
+  // Prueba de KIRI PLUS: aviso 2 días antes de terminar y el día que termina
+  cron.schedule('0 9 * * *', async () => {
+    try {
+      const n = await avisarFinDePrueba()
+      console.log(`[Cron] Prueba de PLUS: ${n} avisos`)
+    } catch (error) {
+      console.error('[Cron] Error avisando fin de prueba:', error)
+    }
+  }, { timezone: 'America/Bogota' })
+  console.log('[Cron] Cierre del plan semanal programado (8:30 AM) y avisos de fin de prueba (9:00 AM)')
 }

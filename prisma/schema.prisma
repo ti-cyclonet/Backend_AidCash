@@ -112,6 +112,7 @@ model User {
   aiUsos                AiUso[]
   aiBonos               AiBono[]
   premiosReferido       ReferidoPremio[]
+  planEventos           PlanEvento[]
   cosechasJardin        GardenCosecha[]
   // Economía del árbol 3D: monedas (saldo + libro), cosméticos, cofres y lo equipado
   monedas               Int                @default(0)
@@ -1203,4 +1204,21 @@ model UserChest {
   @@unique([userId, origen, refId])
   @@index([userId, estado])
   @@map("user_chests")
+}
+
+/// Medición de los planes: oferta vista/tocada, límite alcanzado, cambio de plan (con su origen)
+model PlanEvento {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  tipo      String   // oferta_vista | oferta_click | limite | cambio_plan | prueba_inicio
+  origen    String   // dónde: proyecciones, semana_lograda, historial, coach, limite:nCategorias…
+  tier      String   // plan que tenía en ese momento
+  detalle   String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tipo, createdAt])
+  @@index([userId])
+  @@map("plan_eventos")
 }

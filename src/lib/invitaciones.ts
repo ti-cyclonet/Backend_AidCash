@@ -135,7 +135,7 @@ export async function acreditarReferido(nuevoUsuarioId: string): Promise<void> {
     const role = conn?.role ?? 'FRIEND'
     await recordOnboardingAction(inviterId, 'invitar_amigo')
 
-    // El invitado: 14 días de KIRI PLUS gratis (una sola vez). Quien invita
+    // El invitado: 30 días de KIRI PLUS gratis (una sola vez). Quien invita
     // gana cuando el amigo empiece a usar Kiri y cuando pague (lib/referidos.ts).
     const inviter = await prisma.user.findUnique({ where: { id: inviterId }, select: { nombre: true } })
     await darPruebaInvitado(nuevoUsuarioId, inviter?.nombre)
