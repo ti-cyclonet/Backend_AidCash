@@ -45,6 +45,8 @@ import savingsPocketsRoutes from './routes/savings-pockets.routes.js'
 import budgetCategoriesRoutes from './routes/budget-categories.routes.js'
 import openBankingRoutes from './routes/open-banking.routes.js'
 import projectionsRoutes from './routes/projections.routes.js'
+import planSemanalRoutes from './routes/plan-semanal.routes.js'
+import { initPlanSemanalCron } from './cron/plan-semanal.js'
 import supportRoutes from './routes/support.routes.js'
 import notificationsRoutes from './routes/notifications.routes.js'
 import { traducirRespuestas } from './lib/i18n.js'
@@ -155,6 +157,7 @@ app.use('/api/savings-pockets', savingsPocketsRoutes)
 app.use('/api/budget-categories', budgetCategoriesRoutes)
 app.use('/api/open-banking', openBankingRoutes)
 app.use('/api/projections', projectionsRoutes)
+app.use('/api/plan-semanal', planSemanalRoutes)
 app.use('/api/support', supportRoutes)
 
 // ─── Health check ─────────────────────────────────────────────────────────────
@@ -181,6 +184,7 @@ async function bootstrap() {
   initAutoPayCron()
   initExternalLoansCron()
   initMissionRemindersCron()
+  initPlanSemanalCron()
 
   // backlog 2048: cola de conexiones por aceptar. Con el valor por defecto, en
   // la prueba de carga (100 usuarios abriendo el Dashboard a la vez) el sistema

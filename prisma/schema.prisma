@@ -124,6 +124,7 @@ model User {
   movimientosMonedas    CoinLedger[]
   cosmeticos            UserCosmetic[]
   cofres                UserChest[]
+  semanasPlan           SemanaPlan[]
   escenariosProyeccion  ProyeccionEscenario[]
   fixedExpenses         FixedExpense[]
   savingsHistory        SavingsHistory[]
@@ -1097,6 +1098,36 @@ model GardenCosecha {
 
   @@unique([userId, fecha, tipo, indice])
   @@map("garden_cosechas")
+}
+
+// Plan semanal de gasto (Billetera): el disponible para gastar del periodo de
+// cobro se reparte en semanas (2 si cobra quincenal, 4 si mensual). La meta de
+// la semana en curso se congela la primera vez que se calcula; las semanas
+// futuras guardan su proyección. Al terminar, la semana se cierra con lo que
+// de verdad se gastó: lograda (+monedas y XP del árbol) o fallida.
+model SemanaPlan {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  // Inicio del periodo de cobro "2026-11-15" (identifica el periodo)
+  periodo     String
+  indice      Int       // 1..N
+  inicio      DateTime
+  fin         DateTime  // exclusivo
+  meta        Decimal   @default(0) @db.Decimal(12, 2)
+  congelada   Boolean   @default(false)
+  congeladaAt DateTime? @map("congelada_at")
+  gastado     Decimal?  @db.Decimal(12, 2)
+  estado      String    @default("abierta") // abierta | lograda | fallida | sin_plan
+  monedas     Int       @default(0)
+  cerradaAt   DateTime? @map("cerrada_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodo, indice])
+  @@index([estado, fin])
+  @@map("semanas_plan")
 }
 
 model ProyeccionEscenario {

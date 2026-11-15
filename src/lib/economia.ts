@@ -56,6 +56,8 @@ export const ABONOS = {
   ahorro: { monedas: 15, maxDia: 3 },
   pago: { monedas: 10, maxDia: 5 },
   deuda: { monedas: 30 },
+  // Plan semanal: semana lograda (lib/plan-semanal.ts)
+  semana: { monedas: 5, xp: 20, rachaCofre: 4 },
 } as const
 
 type TipoCofre = 'comun' | 'raro' | 'legendario'
@@ -131,6 +133,23 @@ export async function revertirAbono(userId: string, motivo: 'ahorro' | 'pago', r
 export async function premiarDeudaSaldada(userId: string, debtId: string) {
   const monedas = (await mover(userId, 'deuda', debtId, ABONOS.deuda.monedas)) ?? 0
   await prisma.userChest.createMany({ data: [{ userId, tipo: 'comun', origen: 'deuda', refId: debtId }], skipDuplicates: true })
+  return monedas
+}
+
+/**
+ * Semana del plan cumplida (gastó lo planeado o menos): +5 monedas y XP para el
+ * árbol, una sola vez por semana (refId = "periodo#semana"). Cada 4 semanas
+ * logradas seguidas llega además un cofre común.
+ */
+export async function premiarSemanaLograda(userId: string, refId: string, racha: number) {
+  const monedas = (await mover(userId, 'semana', refId, ABONOS.semana.monedas, 'Semana del plan lograda')) ?? 0
+  if (monedas > 0) {
+    await prisma.user.update({ where: { id: userId }, data: { xpFromJardin: { increment: ABONOS.semana.xp } } })
+    if (racha > 0 && racha % ABONOS.semana.rachaCofre === 0) {
+      await prisma.userChest.createMany({ data: [{ userId, tipo: 'comun', origen: 'semanas', refId }], skipDuplicates: true })
+    }
+    await revisarNivel(userId)
+  }
   return monedas
 }
 
