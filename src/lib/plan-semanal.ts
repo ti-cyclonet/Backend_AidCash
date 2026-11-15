@@ -75,14 +75,60 @@ export function partirEnSemanas(inicio: Date, fin: Date, n: number) {
 
 // ─── Distribución (misma fórmula que Frontend lib/distribucion-billetera.ts) ──
 
-/** Del saldo: primero obligaciones, luego el ahorro sugerido; el resto es para gastar. */
-export function disponibleParaGastar(saldo: number, obligaciones: number) {
-  const remanente = Math.max(0, saldo - obligaciones)
-  if (saldo <= 0 || obligaciones >= saldo) return { remanente, ahorro: 0, libre: 0, sobrecargado: obligaciones > 0 && obligaciones >= saldo }
+/** Ahorro sugerido del periodo sobre un saldo: 5/10/15/20 % según lo que deje libre de obligaciones. */
+function ahorroSugerido(saldo: number, obligaciones: number) {
+  if (saldo <= 0 || obligaciones >= saldo) return 0
+  const remanente = saldo - obligaciones
   const remanentePct = (remanente / saldo) * 100
   const pctAhorro = remanentePct >= 40 ? 20 : remanentePct >= 25 ? 15 : remanentePct >= 15 ? 10 : 5
-  const ahorro = Math.min((pctAhorro / 100) * saldo, remanente)
-  return { remanente, ahorro, libre: Math.max(0, remanente - ahorro), sobrecargado: false }
+  return Math.min((pctAhorro / 100) * saldo, remanente)
+}
+
+/**
+ * Del saldo: primero obligaciones, luego el ahorro que FALTA del periodo; el
+ * resto es para gastar. La meta de ahorro se calcula sobre el saldo de antes
+ * de ahorrar (saldo + `yaAhorrado` en el periodo): si no, al ahorrar lo
+ * sugerido el saldo baja y se volvía a sugerir un % del saldo nuevo, como si
+ * no hubiera ahorrado nada.
+ */
+export function disponibleParaGastar(saldo: number, obligaciones: number, yaAhorrado = 0) {
+  const remanente = Math.max(0, saldo - obligaciones)
+  const ahorrado = Math.max(0, yaAhorrado)
+  const metaAhorro = ahorroSugerido(saldo + ahorrado, obligaciones)
+  if (saldo <= 0 || obligaciones >= saldo) return { remanente, ahorro: 0, metaAhorro, ahorrado, libre: 0, sobrecargado: obligaciones > 0 && obligaciones >= saldo }
+  const ahorro = Math.min(Math.max(0, metaAhorro - ahorrado), remanente)
+  return { remanente, ahorro, metaAhorro, ahorrado, libre: Math.max(0, remanente - ahorro), sobrecargado: false }
+}
+
+/**
+ * Lo ahorrado (neto) en el rango que salió de la billetera: aportes a bolsillos,
+ * fondo de emergencia y ahorro libre (SavingsHistory) menos retiros, más los
+ * aportes propios a bolsillos compartidos (no los "ya ahorrado" previos).
+ */
+async function ahorradoEnRango(userId: string, inicio: Date, fin: Date) {
+  const [historial, compartidos] = await Promise.all([
+    prisma.savingsHistory.groupBy({ by: ['tipo'], where: { userId, createdAt: { gte: inicio, lt: fin }, tipo: { in: ['ahorro', 'retiro'] } }, _sum: { monto: true } }),
+    prisma.sharedDeposit.aggregate({ where: { userId, createdAt: { gte: inicio, lt: fin }, monto: { gt: 0 }, nota: { startsWith: '[APORTE]' } }, _sum: { monto: true } }),
+  ])
+  const de = (tipo: string) => Number(historial.find(h => h.tipo === tipo)?._sum.monto ?? 0)
+  return Math.max(0, de('ahorro') - de('retiro') + Number(compartidos._sum.monto ?? 0))
+}
+
+/** Semanas del plan que empiezan en [desde, hasta): para el Historial. */
+export async function semanasEnRango(userId: string, desde: Date, hasta: Date) {
+  await cerrarSemanasVencidas(new Date(), [userId])
+  const filas = await prisma.semanaPlan.findMany({ where: { userId, inicio: { gte: desde, lt: hasta } }, orderBy: { inicio: 'asc' } })
+  return filas.map(f => ({
+    inicio: ymd(f.inicio), fin: ymd(sumarDias(f.fin, -1)), indice: f.indice,
+    meta: redondear(Number(f.meta)), gastado: f.gastado != null ? redondear(Number(f.gastado)) : null,
+    estado: f.estado, monedas: f.monedas, congelada: f.congelada,
+  }))
+}
+
+/** Lo ahorrado en el periodo de cobro actual (para la distribución de Billetera). */
+export async function ahorradoDelPeriodo(userId: string, frecuenciaIngreso: string | null, diasPago: number[] | null, now: Date = new Date()) {
+  const { inicio, fin } = rangoDeCobro(frecuenciaIngreso === 'quincenal' ? 'quincenal' : 'mensual', diasPago ?? [], now)
+  return ahorradoEnRango(userId, inicio, fin)
 }
 
 // ─── Cierre de semanas ────────────────────────────────────────────────────────
@@ -250,7 +296,9 @@ export async function planSemanal(userId: string, obligacionesCliente: number, n
 
   const saldo = Number(user.cashBalance)
   const obligaciones = Math.max(0, Math.min(Number.isFinite(obligacionesCliente) ? obligacionesCliente : 0, 1e12))
-  const dist = disponibleParaGastar(saldo, obligaciones)
+  // Lo ya ahorrado en este periodo cuenta para la meta de ahorro (no se vuelve a pedir)
+  const ahorrado = await ahorradoEnRango(userId, inicio, fin)
+  const dist = disponibleParaGastar(saldo, obligaciones, ahorrado)
 
   const gastos = await prisma.impulseExpense.findMany({
     where: { userId, createdAt: { gte: inicio, lt: fin } },
@@ -274,7 +322,7 @@ export async function planSemanal(userId: string, obligacionesCliente: number, n
   // antes de los gastos de esta semana (con las mismas reglas). Sumar el gasto a
   // lo libre de hoy no sirve: si las obligaciones se comen el saldo, la meta
   // saldría igual a lo ya gastado y la semana siempre quedaría "lograda".
-  const libreAlEmpezar = disponibleParaGastar(saldo + gastadoActualEfectivo, obligaciones).libre
+  const libreAlEmpezar = disponibleParaGastar(saldo + gastadoActualEfectivo, obligaciones, ahorrado).libre
   const calculada = redondear(libreAlEmpezar * actual.dias / Math.max(1, diasRestantes))
   const fk = fila(actual.indice)
   let meta = fk?.congelada ? Number(fk.meta) : null
@@ -339,7 +387,10 @@ export async function planSemanal(userId: string, obligacionesCliente: number, n
     saldo: redondear(saldo),
     obligaciones: redondear(obligaciones),
     remanente: redondear(dist.remanente),
+    // Lo que FALTA ahorrar este periodo (0 si ya cumplió la meta) y lo ya ahorrado
     ahorro: redondear(dist.ahorro),
+    ahorroHecho: redondear(dist.ahorrado),
+    metaAhorro: redondear(dist.metaAhorro),
     disponible: redondear(dist.libre),
     semanaActual: actual.indice,
     hoyPuedes: redondear(hoy),

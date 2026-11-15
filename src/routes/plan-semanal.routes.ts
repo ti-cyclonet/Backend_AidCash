@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { authMiddleware } from '../middleware/auth.js'
-import { planSemanal, estadoPlanParaArbol } from '../lib/plan-semanal.js'
+import { planSemanal, estadoPlanParaArbol, semanasEnRango } from '../lib/plan-semanal.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -19,6 +19,27 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
   } catch (error) {
     console.error('[PlanSemanal]', error)
     res.status(500).json({ error: 'No se pudo calcular tu plan semanal' })
+  }
+})
+
+/**
+ * GET /plan-semanal/semanas?desde=YYYY-MM-DD&hasta=YYYY-MM-DD — semanas del plan
+ * que empiezan en ese rango (para el Historial: meta, gastado y sello).
+ */
+router.get('/semanas', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const fecha = (v: unknown) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v ?? ''))
+      return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null
+    }
+    const desde = fecha(req.query.desde), hasta = fecha(req.query.hasta)
+    if (!desde || !hasta || hasta < desde || hasta.getTime() - desde.getTime() > 400 * 86_400_000) {
+      res.status(400).json({ error: 'Rango inválido' }); return
+    }
+    res.json({ semanas: await semanasEnRango(req.user!.userId, desde, new Date(hasta.getFullYear(), hasta.getMonth(), hasta.getDate() + 1)) })
+  } catch (error) {
+    console.error('[PlanSemanal/semanas]', error)
+    res.status(500).json({ error: 'No se pudieron leer tus semanas' })
   }
 })
 

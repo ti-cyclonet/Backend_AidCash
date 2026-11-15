@@ -51,4 +51,13 @@ t('obligaciones mayores al saldo → nada para gastar', () => {
   assert.equal(r.libre, 0); assert.equal(r.sobrecargado, true)
 })
 t('sin saldo', () => assert.equal(disponibleParaGastar(0, 0).libre, 0))
+t('ya ahorró lo sugerido: no se vuelve a pedir ahorro', () => {
+  // Antes: saldo 3.200.000, obligaciones 465.000 → ahorro 640.000. Ahorra eso → saldo 2.560.000
+  const r = disponibleParaGastar(2_560_000, 465_000, 640_000)
+  assert.equal(r.metaAhorro, 640_000); assert.equal(r.ahorro, 0); assert.equal(r.libre, 2_095_000)
+})
+t('ahorro parcial: solo pide lo que falta', () => {
+  const r = disponibleParaGastar(2_900_000, 465_000, 300_000)
+  assert.equal(r.metaAhorro, 640_000); assert.equal(r.ahorro, 340_000); assert.equal(r.libre, 2_095_000)
+})
 console.log(`${ok} pruebas ok`)

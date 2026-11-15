@@ -13,6 +13,7 @@ import { olvidarIdioma } from '../lib/i18n.js'
 import { randomUUID } from 'crypto'
 import { buildInstallmentRevertOps } from '../lib/installments.js'
 import { serializarUnaDeuda, avisoDeCupo } from '../lib/debt-view.js'
+import { ahorradoDelPeriodo } from '../lib/plan-semanal.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -780,9 +781,13 @@ router.get('/wallet', async (req: Request, res: Response): Promise<void> => {
         walletObligaciones: true,
         walletLibre: true,
         walletEndeudamiento: true,
+        frecuenciaIngreso: true,
+        diasPago: true,
       },
     })
     if (!user) { res.status(404).json({ error: 'Usuario no encontrado' }); return }
+    // Lo ya ahorrado en el periodo de cobro: la distribución no vuelve a pedir ese ahorro
+    const ahorradoPeriodo = await ahorradoDelPeriodo(userId, user.frecuenciaIngreso, user.diasPago).catch(() => 0)
 
     res.json({
       wallet: {
@@ -791,6 +796,7 @@ router.get('/wallet', async (req: Request, res: Response): Promise<void> => {
         obligaciones: Number(user.walletObligaciones),
         libre: Number(user.walletLibre),
         endeudamiento: Number(user.walletEndeudamiento),
+        ahorradoPeriodo: Math.round(ahorradoPeriodo),
       },
     })
   } catch (error) {
