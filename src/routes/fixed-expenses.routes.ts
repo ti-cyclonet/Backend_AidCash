@@ -108,6 +108,7 @@ router.get('/', async (req: Request, res: Response): Promise<void> => {
           pagadoEstePeriodo: montoPagadoEstePeriodo >= montoPorPeriodo,
           montoPagadoEstePeriodo: montoPagadoEstePeriodo > 0 ? montoPagadoEstePeriodo : null,
           pendienteProximoPeriodo: esPendienteProximoPeriodo(f.activoDesdePeriodo, periodo),
+          periodoActual: periodo,
           pagosPeriodo: resumenPagosPeriodo(paymentsByExpense.get(f.id) ?? [], periodo),
           periodoSiguiente,
           montoAdelantado: montoAdelantado > 0 ? montoAdelantado : null,
