@@ -3,14 +3,19 @@
  * Kiri Finance — Economía del Árbol 3D (monedas, tienda y cofres)
  * ═══════════════════════════════════════════════════════════════════════════════
  *
- * El juego premia lo que el usuario hace con su plata, no tocar la pantalla:
- *  - Ahorrar: +15 monedas (máx. 3 al día). Pagar una obligación: +10 (máx. 5).
+ * El juego premia lo que el usuario hace con su plata, no tocar la pantalla, y
+ * llegar a lo caro cuesta (balance 2026-11):
+ *  - Ahorrar: +10 monedas (máx. 2 al día). Pagar una obligación: +5 (máx. 4).
  *    Si ese ahorro o pago se elimina el mismo día, las monedas se revierten.
- *  - Saldar una deuda: +30 y un cofre común, una sola vez por deuda.
+ *  - Saldar una deuda: +40 y un cofre común, una sola vez por deuda.
+ *  - Semana del plan lograda: +5 (lib/plan-semanal.ts).
  *  - Subir de nivel: un cofre raro por nivel (desde el nivel que tenía al
  *    estrenar la economía: no hay cofres retroactivos).
  *  - Regar, sacudir y cosechar dan solo XP (lib/jardin-juego.ts), nunca monedas.
- *  - Con KIRI PLUS o PRO llegan monedas cada mes (una vez por mes, al abrir la tienda).
+ *  - Pasarse a un plan PAGO (KIRI PLUS o PRO) da un bono de bienvenida, UNA sola
+ *    vez por plan. Las pruebas y los meses ganados con invitados no lo dan.
+ *  - Por ahora no se venden monedas (los paquetes quedan listos pero ocultos).
+ *  - Los cofres se compran con monedas y se pueden regalar a un amigo de Social.
  *  - Cada día hay una oferta: un artículo que el usuario no tiene con 30 % de descuento.
  *  - Habitantes: personajes de la isla que reaccionan a sus finanzas (el chanchito
  *    viene incluido); se pueden tener varios a la vez.
@@ -28,14 +33,15 @@ import { resolverPlan } from './planes.js'
 
 // ─── Catálogo (los precios viven en el servidor) ─────────────────────────────
 
+/* Lo que tiene que ver con plata (billetes, monedas, mini banco, cartera, reja dorada) es lo más caro */
 export const CATALOGO = {
-  especie: { kiri: 0, pino: 600, bonsai: 900, palmera: 1000, cerezo: 1200 },
-  color: { auto: 0, esmeralda: 250, menta: 250, bosque: 250, otono: 300, coral: 300, turquesa: 350, sakura: 350, lavanda: 400, morado: 400, noche: 400, carmesi: 450, blanco: 450, atardecer: 550, dorado: 600 },
-  hormiguero: { arena: 0, arcilla: 200, piedra: 250, musgo: 300, hongo: 500 },
-  cerca: { blanca: 0, madera: 200, bambu: 250, azul: 250, rosa: 250, dorada: 600 },
-  regadera: { azul: 0, roja: 200, verde: 200, rosa: 250, cobre: 350, dorada: 550 },
-  frutos: { auto: 0, naranja: 200, durazno: 250, limon: 250, ciruela: 300, dorada: 600 },
-  habitante: { chanchito: 0, gnomo: 450, pajaros: 800 },
+  especie: { kiri: 0, pino: 1200, bonsai: 1600, palmera: 1800, cerezo: 2200 },
+  color: { auto: 0, esmeralda: 400, menta: 400, bosque: 400, otono: 500, coral: 500, turquesa: 550, sakura: 550, lavanda: 600, morado: 600, noche: 600, carmesi: 700, blanco: 700, atardecer: 850, dorado: 1500 },
+  hormiguero: { arena: 0, arcilla: 300, piedra: 400, musgo: 450, hongo: 1100, banco: 2600 },
+  cerca: { blanca: 0, madera: 400, bambu: 550, puas: 650, piedra: 800, seto: 850, reja: 1000, dorada: 2800 },
+  regadera: { azul: 0, vaso: 300, balde: 400, pistola: 900, dorada: 1800, cartera: 2800 },
+  frutos: { auto: 0, patilla: 450, calabaza: 450, llanta: 500, balon: 550, dulces: 600, estrella: 650, navidad: 700, moneda: 2400, billete: 3000 },
+  habitante: { chanchito: 0, gnomo: 700, pajaros: 1100 },
 } as const
 export type TipoCosmetico = keyof typeof CATALOGO
 export const TIPOS = Object.keys(CATALOGO) as TipoCosmetico[]
@@ -48,24 +54,26 @@ const RANURAS = TIPOS.filter((t): t is Ranura => t !== 'habitante')
 export type Equipado = Record<Ranura, string> & { habitantes: string[] }
 export const EQUIPADO_INICIAL: Equipado = { especie: 'kiri', color: 'auto', hormiguero: 'arena', cerca: 'blanca', regadera: 'azul', frutos: 'auto', habitantes: ['chanchito'] }
 
-/** Monedas de regalo cada mes según el plan (se abonan una vez por mes). */
-export const MONEDAS_PLAN: Record<string, number> = { PLUS: 150, PRO: 400 }
+/** Bono de bienvenida al pasarse a un plan pago: una sola vez por plan. */
+export const BONO_PLAN: Record<string, number> = { PLUS: 300, PRO: 700 }
 const DESCUENTO_OFERTA = 0.3
 
 export const ABONOS = {
-  ahorro: { monedas: 15, maxDia: 3 },
-  pago: { monedas: 10, maxDia: 5 },
-  deuda: { monedas: 30 },
+  ahorro: { monedas: 10, maxDia: 2 },
+  pago: { monedas: 5, maxDia: 4 },
+  deuda: { monedas: 40 },
   // Plan semanal: semana lograda (lib/plan-semanal.ts)
   semana: { monedas: 5, xp: 20, rachaCofre: 4 },
 } as const
 
 type TipoCofre = 'comun' | 'raro' | 'legendario'
+/* Todos se compran con monedas (y se pueden regalar); el raro y el legendario son caros */
 export const COFRES: Record<TipoCofre, { monedas: [number, number]; aspecto: number; color: number; precio: number; extraSiCompleto: number }> = {
-  comun: { monedas: [10, 40], aspecto: 0, color: 0.2, precio: 0, extraSiCompleto: 0 },
-  raro: { monedas: [40, 100], aspecto: 0.25, color: 0.3, precio: 0, extraSiCompleto: 0 },
-  legendario: { monedas: [60, 120], aspecto: 1, color: 0, precio: 1500, extraSiCompleto: 150 },
+  comun: { monedas: [30, 120], aspecto: 0.15, color: 0.35, precio: 350, extraSiCompleto: 0 },
+  raro: { monedas: [80, 260], aspecto: 0.45, color: 0.35, precio: 1200, extraSiCompleto: 0 },
+  legendario: { monedas: [150, 400], aspecto: 1, color: 0, precio: 3000, extraSiCompleto: 300 },
 }
+export const esTipoCofre = (v: unknown): v is TipoCofre => v === 'comun' || v === 'raro' || v === 'legendario'
 
 /**
  * Paquetes de monedas. Se abonan SOLO cuando la tienda confirma el pago (webhook de
@@ -218,15 +226,16 @@ function ofertaDelDia(userId: string, posee: (t: TipoCosmetico, c: string) => bo
 }
 
 /**
- * Monedas del plan: PLUS y PRO reciben su regalo una vez por mes (la referencia
- * es el mes, así no se repite). Si Authoriza no responde no se abona nada: el
- * próximo intento del mes lo hará.
+ * Bono de bienvenida del plan: al pasarse a KIRI PLUS o PRO PAGO (contrato o
+ * tienda del celular) llega una vez por plan (refId "bono:PLUS"). Las pruebas,
+ * los meses ganados con invitados y las caídas de Authoriza no cuentan.
  */
-async function abonarPlanDelMes(userId: string) {
+async function abonarBonoPlan(userId: string) {
   const plan = await resolverPlan(userId).catch(() => null)
-  const monedas = plan && plan.fuente !== 'sin_conexion' ? MONEDAS_PLAN[plan.tier] ?? 0 : 0
+  const pago = !!plan && (plan.fuente === 'contrato' || plan.fuente === 'tienda')
+  const monedas = pago ? BONO_PLAN[plan!.tier] ?? 0 : 0
   if (!monedas) return { tier: plan?.tier ?? 'FREE', monedas: 0, abonadas: 0 }
-  const abonadas = (await mover(userId, 'plan', todayPeriodo().slice(0, 7), monedas, `Regalo ${plan!.tier}`)) ?? 0
+  const abonadas = (await mover(userId, 'plan', `bono:${plan!.tier}`, monedas, `Bono de bienvenida ${plan!.tier}`)) ?? 0
   return { tier: plan!.tier, monedas, abonadas }
 }
 
@@ -235,12 +244,12 @@ export async function estadoTienda(userId: string) {
   // El regalo del plan pregunta a Authoriza: si tarda, la tienda no lo espera (el abono
   // sigue en segundo plano y se ve en la próxima carga; mover() no lo duplica)
   const sinEsperar = { tier: 'FREE', monedas: 0, abonadas: 0 }
-  const regalo = abonarPlanDelMes(userId).catch(() => sinEsperar)
+  const regalo = abonarBonoPlan(userId).catch(() => sinEsperar)
   const [, regaloPlan] = await Promise.all([revisarNivel(userId), Promise.race([regalo, new Promise<typeof sinEsperar>(r => setTimeout(() => r(sinEsperar), 1500))])])
   const [u, { posee }, cofres, ahorrosHoy, pagosHoy] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId }, select: { monedas: true, jardinEquipado: true } }),
     inventario(userId),
-    prisma.userChest.findMany({ where: { userId, estado: 'pendiente' }, orderBy: { createdAt: 'asc' }, select: { id: true, tipo: true, origen: true } }),
+    prisma.userChest.findMany({ where: { userId, estado: 'pendiente' }, orderBy: { createdAt: 'asc' }, select: { id: true, tipo: true, origen: true, regalador: { select: { primerNombre: true, nombre: true } } } }),
     abonosDeHoy(userId, 'ahorro'),
     abonosDeHoy(userId, 'pago'),
   ])
@@ -249,16 +258,17 @@ export async function estadoTienda(userId: string) {
   return {
     monedas: u.monedas,
     oferta: ofertaDelDia(userId, posee),
-    plan: { tier: regaloPlan.tier, monedasMes: regaloPlan.monedas, regaloRecibido: regaloPlan.abonadas, porPlan: MONEDAS_PLAN },
+    // Bono único al pasarse a un plan pago (bonoPlan = lo que da cada plan)
+    plan: { tier: regaloPlan.tier, bono: regaloPlan.monedas, regaloRecibido: regaloPlan.abonadas, bonoPlan: BONO_PLAN },
     equipado: leerEquipado(u.jardinEquipado),
     catalogo,
-    cofres,
+    cofres: cofres.map(({ regalador, ...c }) => ({ ...c, de: regalador ? (regalador.primerNombre || regalador.nombre.split(' ')[0]) : null })),
     cofresInfo: Object.entries(COFRES).map(([tipo, c]) => ({
       tipo, monedasMin: c.monedas[0], monedasMax: c.monedas[1], probAspecto: c.aspecto, probColor: c.color, precio: c.precio,
       origen: tipo === 'comun' ? 'deuda' : tipo === 'raro' ? 'nivel' : 'compra',
     })),
-    // En la web aún no hay pasarela; en la app nativa se compran con la tienda (el cliente lo decide)
-    paquetes: PAQUETES.map(p => ({ ...p, producto: productoDePaquete(p.id), disponible: false })),
+    // Por ahora no se venden monedas: los paquetes no se muestran
+    paquetes: [] as (typeof PAQUETES[number] & { producto: string; disponible: boolean })[],
     primeraCompraDoble: !(await yaComproMonedas(userId)),
     abonos: {
       ahorro: { monedas: ABONOS.ahorro.monedas, maxDia: ABONOS.ahorro.maxDia, hoy: ahorrosHoy },
@@ -305,16 +315,51 @@ export async function comprar(userId: string, tipoIn: string, clave: string) {
   return equipar(userId, tipo, clave)
 }
 
-/** El cofre legendario solo se compra, con monedas (nunca con dinero real). */
-export async function comprarCofreLegendario(userId: string) {
-  const p = COFRES.legendario.precio, id = randomUUID()
+const NOMBRE_COFRE: Record<TipoCofre, string> = { comun: 'común', raro: 'raro', legendario: 'legendario' }
+
+/** Comprar un cofre con monedas (nunca con dinero real). */
+export async function comprarCofre(userId: string, tipo: TipoCofre) {
+  const p = COFRES[tipo].precio, id = randomUUID()
   await prisma.$transaction(async tx => {
     const cobro = await tx.user.updateMany({ where: { id: userId, monedas: { gte: p } }, data: { monedas: { decrement: p } } })
     if (cobro.count === 0) throw new EconomiaError(402, 'No te alcanzan las monedas.')
-    await tx.userChest.create({ data: { id, userId, tipo: 'legendario', origen: 'compra', refId: id } })
-    await tx.coinLedger.create({ data: { userId, motivo: 'compra', refId: `cofre:${id}`, delta: -p, fecha: todayPeriodo(), detalle: 'Cofre legendario' } })
+    await tx.userChest.create({ data: { id, userId, tipo, origen: 'compra', refId: id } })
+    await tx.coinLedger.create({ data: { userId, motivo: 'compra', refId: `cofre:${id}`, delta: -p, fecha: todayPeriodo(), detalle: `Cofre ${NOMBRE_COFRE[tipo]}` } })
   })
-  return { id, tipo: 'legendario' as const }
+  return { id, tipo }
+}
+export const comprarCofreLegendario = (userId: string) => comprarCofre(userId, 'legendario')
+
+/** ¿Son amigos (conexión aceptada en Social)? */
+async function sonAmigos(a: string, b: string) {
+  return !!(await prisma.connection.findFirst({ where: { status: 'ACCEPTED', OR: [{ requesterId: a, addresseeId: b }, { requesterId: b, addresseeId: a }] }, select: { id: true } }))
+}
+
+/**
+ * Regalar un cofre a un amigo de Social: se cobra al que regala y el cofre le
+ * llega al amigo (lo abre él, el servidor sortea su premio). Solo entre conexiones aceptadas.
+ */
+export async function regalarCofre(userId: string, amigoId: string, tipo: TipoCofre) {
+  if (amigoId === userId) throw new EconomiaError(400, 'No te puedes regalar un cofre a ti mismo.')
+  if (!(await sonAmigos(userId, amigoId))) throw new EconomiaError(403, 'Solo puedes regalar cofres a tus conexiones de Social.')
+  const [yo, amigo] = await Promise.all([
+    prisma.user.findUnique({ where: { id: userId }, select: { primerNombre: true, nombre: true } }),
+    prisma.user.findUnique({ where: { id: amigoId }, select: { primerNombre: true, nombre: true } }),
+  ])
+  if (!yo || !amigo) throw new EconomiaError(404, 'No encontramos a esa persona.')
+  const p = COFRES[tipo].precio, id = randomUUID(), nombreAmigo = amigo.primerNombre || amigo.nombre.split(' ')[0]
+  await prisma.$transaction(async tx => {
+    const cobro = await tx.user.updateMany({ where: { id: userId, monedas: { gte: p } }, data: { monedas: { decrement: p } } })
+    if (cobro.count === 0) throw new EconomiaError(402, 'No te alcanzan las monedas.')
+    await tx.userChest.create({ data: { id, userId: amigoId, tipo, origen: 'regalo', refId: id, regaladoPor: userId } })
+    await tx.coinLedger.create({ data: { userId, motivo: 'regalo', refId: `cofre:${id}`, delta: -p, fecha: todayPeriodo(), detalle: `Cofre ${NOMBRE_COFRE[tipo]} para ${nombreAmigo}` } })
+  })
+  const de = yo.primerNombre || yo.nombre.split(' ')[0]
+  await sinFallar('aviso regalo', async () => {
+    const { avisar } = await import('./push.js')
+    await avisar(amigoId, { title: `${de} te regaló un cofre ${NOMBRE_COFRE[tipo]}`, body: 'Ábrelo en tu jardín para ver qué te tocó.', tag: 'cofre-regalo', url: '/jardin', tipo: 'cofre-regalo' })
+  })
+  return { id, tipo, para: nombreAmigo }
 }
 
 // ─── Paquetes comprados en la tienda (App Store / Google Play) ─────────────────

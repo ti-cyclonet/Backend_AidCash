@@ -6,7 +6,7 @@ import { validate } from '../middleware/validate.js'
 import { resolverPlan } from '../lib/planes.js'
 import { respuestaFuncion } from '../middleware/limit-enforcement.js'
 import { estadoJardin, cosecharFruto, sacudirArbol, regarArbol, premioToques } from '../lib/jardin-juego.js'
-import { estadoTienda, comprar, comprarCofreLegendario, equipar, abrirCofre, EconomiaError, TIPOS } from '../lib/economia.js'
+import { estadoTienda, comprar, comprarCofre, regalarCofre, esTipoCofre, equipar, abrirCofre, EconomiaError, TIPOS } from '../lib/economia.js'
 
 const router = Router()
 router.use(authMiddleware)
@@ -236,13 +236,13 @@ router.get('/jardin/tienda', async (req: Request, res: Response): Promise<void> 
 
 const articuloSchema = z.object({ tipo: z.string().min(1).max(20), clave: z.string().min(1).max(30) })
 
-/** Comprar un cosmético con monedas, o el cofre legendario ({ tipo: "cofre", clave: "legendario" }). */
+/** Comprar un cosmético con monedas, o un cofre ({ tipo: "cofre", clave: "comun" | "raro" | "legendario" }). */
 router.post('/jardin/tienda/comprar', validate(articuloSchema), async (req: Request, res: Response): Promise<void> => {
   try {
     const userId = req.user!.userId, { tipo, clave } = req.body as { tipo: string; clave: string }
     if (tipo === 'cofre') {
-      if (clave !== 'legendario') { res.status(400).json({ error: 'Ese cofre no se vende.' }); return }
-      const cofre = await comprarCofreLegendario(userId)
+      if (!esTipoCofre(clave)) { res.status(400).json({ error: 'Ese cofre no existe.' }); return }
+      const cofre = await comprarCofre(userId, clave)
       res.json({ cofre, tienda: await estadoTienda(userId) })
       return
     }
@@ -251,6 +251,18 @@ router.post('/jardin/tienda/comprar', validate(articuloSchema), async (req: Requ
     res.json({ tienda: await estadoTienda(userId) })
   } catch (error) {
     responderEconomia(res, error, 'comprar', 'No se pudo completar la compra')
+  }
+})
+
+/** Regalar un cofre a un amigo de Social: se cobra al que regala y le llega al amigo. */
+const regaloSchema = z.object({ amigoId: z.string().uuid(), tipo: z.enum(['comun', 'raro', 'legendario']) })
+router.post('/jardin/tienda/regalar', validate(regaloSchema), async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { amigoId, tipo } = req.body as z.infer<typeof regaloSchema>
+    const regalo = await regalarCofre(req.user!.userId, amigoId, tipo)
+    res.json({ regalo, tienda: await estadoTienda(req.user!.userId) })
+  } catch (error) {
+    responderEconomia(res, error, 'regalar', 'No se pudo regalar el cofre')
   }
 })
 

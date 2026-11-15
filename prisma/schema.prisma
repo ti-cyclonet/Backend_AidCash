@@ -123,7 +123,8 @@ model User {
   planTiendaHasta       DateTime?          @map("plan_tienda_hasta")
   movimientosMonedas    CoinLedger[]
   cosmeticos            UserCosmetic[]
-  cofres                UserChest[]
+  cofres                UserChest[]        @relation("CofresDelUsuario")
+  cofresRegalados       UserChest[]        @relation("CofresRegalados")
   semanasPlan           SemanaPlan[]
   escenariosProyeccion  ProyeccionEscenario[]
   fixedExpenses         FixedExpense[]
@@ -1188,13 +1189,16 @@ model UserChest {
   userId    String    @map("user_id")
   tipo      String    // comun | raro | legendario
   estado    String    @default("pendiente") // pendiente | abierto
-  origen    String    // deuda | nivel | compra
+  origen    String    // deuda | nivel | compra | semanas | regalo
   refId     String    @map("ref_id")         // debtId, número de nivel o id de la compra
   premio    Json?
   createdAt DateTime  @default(now()) @map("created_at")
   abiertoAt DateTime? @map("abierto_at")
+  // Quién lo regaló (cofre comprado por un amigo de Social)
+  regaladoPor String? @map("regalado_por")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User  @relation("CofresDelUsuario", fields: [userId], references: [id], onDelete: Cascade)
+  regalador User? @relation("CofresRegalados", fields: [regaladoPor], references: [id], onDelete: SetNull)
 
   @@unique([userId, origen, refId])
   @@index([userId, estado])
