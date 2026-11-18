@@ -27,25 +27,25 @@ async function main() {
     // ── Abonos con tope y reverso ──
     for (const r of ['a1', 'a2', 'a3', 'a4']) await eco.abonarAhorro(id, r)
     t = await eco.estadoTienda(id)
-    check('Ahorrar: +15 hasta 3 veces al día (4 ahorros → 45)', t.monedas === 45, t.monedas)
+    check('Ahorrar: +10 hasta 2 veces al día (4 ahorros → 20)', t.monedas === 20, t.monedas)
     await eco.revertirAbono(id, 'ahorro', 'a2')
     t = await eco.estadoTienda(id)
-    check('Borrar un ahorro del día devuelve sus 15 monedas', t.monedas === 30, t.monedas)
+    check('Borrar un ahorro del día devuelve sus 10 monedas', t.monedas === 10, t.monedas)
     await eco.premiarDeudaSaldada(id, 'deuda-1'); await eco.premiarDeudaSaldada(id, 'deuda-1')
     t = await eco.estadoTienda(id)
-    check('Saldar una deuda: +30 y un cofre común, una sola vez', t.monedas === 60 && t.cofres.filter(c => c.tipo === 'comun').length === 1, { monedas: t.monedas, cofres: t.cofres.length })
+    check('Saldar una deuda: +40 y un cofre común, una sola vez', t.monedas === 50 && t.cofres.filter(c => c.tipo === 'comun').length === 1, { monedas: t.monedas, cofres: t.cofres.length })
 
     // ── Compras y habitantes ──
     check('Comprar sin saldo → 402', await err(() => eco.comprar(id, 'habitante', 'pajaros')) === 402)
     check('Poner un habitante que no tiene → 403', await err(() => eco.equipar(id, 'habitante', 'pajaros')) === 403)
-    await prisma.user.update({ where: { id }, data: { monedas: 3000 } })
+    await prisma.user.update({ where: { id }, data: { monedas: 9000 } })
     t = await eco.estadoTienda(id)
-    const precioGnomo = t.oferta?.tipo === 'habitante' && t.oferta.clave === 'gnomo' ? t.oferta.precio : 450
+    const precioGnomo = t.oferta?.tipo === 'habitante' && t.oferta.clave === 'gnomo' ? t.oferta.precio : 700
     const ofertaAntes = t.oferta
     await eco.comprar(id, 'habitante', 'gnomo')
     t = await eco.estadoTienda(id)
     if (!(ofertaAntes?.tipo === 'habitante' && ofertaAntes.clave === 'gnomo')) check('Comprar otra cosa no cambia la oferta del día', t.oferta?.clave === ofertaAntes?.clave && t.oferta?.tipo === ofertaAntes?.tipo, { antes: ofertaAntes, ahora: t.oferta })
-    check('Comprar un habitante lo deja en la isla y cobra su precio', t.equipado.habitantes.includes('gnomo') && t.monedas === 3000 - precioGnomo, { hab: t.equipado.habitantes, monedas: t.monedas })
+    check('Comprar un habitante lo deja en la isla y cobra su precio', t.equipado.habitantes.includes('gnomo') && t.monedas === 9000 - precioGnomo, { hab: t.equipado.habitantes, monedas: t.monedas })
     check('Comprar lo mismo dos veces → 409', await err(() => eco.comprar(id, 'habitante', 'gnomo')) === 409)
     let eq = await eco.equipar(id, 'habitante', 'gnomo')
     check('Tocar "quitar" saca al habitante de la isla (sigue siendo suyo)', !eq.habitantes.includes('gnomo') && eq.habitantes.includes('chanchito'))
@@ -68,9 +68,11 @@ async function main() {
     const antesCofre = t.monedas
     const pc = await eco.abrirCofre(id, comun.id)
     t = await eco.estadoTienda(id)
-    check('Cofre común: 10–40 monedas y nunca un aspecto', pc.monedas >= 10 && pc.monedas <= 40 && (!pc.articulo || pc.articulo.tipo === 'color') && t.monedas === antesCofre + pc.monedas, pc)
+    check('Cofre común: 30–120 monedas', pc.monedas >= 30 && pc.monedas <= 120 && t.monedas === antesCofre + pc.monedas, pc)
     check('Un cofre no se abre dos veces → 409', await err(() => eco.abrirCofre(id, comun.id)) === 409)
-    const leg = await eco.comprarCofreLegendario(id)
+    const antesLeg = (await eco.estadoTienda(id)).monedas
+    const leg = await eco.comprarCofre(id, 'legendario')
+    check('Comprar un cofre legendario cuesta 3.000', (await eco.estadoTienda(id)).monedas === antesLeg - 3000)
     const pl = await eco.abrirCofre(id, leg.id)
     check('Cofre legendario: siempre trae un aspecto o habitante que no tenía', !!pl.articulo && pl.articulo.tipo !== 'color', pl)
 
@@ -79,8 +81,25 @@ async function main() {
     t = await eco.estadoTienda(id)
     check('Lo equipado inválido vuelve a lo seguro (especie por defecto, solo habitantes que existen)', t.equipado.especie === 'kiri' && t.equipado.habitantes.join() === 'gnomo', t.equipado)
 
-    // ── Monedas del plan ──
-    check('Sin plan pago no hay regalo mensual', t.plan.monedasMes === 0 && t.plan.regaloRecibido === 0, t.plan)
+    // ── Bono del plan ──
+    check('Sin plan pago no hay bono de bienvenida', t.plan.bono === 0 && t.plan.regaloRecibido === 0, t.plan)
+    check('No se venden monedas por ahora', t.paquetes.length === 0)
+
+    // ── Regalar cofres a un amigo de Social ──
+    const amigo = await prisma.user.create({ data: { nombre: 'Ana Amiga', primerNombre: 'Ana', correo: `eco-amiga-${stamp}@local.test`, username: `ecoa${stamp}`, passwordHash: 'x', onboardingDone: true } })
+    try {
+      await prisma.user.update({ where: { id }, data: { monedas: 2000, primerNombre: 'Eco' } })
+      check('Regalar a alguien que no es tu conexión → 403', await err(() => eco.regalarCofre(id, amigo.id, 'raro')) === 403)
+      await prisma.connection.create({ data: { requesterId: id, addresseeId: amigo.id, status: 'ACCEPTED' } })
+      check('Regalarte a ti mismo → 400', await err(() => eco.regalarCofre(id, id, 'raro')) === 400)
+      const r = await eco.regalarCofre(id, amigo.id, 'raro')
+      const yo = await eco.estadoTienda(id), ella = await eco.estadoTienda(amigo.id)
+      const suyo = ella.cofres.find(c => c.id === r.id)
+      check('Regalar un cofre raro: me cobra 1.200 y le llega a ella con mi nombre', yo.monedas === 800 && !!suyo && suyo.tipo === 'raro' && suyo.de === 'Eco', { yo: yo.monedas, suyo })
+      check('Regalar sin saldo → 402', await err(() => eco.regalarCofre(id, amigo.id, 'legendario')) === 402)
+      const premio = await eco.abrirCofre(amigo.id, r.id)
+      check('Ella abre el cofre regalado (el premio es suyo)', premio.monedas >= 80 && (await eco.estadoTienda(amigo.id)).monedas === premio.monedas, premio)
+    } finally { await prisma.user.delete({ where: { id: amigo.id } }).catch(() => {}) }
   } catch (e) {
     console.error('ERROR', e)
     results.push(false)

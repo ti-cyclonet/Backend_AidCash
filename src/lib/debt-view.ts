@@ -127,6 +127,9 @@ export function serializarDeuda(
     montoParticipanteA: d.montoParticipanteA ? Number(d.montoParticipanteA) : null,
     montoParticipanteB: d.montoParticipanteB ? Number(d.montoParticipanteB) : null,
     pendienteProximoPeriodo: esPendienteProximoPeriodo(d.activoDesdePeriodo, periodo),
+    // Periodo con que se etiquetan sus pagos ahora ("2026-11", "2026-11-Q2"): el
+    // cliente lo usa para saber a qué cuota corresponde cada fecha de pago
+    periodoActual: periodo,
     pagosPeriodo: resumenPagosPeriodo(payments, periodo),
     // Pago adelantado de la PRÓXIMA cuota (ver "Adelantar próxima cuota").
     periodoSiguiente,

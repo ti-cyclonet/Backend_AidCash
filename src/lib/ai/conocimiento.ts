@@ -31,7 +31,8 @@ con sus días de pago; se cambia en Perfil).
 ## ÁRBOL KIRI (Jardín) — ruta /jardin
 - Es el punto de partida. Muestra el árbol en 3D sobre una isla flotante, su nivel y su salud.
   Arrastrar a los lados gira la isla; pellizcar (o Ctrl + rueda en PC) acerca, y vuelve sola.
-  El árbol crece de semilla a jardín próspero; en el nivel 6 florece y llegan las mariposas.
+  El árbol crece de semilla a jardín próspero; en el nivel 6 florece. Con 5 días de racha llegan las
+  mariposas y se quedan mientras la racha siga; si se pierde la racha, se van.
   "Así crece tu jardín" solo muestra los niveles y en cuál vas (no se puede cambiar el árbol desde ahí).
 - XP y niveles: Semilla → … → Jardín próspero. Niveles en 0, 850, 1.850, 4.350, 8.350 y 14.350 XP
   (el 2 pide 850, el 3 mil más, y cada nivel siguiente pide más). XP sale de misiones, rachas (40 XP), insignias (50 XP), que te rieguen
@@ -64,21 +65,28 @@ con sus días de pago; se cambia en Perfil).
   pasear.
 - Cerca del fondo de emergencia: rodea el árbol y se arma con el % del fondo frente a la meta de 3
   meses de gastos fijos. Completa, las hormigas ya no llegan al árbol ("tu fondo frenó el gasto").
-- Monedas (saldo arriba a la izquierda del jardín, toca para abrir la tienda). Se ganan SOLO con
-  plata real: ahorrar +15 (máx. 3 al día), pagar una obligación +10 (máx. 5 al día), saldar una deuda
-  +30 y un cofre común; si borras ese ahorro o pago el mismo día, se devuelven. Regar, sacudir y
-  cosechar dan XP, nunca monedas. KIRI PLUS regala 150 monedas cada mes y KIRI PRO 400.
+- Monedas (saldo arriba a la izquierda del jardín, toca para abrir la tienda). NO se compran: se ganan
+  SOLO usando Kiri, para premiar buenos hábitos: ahorrar +10 (máx. 2 al día), quedar al día con TODAS
+  las obligaciones del periodo de cobro +20 (una vez por periodo; pagar una cuota suelta no da monedas),
+  saldar una deuda +40 y un cofre común, lograr una semana del plan semanal +5 (cada 4 seguidas, un
+  cofre común), subir de nivel un cofre raro. Si borras ese ahorro o pago el mismo día, se devuelven.
+  Regar, sacudir y cosechar dan XP, nunca monedas. Al pasarse a KIRI PLUS se reciben 300 monedas y a
+  KIRI PRO 500, una sola vez por plan.
 - Tienda: Habitantes, Árboles (Kiri, Pino, Bonsái, Palmera, Cerezo), Colores de hojas, Accesorios
-  (hormiguero, cerca, regadera, frutos), Cofres y Monedas. Cada día hay una "Oferta del día" con
-  30 % de descuento que cambia a medianoche. Los paquetes de monedas dicen "Próximamente".
+  (un botón por grupo con vista previa de cada uno: hormigueros hasta casita hongo y mini banco;
+  cercas de rejas, piedra, alambre de púas o arbusto; regaderas como cartera que suelta monedas,
+  vaso, balde o pistola de agua; frutos con forma de navidad, dulces, estrella, balón, llanta,
+  patilla, calabaza, billete o moneda), Cofres y Monedas. Lo que tiene que ver con plata es lo más
+  caro. Cada día hay una "Oferta del día" con 30 % de descuento que cambia a medianoche.
 - Habitantes (viven en la isla y reaccionan a tus finanzas reales; se pueden tener varios): Chanchito
   (incluido; engorda con el ahorro del mes y le cae una moneda al ahorrar), Don Gnomo (vive atrás de la
   isla y carga la racha en un cartel; con racha en cero se duerme) y la Casita de pájaros (cantan
   alrededor del árbol al registrar un ingreso). Tocar un habitante dice lo que muestra.
-- Cofres: común (al saldar una deuda; 10-40 monedas y 20 % de un color), raro (al subir de nivel;
-  40-100 monedas, 25 % de un aspecto o habitante, si no 30 % de un color) y legendario (solo se compra
-  con 1.500 monedas; aspecto seguro). Aparecen en la isla y se abren tocándolos; el premio lo sortea
-  el servidor. Ningún cofre se vende por dinero real.
+- Cofres: común (350 monedas; 30-120 monedas o un color), raro (1.200; 80-260 monedas o un aspecto o
+  habitante) y legendario (3.000; aspecto seguro). También llegan gratis al saldar una deuda (común) y
+  al subir de nivel (raro). Se pueden regalar a un amigo de Social desde la tienda o desde su tarjeta
+  ("Regalarle un cofre"): se paga con tus monedas y él lo abre en su jardín. Aparecen en la isla y se
+  abren tocándolos; el premio lo sortea el servidor. Ningún cofre se vende por dinero real.
 - Día y noche: la isla sigue la hora del celular (amanecer, atardecer dorado y noche con luna y estrellas).
 - Botones: "Regar" (a la izquierda, mantener presionado) riega el árbol; "Invitar" (a la derecha)
   abre el enlace de invitación (Amigo, Familia o Pareja) con Copiar, Compartir y Enviar por WhatsApp.
@@ -253,9 +261,10 @@ con sus días de pago; se cambia en Perfil).
 
 ## MI PLAN Y FACTONET — ruta /mi-plan (desde Perfil o Inicio)
 - Muestra el plan actual y los planes disponibles con su precio y lo que incluyen. Para cambiarse
-  se toca "Cambiarme a…", se confirma con la contraseña de Kiri y se aceptan los términos.
-- Al cambiarse a un plan pago se crea el contrato; el usuario sigue con su plan actual hasta que lo
-  firma y paga la primera factura, y ahí se activa el nuevo.
+  se toca "Cambiarme a…", se aceptan los Términos y la autorización de datos (sin contraseña) y se
+  toca "Activar". Esa aceptación es la firma del contrato y el plan nuevo queda ACTIVO al instante.
+- La factura llega después (al correo y como aviso en Kiri) y se paga en FactoNet, en línea o
+  reportando el pago. Si no se paga, el plan se suspende por mora.
 - FactoNet es la plataforma de facturación de Cyclonet: ahí se ve y firma el contrato, se consultan
   las facturas y se reportan los pagos. Se entra con el MISMO correo y contraseña de Kiri (botón
   "Ir a FactoNet" en Mi plan).
@@ -264,8 +273,8 @@ con sus días de pago; se cambia en Perfil).
   factura pendiente, Mi plan la muestra arriba con su valor y fecha.
 
 ## PLANES KIRI (precios en COP)
-- KIRI FREE ($0): registrar gastos, ingresos y pagos sin límite; árbol, misiones y racha; fondo de
-  emergencia. Límites: 3 categorías, 3 deudas, 4 gastos fijos, 2 bolsillos, 1 "me deben",
+- KIRI FREE ($0): registrar gastos, ingresos y pagos sin límite; deudas y gastos fijos SIN límite;
+  plan semanal; árbol, misiones, racha y tienda del jardín; fondo de emergencia. Límites: 3 categorías, 2 bolsillos, 1 "me deben",
   2 ingresos extra, 2 conexiones; SIN proyecciones (son de PLUS); historial solo del mes actual;
   IA al mes: 5 mensajes con Kiri Coach, 5 dictados, 3 escaneos. Sin préstamos entre usuarios, deudas ni
   bolsillos compartidos.
@@ -281,10 +290,10 @@ con sus días de pago; se cambia en Perfil).
   ilimitado; escáner que separa por productos; insignias exclusivas; soporte prioritario; IA al
   mes: 500 mensajes, 300 dictados, 100 escaneos.
 - Las cuotas de IA se renuevan el día 1 de cada mes; Mi plan muestra "Tu uso este mes".
-- Quien se registra solo empieza en KIRI FREE (sin prueba). Quien llega con el enlace de un amigo
-  tiene 14 días de KIRI PLUS gratis.
+- Toda cuenta nueva prueba KIRI PLUS 14 días gratis al entrar por primera vez (sin tarjeta); al
+  terminar pasa sola a KIRI FREE sin perder nada. Quien llega con el enlace de un amigo tiene 30 días.
 - "Invita y gana" (Mi plan, sección Invita y gana; enlace en Social, Misiones, el árbol o por WhatsApp):
-  1) El amigo llega con el enlace: 14 días de KIRI PLUS gratis y, al suscribirse, 50% en su primer
+  1) El amigo llega con el enlace: 30 días de KIRI PLUS gratis y, al suscribirse, 50% en su primer
      mes de KIRI PLUS o 30% en KIRI PRO (solo pagando mensual).
   2) Cuando el amigo empieza a usar Kiri (3 movimientos en 2 días distintos), LOS DOS ganan +20
      mensajes, +10 dictados y +5 escaneos de Kiri Coach (se suman a la cuota de ese mes; si al mes le

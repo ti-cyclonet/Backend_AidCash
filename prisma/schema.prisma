@@ -112,6 +112,7 @@ model User {
   aiUsos                AiUso[]
   aiBonos               AiBono[]
   premiosReferido       ReferidoPremio[]
+  planEventos           PlanEvento[]
   cosechasJardin        GardenCosecha[]
   // Economía del árbol 3D: monedas (saldo + libro), cosméticos, cofres y lo equipado
   monedas               Int                @default(0)
@@ -123,7 +124,9 @@ model User {
   planTiendaHasta       DateTime?          @map("plan_tienda_hasta")
   movimientosMonedas    CoinLedger[]
   cosmeticos            UserCosmetic[]
-  cofres                UserChest[]
+  cofres                UserChest[]        @relation("CofresDelUsuario")
+  cofresRegalados       UserChest[]        @relation("CofresRegalados")
+  semanasPlan           SemanaPlan[]
   escenariosProyeccion  ProyeccionEscenario[]
   fixedExpenses         FixedExpense[]
   savingsHistory        SavingsHistory[]
@@ -1099,6 +1102,36 @@ model GardenCosecha {
   @@map("garden_cosechas")
 }
 
+// Plan semanal de gasto (Billetera): el disponible para gastar del periodo de
+// cobro se reparte en semanas (2 si cobra quincenal, 4 si mensual). La meta de
+// la semana en curso se congela la primera vez que se calcula; las semanas
+// futuras guardan su proyección. Al terminar, la semana se cierra con lo que
+// de verdad se gastó: lograda (+monedas y XP del árbol) o fallida.
+model SemanaPlan {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  // Inicio del periodo de cobro "2026-11-15" (identifica el periodo)
+  periodo     String
+  indice      Int       // 1..N
+  inicio      DateTime
+  fin         DateTime  // exclusivo
+  meta        Decimal   @default(0) @db.Decimal(12, 2)
+  congelada   Boolean   @default(false)
+  congeladaAt DateTime? @map("congelada_at")
+  gastado     Decimal?  @db.Decimal(12, 2)
+  estado      String    @default("abierta") // abierta | lograda | fallida | sin_plan
+  monedas     Int       @default(0)
+  cerradaAt   DateTime? @map("cerrada_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, periodo, indice])
+  @@index([estado, fin])
+  @@map("semanas_plan")
+}
+
 model ProyeccionEscenario {
   id              String   @id @default(uuid())
   userId          String   @map("user_id")
@@ -1157,15 +1190,35 @@ model UserChest {
   userId    String    @map("user_id")
   tipo      String    // comun | raro | legendario
   estado    String    @default("pendiente") // pendiente | abierto
-  origen    String    // deuda | nivel | compra
+  origen    String    // deuda | nivel | compra | semanas | regalo
   refId     String    @map("ref_id")         // debtId, número de nivel o id de la compra
   premio    Json?
   createdAt DateTime  @default(now()) @map("created_at")
   abiertoAt DateTime? @map("abierto_at")
+  // Quién lo regaló (cofre comprado por un amigo de Social)
+  regaladoPor String? @map("regalado_por")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User  @relation("CofresDelUsuario", fields: [userId], references: [id], onDelete: Cascade)
+  regalador User? @relation("CofresRegalados", fields: [regaladoPor], references: [id], onDelete: SetNull)
 
   @@unique([userId, origen, refId])
   @@index([userId, estado])
   @@map("user_chests")
+}
+
+/// Medición de los planes: oferta vista/tocada, límite alcanzado, cambio de plan (con su origen)
+model PlanEvento {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  tipo      String   // oferta_vista | oferta_click | limite | cambio_plan | prueba_inicio
+  origen    String   // dónde: proyecciones, semana_lograda, historial, coach, limite:nCategorias…
+  tier      String   // plan que tenía en ese momento
+  detalle   String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tipo, createdAt])
+  @@index([userId])
+  @@map("plan_eventos")
 }

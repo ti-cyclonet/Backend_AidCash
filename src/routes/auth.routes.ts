@@ -13,6 +13,7 @@ import { sendMail } from '../lib/mail.js'
 import crypto from 'crypto'
 import { ingresoPromedioMensual, partirNombre, unirNombre } from '../lib/ingresos.js'
 import { normalizarIdioma } from '../lib/i18n.js'
+import { darPruebaBienvenida } from '../lib/prueba-plus.js'
 import {
   AUTHORIZA_MANAGED_PASSWORD,
   AuthorizaRejectedError,
@@ -315,6 +316,8 @@ router.post('/login', validate(loginSchema), async (req: Request, res: Response)
         acreditarReferido(user.id).catch(() => {})
       }
     }
+    // Cuenta nueva: 14 días de KIRI PLUS de bienvenida (una sola vez; los invitados tienen 30)
+    darPruebaBienvenida(user.id).catch(() => {})
     // Avatar vigente de Authoriza (pudo cambiarse desde otra app)
     if (cred.avatarUrl && cred.avatarUrl !== user.avatarUrl) {
       await prisma.user.update({ where: { id: user.id }, data: { avatarUrl: cred.avatarUrl } }).catch(() => {})

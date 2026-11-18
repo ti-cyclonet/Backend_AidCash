@@ -30,7 +30,8 @@ async function main() {
     check('Clave equivocada → 401', (await evento({ type: 'TEST' }, 'otra-clave-cualquiera-xx')).status === 401)
     check('Evento de prueba de RevenueCat → 200', (await evento({ type: 'TEST' })).status === 200)
     const t0 = await eco.estadoTienda(u.id)
-    check('La tienda avisa que la primera compra trae el doble', t0.primeraCompraDoble === true && t0.paquetes[0].producto === 'kiri_monedas_250')
+    // Por ahora la tienda no muestra paquetes, pero el webhook de la tienda del celular sigue funcionando
+    check('Primera compra marcada como doble; paquetes ocultos en la tienda', t0.primeraCompraDoble === true && t0.paquetes.length === 0 && eco.productoDePaquete(eco.PAQUETES[0].id) === 'kiri_monedas_250')
 
     await evento({ type: 'NON_RENEWING_PURCHASE', app_user_id: u.id, product_id: 'kiri_monedas_250', transaction_id: 'tx-1', store: 'PLAY_STORE', environment: 'SANDBOX' })
     check('Primera compra de 250 → 500 monedas (doble)', await monedas() === 500, await monedas())

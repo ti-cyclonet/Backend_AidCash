@@ -9,7 +9,7 @@
  *
  * Ahora hay premios en dos momentos y niveles sin tope:
  *
- *  1. El amigo llega con el enlace → 14 días de KIRI PLUS gratis (y, cuando se
+ *  1. El amigo llega con el enlace → 30 días de KIRI PLUS gratis (y, cuando se
  *     suscriba, 50% en su primer mes de PLUS o 30% en PRO, como antes).
  *  2. El amigo se ACTIVA (3 movimientos en 2 días distintos) → los dos ganan
  *     +20 mensajes, +10 dictados y +5 escaneos de Kiri Coach. Barato para
@@ -35,7 +35,8 @@ import { periodoIA } from '../middleware/limit-enforcement.js'
 
 // ─── Reglas ──────────────────────────────────────────────────────────────────
 
-export const PRUEBA_INVITADO_DIAS = 14
+// 30 días desde 2026-11: toda cuenta nueva ya prueba 14 (lib/prueba-plus.ts); llegar invitado da más
+export const PRUEBA_INVITADO_DIAS = 30
 export const DIAS_MES_GANADO = 30
 /** Cuándo un invitado "ya usa Kiri" */
 export const ACTIVACION = { movimientos: 3, dias: 2 }
@@ -112,7 +113,7 @@ async function darBonoIA(userId: string, bono: BonoIA, motivo: string) {
  * Reserva el premio ANTES de entregarlo: si la clave ya existe, ya se dio
  * (o se está dando en otra petición) y no se repite.
  */
-async function reservarPremio(userId: string, clave: string, premio: string, detalle?: Prisma.InputJsonValue): Promise<string | null> {
+export async function reservarPremio(userId: string, clave: string, premio: string, detalle?: Prisma.InputJsonValue): Promise<string | null> {
   // Lo normal es que ya exista (se revisa en cada movimiento): mirar primero
   // evita llenar el log de errores de llave única
   if (await prisma.referidoPremio.findUnique({ where: { userId_clave: { userId, clave } }, select: { id: true } })) return null
@@ -157,7 +158,7 @@ async function mesesGratisEnFactura(userId: string, meses: number): Promise<{ ap
 }
 
 /** Alarga un plan prestado (PLUS o PRO) desde hoy o desde donde termine el actual. */
-async function alargarPrestado(userId: string, tier: 'PLUS' | 'PRO', dias: number) {
+export async function alargarPrestado(userId: string, tier: 'PLUS' | 'PRO', dias: number) {
   const campo = tier === 'PRO' ? 'pruebaProHasta' : 'pruebaPlusHasta'
   const u = await prisma.user.findUnique({ where: { id: userId }, select: { pruebaPlusHasta: true, pruebaProHasta: true } })
   const actual = u?.[campo]
@@ -260,7 +261,7 @@ export async function revisarNiveles(inviterId: string): Promise<string[]> {
 
 // ─── Momento 1: llega con el enlace (cuenta activa) ──────────────────────────
 
-/** 14 días de KIRI PLUS para el invitado nuevo (una sola vez). */
+/** 30 días de KIRI PLUS para el invitado nuevo (una sola vez). */
 export async function darPruebaInvitado(inviteeId: string, nombreQuienInvita?: string): Promise<boolean> {
   const id = await reservarPremio(inviteeId, 'prueba_invitado', `${PRUEBA_INVITADO_DIAS} días de KIRI PLUS gratis`)
   if (!id) return false

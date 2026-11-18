@@ -6,7 +6,7 @@
  * La fuente de verdad de lo que incluye cada paquete es Authoriza
  * (Backend_Authoriza/src/seeds/kiri-plan-matrix.ts). Esta es la COPIA que usa
  * Kiri para:
- *   - el plan prestado del programa de invitados (prueba de 14 días, meses ganados),
+ *   - el plan prestado del programa de invitados (prueba de 14 días para todos y 30 del invitado, meses ganados),
  *   - cuando Authoriza no responde (se usa lo último conocido o FREE),
  *   - completar variables que un paquete viejo aún no tenga.
  * Si cambias un valor en Authoriza, cámbialo aquí también.
@@ -38,6 +38,8 @@ export const MATRIZ: Record<string, VarDef> = {
   aiCoach: { displayName: 'Kiri Coach con IA', tipo: 'feature', valores: { FREE: 1, PLUS: 1, PRO: 1 } },
   socialConnections: { displayName: 'Conexiones sociales', tipo: 'feature', valores: { FREE: 1, PLUS: 1, PRO: 1 } },
   advancedReports: { displayName: 'Reportes en PDF', tipo: 'feature', valores: { FREE: 0, PLUS: 1, PRO: 1 } },
+  // Colores exclusivos del árbol: Aurora con PLUS, también Diamante con PRO (lib/economia.ts EXCLUSIVOS)
+  jardinExclusivo: { displayName: 'Color exclusivo para tu Árbol Kiri', tipo: 'feature', valores: { FREE: 0, PLUS: 1, PRO: 1 } },
   debtStrategies: { displayName: 'Estrategias de deuda (Bola de nieve / Avalancha)', tipo: 'feature', valores: { FREE: 0, PLUS: 1, PRO: 1 } },
   p2pLoans: { displayName: 'Préstamos entre usuarios', tipo: 'feature', valores: { FREE: 0, PLUS: 1, PRO: 1 } },
   sharedDebts: { displayName: 'Deudas compartidas', tipo: 'feature', valores: { FREE: 0, PLUS: 1, PRO: 1 } },
@@ -49,8 +51,9 @@ export const MATRIZ: Record<string, VarDef> = {
   exclusiveBadges: { displayName: 'Insignias exclusivas', tipo: 'feature', valores: { FREE: 0, PLUS: 0, PRO: 1 } },
   prioritySupport: { displayName: 'Soporte prioritario', tipo: 'feature', valores: { FREE: 0, PLUS: 0, PRO: 1 } },
   nCategorias: { displayName: 'categorías de presupuesto', tipo: 'quantity', valores: { FREE: 3, PLUS: 20, PRO: U } },
-  nDeudas: { displayName: 'deudas', tipo: 'quantity', valores: { FREE: 3, PLUS: U, PRO: U } },
-  nGastosFijos: { displayName: 'gastos fijos', tipo: 'quantity', valores: { FREE: 4, PLUS: U, PRO: U } },
+  // En FREE no se limita lo que debes pagar (2026-11): el plan semanal necesita todas tus obligaciones
+  nDeudas: { displayName: 'deudas', tipo: 'quantity', valores: { FREE: U, PLUS: U, PRO: U } },
+  nGastosFijos: { displayName: 'gastos fijos', tipo: 'quantity', valores: { FREE: U, PLUS: U, PRO: U } },
   nBolsillos: { displayName: 'bolsillos de ahorro', tipo: 'quantity', valores: { FREE: 2, PLUS: 10, PRO: U } },
   nMeDeben: { displayName: 'registros de "Me deben"', tipo: 'quantity', valores: { FREE: 1, PLUS: U, PRO: U } },
   nIngresosExtra: { displayName: 'ingresos extra', tipo: 'quantity', valores: { FREE: 2, PLUS: U, PRO: U } },
@@ -203,7 +206,7 @@ export async function resolverPlan(userId: string): Promise<PlanResuelto> {
   let plan = await planPropio(user)
 
   // Plan prestado por el programa de invitados: PRO (meses ganados con 10 o 25
-  // amigos) o PLUS (14 días de prueba del invitado, o un mes ganado en FREE).
+  // amigos) o PLUS (14 días de bienvenida, 30 del invitado, o un mes ganado en FREE).
   // Solo SUBE el plan: nunca baja uno pago (un PLUS que paga con meses de PRO
   // ganados usa PRO mientras duren). No hay PLUS gratis por la pareja.
   const ahora = new Date()
@@ -256,7 +259,7 @@ export function inicioHistorial(meses: number, now: Date = new Date()): Date | n
 }
 
 // ─── Invitaciones ────────────────────────────────────────────────────────────
-// El amigo invitado: 14 días de KIRI PLUS gratis y, cuando se suscribe, 50% en
+// El amigo invitado: 30 días de KIRI PLUS gratis y, cuando se suscribe, 50% en
 // su primer mes de PLUS o 30% en PRO (solo pago mensual; se aplica en la
 // primera factura, en Authoriza). Lo que gana quien invita está en
 // lib/referidos.ts (bono de Kiri Coach, mes gratis y niveles sin tope).

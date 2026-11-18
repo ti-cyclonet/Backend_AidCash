@@ -14,6 +14,7 @@
 import { Request, Response, NextFunction } from 'express'
 import { prisma } from '../config/database.js'
 import { ILIMITADO, MATRIZ, mejoraPara, resolverPlan, type PlanResuelto } from '../lib/planes.js'
+import { registrarEvento } from '../lib/plan-eventos.js'
 
 /** Variable de cantidad → recurso que se cuenta */
 export const KIRI_VARIABLE_MAP: Record<string, string> = {
@@ -112,6 +113,7 @@ export function checkLimit(variableName: string) {
 
       const currentCount = await countResource(resource, userId)
       if (currentCount >= max) {
+        registrarEvento(userId, 'limite', `limite:${variableName}`, undefined, plan.tier)
         res.status(403).json(respuestaLimite(plan, variableName, currentCount))
         return
       }
@@ -149,6 +151,7 @@ export function requireFeature(feature: string) {
       if (!userId) { next(); return }
       const plan = await resolverPlan(userId)
       if (plan.fuente === 'sin_conexion' || plan.features[feature]) { next(); return }
+      registrarEvento(userId, 'limite', `funcion:${feature}`, undefined, plan.tier)
       res.status(403).json(respuestaFuncion(plan, feature))
     } catch (error) {
       console.error('[requireFeature]', error)
